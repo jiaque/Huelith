@@ -6,6 +6,7 @@ class QTabWidget;
 class QLabel;
 class QStackedWidget;
 class QCloseEvent;
+class QMenuBar;
 
 namespace huelith::desktop {
 class CanvasView;
@@ -18,6 +19,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    bool nativeEvent(const QByteArray& event_type, void* message, qintptr* result) override;
 
 private:
     void build_menus();
@@ -31,6 +33,7 @@ private:
 
     // Qt parent ownership; these pointers only observe child widgets.
     QTabWidget* documents_{};
+    QMenuBar* menus_{};
     QStackedWidget* pages_{};
     QLabel* properties_{};
     QLabel* document_status_{};

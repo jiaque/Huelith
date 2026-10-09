@@ -10,9 +10,89 @@
 #include <QPushButton>
 #include <QTabWidget>
 #include <QTimer>
+#include <QMenuBar>
+#include <QMouseEvent>
+#ifdef Q_OS_WIN
+#define NOMINMAX
+#include <windows.h>
+#include <windowsx.h>
+#endif
 #include <limits>
 
 using huelith::desktop::MainWindow;
+
+TEST(WindowChrome, IntegratesMenuAndControlsWithoutNativeTitleBar) {
+    MainWindow window;
+    EXPECT_TRUE(window.windowFlags().testFlag(Qt::FramelessWindowHint));
+    auto* header = window.findChild<QWidget*>("windowHeader");
+    ASSERT_NE(header, nullptr);
+    EXPECT_EQ(header->height(), 36);
+    EXPECT_NE(header->findChild<QMenuBar*>(), nullptr);
+    EXPECT_NE(header->findChild<QPushButton*>("closeWindow"), nullptr);
+    window.show();
+    auto* maximize = header->findChild<QPushButton*>("maximizeWindow");
+    ASSERT_NE(maximize, nullptr);
+    maximize->click();
+    EXPECT_TRUE(window.isMaximized());
+    maximize->click();
+    EXPECT_FALSE(window.isMaximized());
+    QMouseEvent double_click(QEvent::MouseButtonDblClick, QPointF(100, 18), QPointF(100, 18),
+                            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(header, &double_click);
+    EXPECT_TRUE(window.isMaximized());
+    auto* minimize = header->findChild<QPushButton*>("minimizeWindow");
+    ASSERT_NE(minimize, nullptr);
+    minimize->click();
+    EXPECT_TRUE(window.isMinimized());
+    window.showNormal();
+}
+
+TEST(WindowChrome, CloseButtonPreservesCancelBehavior) {
+    MainWindow window;
+    window.show();
+    ASSERT_TRUE(window.create_document(huelith::CanvasSpec{}));
+    auto* close = window.findChild<QPushButton*>("closeWindow");
+    ASSERT_NE(close, nullptr);
+    QTimer::singleShot(0, &window, [] {
+        auto* prompt = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        if (prompt) {
+            prompt->done(QMessageBox::Cancel);
+        }
+    });
+    close->click();
+    EXPECT_TRUE(window.isVisible());
+    EXPECT_EQ(window.document_count(), 1);
+}
+
+TEST(WindowChrome, NativeResizeAndMaximizeRespectWorkArea) {
+#ifdef Q_OS_WIN
+    if (QApplication::platformName() != "windows") {
+        GTEST_SKIP() << "Requires native Windows platform";
+    }
+    MainWindow window;
+    window.show();
+    QApplication::processEvents();
+    const auto handle = reinterpret_cast<HWND>(window.winId());
+    RECT bounds{};
+    ASSERT_TRUE(GetWindowRect(handle, &bounds));
+    EXPECT_EQ(SendMessageW(handle, WM_NCHITTEST, 0,
+                          MAKELPARAM(bounds.right - 2, bounds.bottom - 2)), HTBOTTOMRIGHT);
+    EXPECT_EQ(SendMessageW(handle, WM_NCHITTEST, 0,
+                          MAKELPARAM(bounds.left + 2, bounds.top + 2)), HTTOPLEFT);
+    window.showMaximized();
+    QApplication::processEvents();
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    ASSERT_TRUE(GetMonitorInfoW(MonitorFromWindow(handle, MONITOR_DEFAULTTONEAREST), &monitor));
+    ASSERT_TRUE(GetWindowRect(handle, &bounds));
+    EXPECT_GE(bounds.left, monitor.rcWork.left);
+    EXPECT_GE(bounds.top, monitor.rcWork.top);
+    EXPECT_LE(bounds.right, monitor.rcWork.right);
+    EXPECT_LE(bounds.bottom, monitor.rcWork.bottom);
+#else
+    GTEST_SKIP() << "Requires Windows";
+#endif
+}
 
 TEST(Desktop, StartsWithoutDocumentAndRejectsInvalidCreationAtomically) {
     MainWindow window;
@@ -124,17 +204,22 @@ TEST(CanvasView, WhiteBackgroundRendersWhiteInsideAndDarkOutside) {
     QApplication::processEvents();
     const auto image = canvas.grab().toImage();
     EXPECT_EQ(image.pixelColor(image.width() / 2, image.height() / 2), QColor(Qt::white));
-    EXPECT_EQ(image.pixelColor(0, 0), QColor(30, 30, 30));
+    EXPECT_EQ(image.pixelColor(0, 0), QColor("#202428"));
 }
 
 TEST(Desktop, RendersWindowAndCanvasWithoutExternalAssets) {
     MainWindow window;
+    const auto path = qEnvironmentVariable("HUELITH_SCREENSHOT_PATH");
+    if (!path.isEmpty()) {
+        window.show();
+        QApplication::processEvents();
+        EXPECT_TRUE(window.grab().save(path + ".welcome.png"));
+    }
     ASSERT_TRUE(window.create_document(huelith::CanvasSpec{}));
     window.show();
     QApplication::processEvents();
     const auto screenshot = window.grab();
     ASSERT_FALSE(screenshot.isNull());
-    const auto path = qEnvironmentVariable("HUELITH_SCREENSHOT_PATH");
     if (!path.isEmpty()) {
         EXPECT_TRUE(screenshot.save(path));
     }

@@ -31,6 +31,7 @@ target_include_directories(huelith_document PUBLIC include)
 target_link_libraries(huelith_document PUBLIC huelith_build_options)
 
 add_library(huelith_desktop
+    apps/desktop/window_header.cpp
     apps/desktop/canvas_view.cpp
     apps/desktop/new_document_dialog.cpp
     apps/desktop/main_window.cpp)

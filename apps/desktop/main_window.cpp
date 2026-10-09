@@ -1,6 +1,8 @@
 #include "main_window.h"
 #include "canvas_view.h"
 #include "new_document_dialog.h"
+#include "window_header.h"
+#include "window_icons.h"
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDockWidget>
@@ -8,33 +10,91 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPalette>
+#include <QProxyStyle>
+#include <QStyleFactory>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QToolBar>
 #include <QVBoxLayout>
+#ifdef Q_OS_WIN
+#define NOMINMAX
+#include <windows.h>
+#include <windowsx.h>
+#endif
 
 namespace huelith::desktop {
+namespace {
+class EditorStyle final : public QProxyStyle {
+public:
+    EditorStyle() : QProxyStyle(QStyleFactory::create("Fusion")) {}
+    QIcon standardIcon(StandardPixmap icon, const QStyleOption* option,
+                       const QWidget* widget) const override {
+        if (icon == SP_TitleBarCloseButton || icon == SP_DockWidgetCloseButton ||
+            icon == SP_DialogCloseButton) {
+            return window_icon(WindowIcon::close);
+        }
+        return QProxyStyle::standardIcon(icon, option, widget);
+    }
+};
+} // namespace
+
 void apply_dark_theme() {
-    QApplication::setStyle("Fusion");
+    QApplication::setStyle(new EditorStyle); // QApplication takes ownership.
     QPalette palette;
-    palette.setColor(QPalette::Window, QColor(45, 45, 45));
+    palette.setColor(QPalette::Window, QColor("#252a2e"));
     palette.setColor(QPalette::WindowText, QColor(225, 225, 225));
-    palette.setColor(QPalette::Base, QColor(32, 32, 32));
+    palette.setColor(QPalette::Base, QColor("#202428"));
     palette.setColor(QPalette::AlternateBase, QColor(50, 50, 50));
     palette.setColor(QPalette::Text, QColor(225, 225, 225));
-    palette.setColor(QPalette::Button, QColor(53, 53, 53));
+    palette.setColor(QPalette::Button, QColor("#2b3035"));
     palette.setColor(QPalette::ButtonText, QColor(225, 225, 225));
     palette.setColor(QPalette::Highlight, QColor(55, 117, 190));
     palette.setColor(QPalette::HighlightedText, Qt::white);
     palette.setColor(QPalette::Disabled, QPalette::Text, QColor(125, 125, 125));
     palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(125, 125, 125));
     QApplication::setPalette(palette);
+    qApp->setStyleSheet(QStringLiteral(R"(
+        QWidget { color: #e2e5e8; font-family: 'Microsoft YaHei UI'; font-size: 13px; }
+        QMainWindow, QDialog { background: #252a2e; }
+        QWidget#windowHeader { background: #252a2e; border-bottom: 1px solid #383e44; }
+        QLabel#appTitle { font-size: 15px; font-weight: 500; }
+        QLabel#welcomeTitle { font-size: 28px; }
+        QMenuBar { background: transparent; border: none; }
+        QMenuBar::item { padding: 8px 13px; background: transparent; }
+        QMenuBar::item:selected, QMenu::item:selected { background: #354451; }
+        QMenu { background: #292e33; border: 1px solid #41474d; padding: 4px; }
+        QMenu::item { padding: 7px 28px; }
+        QPushButton { background: #2b3035; border: 1px solid #464d54; border-radius: 3px; padding: 5px 12px; }
+        QPushButton:hover { background: #363e46; }
+        QPushButton:pressed { background: #254b70; }
+        QPushButton:disabled { color: #78818a; }
+        QWidget#windowHeader QPushButton { border: none; border-radius: 0; padding: 0; font-family: 'Segoe UI'; font-size: 19px; background: transparent; }
+        QWidget#windowHeader QPushButton:hover { background: #3b4249; }
+        QWidget#windowHeader QPushButton#closeWindow:hover { background: #c42b32; }
+        QToolBar { background: #292e33; border: none; border-bottom: 1px solid #383e44; spacing: 8px; padding: 0px; }
+        QToolButton { background: transparent; border: none; padding: 4px 10px; }
+        QToolButton:hover { background: #354451; }
+        QDockWidget { border: 1px solid #383e44; }
+        QDockWidget::title { background: #252a2e; border-bottom: 1px solid #383e44; padding: 9px 12px; }
+        QMainWindow::separator { background: #1c2024; width: 3px; height: 3px; }
+        QMainWindow::separator:hover { background: #2684ff; }
+        QTabWidget::pane { border: none; }
+        QTabBar::tab { background: #22272b; padding: 6px 18px; border-right: 1px solid #383e44; border-bottom: 2px solid transparent; }
+        QTabBar::tab:selected { background: #2b3035; border-bottom: 2px solid #2684ff; }
+        QTabBar::tab:hover { background: #30373d; }
+        QStatusBar { background: #252a2e; border-top: 1px solid #383e44; min-height: 24px; }
+        QStatusBar::item { border: none; }
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #202428; border: 1px solid #464d54; border-radius: 3px; padding: 5px; }
+        QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border: 1px solid #2684ff; }
+    )"));
 }
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(tr("Huelith — 开发预览"));
+    setWindowFlag(Qt::FramelessWindowHint);
     resize(1440, 900);
     setMinimumSize(800, 560);
     setDockOptions(AllowNestedDocks | AllowTabbedDocks);
@@ -43,6 +103,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* welcome_layout = new QVBoxLayout(welcome);
     welcome_layout->addStretch();
     auto* title = new QLabel(tr("Huelith"), welcome);
+    title->setObjectName("welcomeTitle");
     title->setAlignment(Qt::AlignCenter);
     auto title_font = title->font();
     title_font.setPointSize(28);
@@ -60,6 +121,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     documents_ = new QTabWidget(pages_);
     documents_->setObjectName("documents");
     documents_->setDocumentMode(true);
+    documents_->tabBar()->setDrawBase(false);
     documents_->setTabsClosable(true);
     documents_->setMovable(true);
     pages_->addWidget(documents_);
@@ -67,8 +129,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     document_status_ = new QLabel(this);
     statusBar()->addWidget(document_status_, 1);
     statusBar()->addPermanentWidget(new QLabel(tr("M0 · 窗口与空白画布原型"), this));
+    menus_ = new QMenuBar(this);
     build_menus();
     build_panels();
+    setMenuWidget(new WindowHeader(menus_, this));
     default_layout_ = saveState(1);
     connect(documents_, &QTabWidget::currentChanged, this,
             [this] { refresh_document_state(); });
@@ -78,7 +142,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 void MainWindow::build_menus() {
-    auto* file = menuBar()->addMenu(tr("文件(&F)"));
+    auto* file = menus_->addMenu(tr("文件(&F)"));
     auto* create = file->addAction(tr("新建图片…"));
     create->setShortcut(QKeySequence::New);
     connect(create, &QAction::triggered, this, [this] { request_new_document(); });
@@ -89,7 +153,7 @@ void MainWindow::build_menus() {
     file->addSeparator();
     auto* quit = file->addAction(tr("退出"));
     connect(quit, &QAction::triggered, this, &QWidget::close);
-    auto* view = menuBar()->addMenu(tr("视图(&V)"));
+    auto* view = menus_->addMenu(tr("视图(&V)"));
     auto* fit = view->addAction(tr("适合窗口"));
     fit->setShortcut(QKeySequence("Ctrl+0"));
     connect(fit, &QAction::triggered, this, [this] {
@@ -113,10 +177,11 @@ void MainWindow::build_menus() {
 }
 
 void MainWindow::build_panels() {
-    auto* window_menu = menuBar()->addMenu(tr("窗口(&W)"));
+    auto* window_menu = menus_->addMenu(tr("窗口(&W)"));
     auto* properties_dock = new QDockWidget(tr("属性"), this);
     properties_dock->setObjectName("propertiesDock");
     properties_dock->setMinimumWidth(280);
+    properties_dock->setMaximumWidth(480);
     properties_ = new QLabel(properties_dock);
     properties_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
     properties_->setMargin(16);
@@ -133,11 +198,13 @@ void MainWindow::build_panels() {
     layers_dock->setWidget(empty_layers);
     addDockWidget(Qt::RightDockWidgetArea, layers_dock);
     splitDockWidget(properties_dock, layers_dock, Qt::Vertical);
+    resizeDocks({properties_dock, layers_dock}, {320, 320}, Qt::Horizontal);
     window_menu->addAction(layers_dock->toggleViewAction());
     auto* reset = window_menu->addAction(tr("重置工作区"));
     connect(reset, &QAction::triggered, this, &MainWindow::reset_workspace);
     auto* toolbar = new QToolBar(tr("画布视图"), this);
     toolbar->setObjectName("viewToolbar");
+    toolbar->setFixedHeight(40);
     toolbar->setMovable(false);
     auto* fit = toolbar->addAction(tr("适合窗口"));
     connect(fit, &QAction::triggered, this, [this] {
@@ -212,6 +279,47 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         return;
     }
     event->accept();
+}
+
+bool MainWindow::nativeEvent(const QByteArray& event_type, void* message, qintptr* result) {
+#ifdef Q_OS_WIN
+    const auto* native = static_cast<MSG*>(message);
+    if (native->message == WM_GETMINMAXINFO) {
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        if (GetMonitorInfoW(MonitorFromWindow(native->hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            auto* limits = reinterpret_cast<MINMAXINFO*>(native->lParam);
+            limits->ptMaxPosition = {monitor.rcWork.left - monitor.rcMonitor.left,
+                                     monitor.rcWork.top - monitor.rcMonitor.top};
+            limits->ptMaxSize = {monitor.rcWork.right - monitor.rcWork.left,
+                                 monitor.rcWork.bottom - monitor.rcWork.top};
+            const auto dpi = GetDpiForWindow(native->hwnd);
+            limits->ptMinTrackSize = {MulDiv(minimumWidth(), static_cast<int>(dpi), 96),
+                                      MulDiv(minimumHeight(), static_cast<int>(dpi), 96)};
+            *result = 0;
+            return true;
+        }
+    }
+    if (native->message == WM_NCHITTEST && !isMaximized() && !isFullScreen()) {
+        RECT bounds{};
+        if (GetWindowRect(native->hwnd, &bounds)) {
+            const int border = MulDiv(6, static_cast<int>(GetDpiForWindow(native->hwnd)), 96);
+            const int x = GET_X_LPARAM(native->lParam);
+            const int y = GET_Y_LPARAM(native->lParam);
+            const bool left = x >= bounds.left && x < bounds.left + border;
+            const bool right = x < bounds.right && x >= bounds.right - border;
+            const bool top = y >= bounds.top && y < bounds.top + border;
+            const bool bottom = y < bounds.bottom && y >= bounds.bottom - border;
+            if (top || bottom || left || right) {
+                *result = top ? (left ? HTTOPLEFT : right ? HTTOPRIGHT : HTTOP)
+                    : bottom ? (left ? HTBOTTOMLEFT : right ? HTBOTTOMRIGHT : HTBOTTOM)
+                    : left ? HTLEFT : HTRIGHT;
+                return true;
+            }
+        }
+    }
+#endif
+    return QMainWindow::nativeEvent(event_type, message, result);
 }
 
 void MainWindow::reset_workspace() {

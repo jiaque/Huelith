@@ -50,7 +50,7 @@ void CanvasView::resizeEvent(QResizeEvent* event) {
 
 void CanvasView::paintEvent(QPaintEvent*) {
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(30, 30, 30));
+    painter.fillRect(rect(), QColor("#202428"));
     const QSizeF canvas_size(spec_.width * zoom_, spec_.height * zoom_);
     const QRectF canvas((width() - canvas_size.width()) / 2.0,
                         (height() - canvas_size.height()) / 2.0,
