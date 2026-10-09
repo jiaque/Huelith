@@ -1,4 +1,5 @@
 #include "huelith/editing/project.h"
+#include "huelith/editing/tiff_io.h"
 #include <QImageReader>
 #include <QImageWriter>
 #include <QPainter>
@@ -149,15 +150,17 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
             continue;
         if (layer.kind == LayerKind::adjustment) {
             const float gain = static_cast<float>(std::exp2(layer.exposure));
+            const auto toned = apply_tone(target, layer.tone);
             for (int y = 0; y < target.height(); ++y) {
                 auto* row = reinterpret_cast<float*>(target.scanLine(y));
+                const auto* adjusted = reinterpret_cast<const float*>(toned.constScanLine(y));
                 const auto* clip =
                     base.isNull() ? nullptr : reinterpret_cast<const float*>(base.constScanLine(y));
                 for (int x = 0; x < target.width(); ++x) {
                     const float k =
                         coverage(layer, x, y) * (layer.clipped && clip ? clip[4 * x + 3] : 1.F);
                     for (int c = 0; c < 3; ++c)
-                        row[4 * x + c] *= 1 + k * (gain - 1);
+                        row[4 * x + c] += k * (adjusted[4 * x + c] * gain - row[4 * x + c]);
                 }
             }
             continue;
@@ -219,6 +222,7 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
                         row[4 * x + c] *= gain;
             }
         }
+        local = apply_tone(local, layer.tone);
         composite(target, local, layer, layer.clipped ? base : QImage{});
         if (!layer.clipped) {
             base = blank(target.size());
@@ -230,6 +234,7 @@ void validate_layers(const std::vector<Layer>& layers, QSet<QUuid>& ids, int dep
     if (depth > 32)
         throw EditError(QStringLiteral("图层嵌套超过 32 层"));
     for (const auto& layer : layers) {
+        validate_tone(layer.tone);
         if (int(layer.kind) < 0 || int(layer.kind) > int(LayerKind::composition) ||
             int(layer.blend) < 0 || int(layer.blend) > 23)
             throw EditError(QStringLiteral("未知图层类型或混合模式"));
@@ -285,11 +290,13 @@ QImage to_working(QImage image) {
     return result;
 }
 QImage import_image(const QString& path) {
+    if (path.endsWith(".tif", Qt::CaseInsensitive) || path.endsWith(".tiff", Qt::CaseInsensitive))
+        return read_tiff(path);
     QImageReader reader(path);
     reader.setAutoTransform(true);
     if (reader.format().toLower() != "png" && reader.format().toLower() != "jpeg" &&
         reader.format().toLower() != "jpg")
-        throw EditError(QStringLiteral("M1 支持 JPEG / PNG；RAW 在 M2 接入"));
+        throw EditError(QStringLiteral("支持 JPEG / PNG / TIFF；RAW 请通过显影窗口打开"));
     check_size(reader.size());
     auto image = reader.read();
     if (image.isNull())

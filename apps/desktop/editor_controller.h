@@ -36,6 +36,8 @@ class EditorController final : public QObject {
     void layer_action(const QString& operation);
     void selection_action(const QString& operation);
     void configure_menus();
+    void configure_photo_tools();
+    void show_tone(int category);
     void refresh_tools();
     void copy_pixels(bool merged, bool cut);
     void paste_pixels(bool in_place, bool into_selection);

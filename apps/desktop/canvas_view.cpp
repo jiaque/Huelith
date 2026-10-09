@@ -67,6 +67,10 @@ void CanvasView::load_state(editing::State state, bool saved) {
     mask_view = false;
     stroke_base_.reset();
     brush_draft_.reset();
+    clone_source_.reset();
+    clone_offset_.reset();
+    crop_bounds_.reset();
+    quick_mask = false;
     auto loaded = std::make_unique<editing::Project>(std::move(state));
     if (saved)
         loaded->mark_saved(loaded->revision());
@@ -86,6 +90,8 @@ void CanvasView::edit(const QString& name, const std::function<void(editing::Sta
     refresh();
 }
 void CanvasView::refresh() {
+    spec_.width = project_->state().size.width();
+    spec_.height = project_->state().size.height();
     linear_preview_ = editing::render(project_->state());
     preview_ = editing::display_image(linear_preview_, monitor_space_);
     update();
@@ -98,8 +104,10 @@ void CanvasView::preview(const editing::State& state) {
     update();
 }
 void CanvasView::set_tool(CanvasTool tool) {
-    if (tool != tool_)
+    if (tool != tool_) {
+        cancel_crop();
         commit_transform();
+    }
     tool_ = tool;
     setCursor(tool == CanvasTool::hand   ? Qt::OpenHandCursor
               : tool == CanvasTool::move ? Qt::ArrowCursor
@@ -561,16 +569,33 @@ void CanvasView::paintEvent(QPaintEvent*) {
             image = layer->mask;
     }
     painter.drawImage(0, 0, image);
+    if (quick_mask) {
+        const auto& range = display_state().selection;
+        if (!range.isNull()) {
+            QImage overlay(range.size(), QImage::Format_ARGB32_Premultiplied);
+            overlay.fill(Qt::transparent);
+            for (int y = 0; y < range.height(); ++y) {
+                auto* row = reinterpret_cast<QRgb*>(overlay.scanLine(y));
+                for (int x = 0; x < range.width(); ++x) {
+                    const int alpha = (255 - range.constScanLine(y)[x]) / 2;
+                    row[x] = qRgba(alpha, 0, 0, alpha);
+                }
+            }
+            painter.drawImage(0, 0, overlay);
+        }
+    }
     update_selection_outline();
     QPen edge(Qt::white, 1);
     edge.setCosmetic(true);
     painter.setPen(edge);
-    painter.drawPath(selection_outline_);
+    if (!quick_mask)
+        painter.drawPath(selection_outline_);
     edge.setColor(Qt::black);
     edge.setStyle(Qt::DashLine);
     edge.setDashOffset(ants_phase_);
     painter.setPen(edge);
-    painter.drawPath(selection_outline_);
+    if (!quick_mask)
+        painter.drawPath(selection_outline_);
     QPen pen(QColor("#43c9f7"));
     pen.setCosmetic(true);
     painter.setPen(pen);
@@ -623,8 +648,15 @@ void CanvasView::paintEvent(QPaintEvent*) {
                 painter.drawRect(QRectF(p.x() - 3.5, p.y() - 3.5, 7, 7));
         }
     }
-    if (tool_ == CanvasTool::brush || tool_ == CanvasTool::eraser ||
-        tool_ == CanvasTool::history_brush) {
+    if (crop_bounds_) {
+        painter.save();
+        painter.setTransform(view_transform());
+        painter.setPen(QPen(QColor("#ffffff"), 1 / zoom_));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(*crop_bounds_);
+        painter.restore();
+    }
+    if (painting_tool()) {
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(Qt::white, 1));
         painter.drawEllipse(cursor_position_, brush_radius * zoom_, brush_radius * zoom_);
@@ -799,10 +831,12 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
     guide_axis_ = show_rulers && !lock_guides ? (press_.y() < 20 ? 1 : press_.x() < 20 ? 2 : 0) : 0;
     if (guide_axis_)
         return;
-    if (tool_ == CanvasTool::brush || tool_ == CanvasTool::eraser ||
-        tool_ == CanvasTool::history_brush) {
+    if (photo_press(p, event->modifiers()))
+        return;
+    if (painting_tool()) {
         const auto* layer = editing::find_layer(project_->state().layers, active_layer);
-        if (!layer || editing::layer_locked(project_->state().layers, active_layer)) {
+        if (!quick_mask &&
+            (!layer || editing::layer_locked(project_->state().layers, active_layer))) {
             dragging_ = false;
             return;
         }
@@ -925,10 +959,7 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
 }
 void CanvasView::mouseMoveEvent(QMouseEvent* event) {
     cursor_position_ = event->position();
-    if (dragging_ &&
-        (tool_ == CanvasTool::brush || tool_ == CanvasTool::eraser ||
-         tool_ == CanvasTool::history_brush) &&
-        stroke_base_) {
+    if (dragging_ && (painting_tool()) && stroke_base_) {
         stamp_brush(image_point(last_), image_point(event->position()));
         last_ = event->position();
         update_brush_preview();
@@ -986,6 +1017,11 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
     const auto p = image_point(event->position());
+    if (tool_ == CanvasTool::crop) {
+        crop_bounds_ = QRectF(image_point(press_), p).normalized();
+        update();
+        return;
+    }
     if (node_index_ >= 0) {
         path.setElementPositionAt(node_index_, p.x(), p.y());
     } else if (guide_axis_) {
@@ -1044,6 +1080,28 @@ void CanvasView::update_brush_preview() {
     if (!stroke_base_)
         return;
     brush_draft_ = *stroke_base_;
+    if (quick_mask && (tool_ == CanvasTool::brush || tool_ == CanvasTool::eraser)) {
+        auto& range = brush_draft_->selection;
+        if (range.isNull()) {
+            range = QImage(brush_draft_->size, QImage::Format_Grayscale8);
+            range.fill(255);
+        }
+        for (int y = 0; y < range.height(); ++y)
+            for (int x = 0; x < range.width(); ++x) {
+                const double amount = qAlpha(stroke_coverage_.pixel(x, y)) / 255. * brush_opacity;
+                auto& value = range.scanLine(y)[x];
+                value = uchar(value * (1 - amount) + (tool_ == CanvasTool::eraser
+                                                          ? qGray(background.rgb())
+                                                          : qGray(foreground.rgb())) *
+                                                         amount);
+            }
+        update();
+        return;
+    }
+    if (retouch_tool()) {
+        photo_preview();
+        return;
+    }
     auto* layer = editing::find_layer(brush_draft_->layers, active_layer);
     if (!layer)
         return;
@@ -1111,7 +1169,13 @@ void CanvasView::update_brush_preview() {
 void CanvasView::apply_stroke() {
     if (brush_draft_ && brush_revision_ == project_->revision()) {
         const auto draft = *brush_draft_;
-        project_->edit(tr("画笔笔画"), [&](editing::State& state) { state = draft; });
+        QString name = quick_mask ? tr("快速蒙版笔画") : tr("画笔笔画");
+        if (retouch_tool()) {
+            const QStringList names{tr("仿制图章"), tr("修复画笔"), tr("污点修复"), tr("模糊"),
+                                    tr("锐化"),     tr("减淡"),     tr("加深"),     tr("海绵")};
+            name = names[int(tool_) - int(CanvasTool::clone)];
+        }
+        project_->edit(name, [&](editing::State& state) { state = draft; });
     }
     brush_draft_.reset();
     stroke_base_.reset();
@@ -1196,8 +1260,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* event) {
                     range.scanLine(y)[x] = range.constScanLine(y)[x] >= 128 ? 255 : 0;
         edit(tr("手工选区"),
              [&](editing::State& s) { editing::combine_range(s, range, gesture_range_); });
-    } else if (tool_ == CanvasTool::brush || tool_ == CanvasTool::eraser ||
-               tool_ == CanvasTool::history_brush)
+    } else if (painting_tool())
         apply_stroke();
     else if (tool_ == CanvasTool::pen && QLineF(press_, event->position()).length() > 3 &&
              path.elementCount() > 1) {
@@ -1253,6 +1316,14 @@ void CanvasView::wheelEvent(QWheelEvent* event) {
     event->accept();
 }
 void CanvasView::keyPressEvent(QKeyEvent* event) {
+    if (crop_bounds_ && event->key() == Qt::Key_Escape) {
+        cancel_crop();
+        return;
+    }
+    if (crop_bounds_ && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
+        commit_crop();
+        return;
+    }
     if (event->modifiers() == Qt::NoModifier && event->key() == Qt::Key_D) {
         foreground = Qt::black;
         background = Qt::white;

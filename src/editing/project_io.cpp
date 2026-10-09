@@ -12,7 +12,7 @@
 namespace huelith::editing {
 namespace {
 constexpr qint64 file_budget = 1024LL * 1024 * 1024;
-constexpr quint32 schema = 3;
+constexpr quint32 schema = 5;
 void checked(QDataStream& stream) {
     if (stream.status() != QDataStream::Ok)
         throw EditError(QStringLiteral("工程截断或数据无效"));
@@ -72,6 +72,8 @@ void write_layers(QDataStream& out, const std::vector<Layer>& layers) {
         out << layer.warped;
         for (const auto& point : layer.warp_grid)
             out << point;
+        out << layer.raw_source << QJsonDocument(layer.raw_recipe).toJson(QJsonDocument::Compact);
+        out << QJsonDocument(tone_json(layer.tone)).toJson(QJsonDocument::Compact);
         write_image(out, layer.pixels);
         write_image(out, layer.mask);
         write_layers(out, layer.children);
@@ -102,6 +104,22 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
             in >> layer.warped;
             for (auto& point : layer.warp_grid)
                 in >> point;
+        }
+        if (version >= 4) {
+            layer.raw_source = bounded_bytes(in);
+            const auto recipe = bounded_bytes(in);
+            QJsonParseError error;
+            const auto document = QJsonDocument::fromJson(recipe, &error);
+            if (error.error != QJsonParseError::NoError || !document.isObject())
+                throw EditError(QStringLiteral("RAW 配方无效"));
+            layer.raw_recipe = document.object();
+        }
+        if (version >= 5) {
+            QJsonParseError error;
+            const auto document = QJsonDocument::fromJson(bounded_bytes(in), &error);
+            if (error.error != QJsonParseError::NoError || !document.isObject())
+                throw EditError(QStringLiteral("调色配方无效"));
+            layer.tone = tone_from_json(document.object());
         }
         layer.pixels = read_image(in);
         layer.mask = read_image(in);

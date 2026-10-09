@@ -1,6 +1,7 @@
 #include "editor_controller.h"
 #include "canvas_view.h"
 #include "main_window.h"
+#include "raw_dialog.h"
 #include <QActionGroup>
 #include <QApplication>
 #include <QBuffer>
@@ -590,12 +591,23 @@ bool EditorController::open(const QString& path, bool place) {
         Layer layer;
         layer.name = QFileInfo(path).completeBaseName();
         layer.kind = LayerKind::source;
-        layer.pixels = import_image(path);
         layer.linked_path = QFileInfo(path).absoluteFilePath();
         QFile file(path);
         if (file.open(QIODevice::ReadOnly))
             layer.linked_hash =
                 QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256);
+        const auto suffix = QFileInfo(path).suffix().toLower();
+        if (QStringList{"cr3", "cr2", "nef", "arw", "dng", "raf", "rw2", "orf"}.contains(suffix)) {
+            if (!file.isOpen() || file.size() > 512LL * 1024 * 1024 || !file.seek(0))
+                throw EditError(tr("无法读取 RAW 源文件"));
+            layer.raw_source = file.readAll();
+            RawDialog dialog({layer}, window_);
+            if (dialog.exec() != QDialog::Accepted)
+                return false;
+            layer = dialog.results().front();
+        } else {
+            layer.pixels = import_image(path);
+        }
         if (place && canvas()) {
             layer.transform.translate((canvas()->spec().width - layer.pixels.width()) / 2.,
                                       (canvas()->spec().height - layer.pixels.height()) / 2.);
@@ -906,7 +918,9 @@ void EditorController::configure_menus() {
     auto* file = window_->menus_->actions().front()->menu();
     add(file, tr("打开…"), "Ctrl+O", [this] {
         const auto paths = QFileDialog::getOpenFileNames(
-            window_, tr("打开图片或工程"), {}, tr("图片 / 工程 (*.png *.jpg *.jpeg *.huelith)"));
+            window_, tr("打开图片或工程"), {},
+            tr("图片 / RAW / 工程 (*.png *.jpg *.jpeg *.tif *.tiff *.cr3 *.cr2 *.nef *.arw *.dng "
+               "*.raf *.rw2 *.orf *.huelith)"));
         for (const auto& p : paths)
             open(p);
     });
@@ -1555,14 +1569,20 @@ void EditorController::configure_menus() {
     auto* apply = options->addAction(tr("确认 ✓"));
     apply->setObjectName("transformApply");
     connect(apply, &QAction::triggered, this, [this] {
-        if (auto* c = canvas())
-            c->commit_transform();
+        if (auto* c = canvas()) {
+            if (c->cropping())
+                c->commit_crop();
+            else
+                c->commit_transform();
+        }
     });
     auto* cancel = options->addAction(tr("取消 ×"));
     cancel->setObjectName("transformCancel");
     connect(cancel, &QAction::triggered, this, [this] {
-        if (auto* c = canvas())
+        if (auto* c = canvas()) {
+            c->cancel_crop();
             c->cancel_transform();
+        }
     });
     auto* color = options->addAction(tr("前景色"));
     color->setObjectName("brushColor");
@@ -1674,11 +1694,16 @@ void EditorController::configure_menus() {
             c->update();
         }
     });
+    configure_photo_tools();
     refresh_tools();
 }
 void EditorController::refresh_tools() {
     auto* c = canvas();
     const auto tool = c ? c->tool() : CanvasTool::move;
+    if (auto* quick = window_->findChild<QAction*>("quickMaskAction")) {
+        quick->setEnabled(c != nullptr);
+        quick->setChecked(c && c->quick_mask);
+    }
     for (const auto& entry :
          {std::pair{"foregroundSwatch", c ? c->foreground : QColor(Qt::black)},
           std::pair{"backgroundSwatch", c ? c->background : QColor(Qt::white)}}) {
@@ -1711,16 +1736,24 @@ void EditorController::refresh_tools() {
                                      tool == CanvasTool::lasso || tool == CanvasTool::polygon ||
                                      tool == CanvasTool::wand || tool == CanvasTool::color_range));
         if (name.startsWith("brush"))
-            action->setVisible(c && (tool == CanvasTool::brush || tool == CanvasTool::eraser ||
-                                     tool == CanvasTool::history_brush));
+            action->setVisible(c && c->painting_tool());
+        if (name == "photo_sample")
+            action->setVisible(c && c->retouch_tool());
+        if (name == "photo_aligned")
+            action->setVisible(c && (tool == CanvasTool::clone || tool == CanvasTool::heal));
+        if (name == "photo_allLayers")
+            action->setVisible(c && tool == CanvasTool::bucket);
         if (name.startsWith("range"))
             action->setVisible(c &&
                                (tool == CanvasTool::wand || tool == CanvasTool::color_range ||
                                 name == "rangeAntialias" &&
                                     (tool == CanvasTool::rectangle || tool == CanvasTool::ellipse ||
                                      tool == CanvasTool::lasso || tool == CanvasTool::polygon)));
+        if (tool == CanvasTool::bucket &&
+            (name == "brushOpacity" || name == "rangeTolerance" || name == "rangeContiguous"))
+            action->setVisible(c != nullptr);
         if (name == "transformApply" || name == "transformCancel")
-            action->setVisible(c && c->transforming());
+            action->setVisible(c && (c->transforming() || tool == CanvasTool::crop));
     }
     if (c) {
         for (const auto& entry : {std::pair{"brushHardness", c->brush_hardness * 100},
@@ -1735,11 +1768,17 @@ void EditorController::refresh_tools() {
         for (const auto& entry :
              {std::pair{"rangeAntialias", c->antialias},
               std::pair{"rangeContiguous", c->contiguous},
-              std::pair{"brushPressure", c->pressure_enabled}, std::pair{"warpMode", c->warp_mode}})
+              std::pair{"brushPressure", c->pressure_enabled}, std::pair{"warpMode", c->warp_mode},
+              std::pair{"photoAligned", c->clone_aligned},
+              std::pair{"photoAllLayers", c->sample_all_layers}})
             if (auto* check = options->findChild<QCheckBox*>(entry.first)) {
                 QSignalBlocker blocker(check);
                 check->setChecked(entry.second);
             }
+        if (auto* scope = options->findChild<QComboBox*>("photoSample")) {
+            QSignalBlocker blocker(scope);
+            scope->setCurrentIndex(int(c->photo_brush.sample));
+        }
     }
     if (c)
         if (auto* radius = options->findChild<QDoubleSpinBox*>("brushRadius")) {

@@ -2,7 +2,10 @@
 // this DLL calls the same C++ targets linked into Huelith, without a test EXE.
 #include "canvas_view.h"
 #include "huelith/editing/project.h"
+#include "huelith/editing/raw_develop.h"
+#include "huelith/editing/tiff_io.h"
 #include "main_window.h"
+#include "raw_dialog.h"
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -16,7 +19,9 @@
 #include <QDoubleSpinBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileDialog>
 #include <QInputDialog>
 #include <QJsonArray>
@@ -58,6 +63,7 @@ struct Driver {
     std::unique_ptr<Project> project;
     std::optional<Snapshot> snapshot;
     std::unique_ptr<huelith::desktop::MainWindow> window;
+    std::unique_ptr<huelith::desktop::RawDialog> raw_window;
 };
 Driver& driver() {
     static Driver value;
@@ -75,6 +81,141 @@ Layer& target(State& s, const QJsonObject& o) {
 QJsonObject run(const QJsonObject& o) {
     auto& d = driver();
     const auto op = o.value("op").toString();
+    if (op == "tone_probe") {
+        const auto settings = tone_from_json(o.value("settings").toObject());
+        QImage input(1, 1, QImage::Format_RGBA32FPx4_Premultiplied);
+        input.setColorSpace(working_space());
+        const auto values = o.value("rgba").toArray();
+        if (values.size() != 4)
+            throw EditError("RGBA required");
+        auto* source = reinterpret_cast<float*>(input.bits());
+        for (int i = 0; i < 4; ++i)
+            source[i] = float(values[i].toDouble());
+        const auto image = apply_tone(input, settings);
+        const auto* pixel = reinterpret_cast<const float*>(image.constBits());
+        QJsonArray result;
+        for (int i = 0; i < 4; ++i)
+            result.append(pixel[i]);
+        if (o.contains("save")) {
+            State state;
+            state.name = "tone";
+            state.size = {1, 1};
+            Layer layer;
+            layer.name = "pixels";
+            layer.pixels = input;
+            layer.tone = settings;
+            state.layers = {layer};
+            save_project({state, 1}, o.value("save").toString());
+            const auto loaded = load_project(o.value("save").toString());
+            if (loaded.layers[0].tone != settings || render(loaded) != render(state))
+                throw EditError("Tone persistence mismatch");
+        }
+        return {{"rgba", result}};
+    }
+    if (op == "tiff_roundtrip") {
+        QImage image(1024, 2, QImage::Format_RGBA64);
+        image.setColorSpace(QColorSpace::AdobeRgb);
+        for (int y = 0; y < image.height(); ++y) {
+            auto* row = reinterpret_cast<QRgba64*>(image.scanLine(y));
+            for (int x = 0; x < image.width(); ++x)
+                row[x] = QRgba64::fromRgba64(quint16(x * 61), quint16(65535 - x * 47), 12345,
+                                             y == 0 ? 65535 : 32768);
+        }
+        write_tiff(image, o.value("path").toString(), 16,
+                   std::atomic_bool{o.value("cancelled").toBool()});
+        const auto reopened = read_tiff(o.value("path").toString());
+        const auto expected = to_working(image);
+        double maximum{};
+        for (int y = 0; y < image.height(); ++y) {
+            const auto* actual = reinterpret_cast<const float*>(reopened.constScanLine(y));
+            const auto* reference = reinterpret_cast<const float*>(expected.constScanLine(y));
+            for (int x = 0; x < image.width() * 4; ++x)
+                maximum = std::max(maximum, double(std::abs(actual[x] - reference[x])));
+        }
+        return {
+            {"maximumError", maximum}, {"width", reopened.width()}, {"height", reopened.height()}};
+    }
+    if (op == "raw_window") {
+        Layer layer;
+        layer.kind = LayerKind::source;
+        layer.name = "RAW validation";
+        layer.linked_path = o.value("path").toString();
+        QFile source(layer.linked_path);
+        if (!source.open(QIODevice::ReadOnly))
+            throw EditError(source.errorString());
+        layer.raw_source = source.readAll();
+        layer.raw_recipe = {{"denoise", o.value("denoise").toBool()}, {"directml", true}};
+        QSettings().setValue("raw/model", o.value("model").toString());
+        d.raw_window = std::make_unique<huelith::desktop::RawDialog>(std::vector<Layer>{layer},
+                                                                     d.window.get());
+        d.raw_window->open();
+        return {{"ok", true}};
+    }
+    if (op == "raw_window_state") {
+        auto* dialog = d.raw_window.get();
+        if (!dialog)
+            throw EditError("RAW window missing");
+        if (o.contains("exposure"))
+            dialog->findChild<QDoubleSpinBox*>("rawExposure")
+                ->setValue(o.value("exposure").toDouble());
+        if (o.contains("capture"))
+            dialog->grab().save(o.value("capture").toString());
+        if (o.value("accept").toBool())
+            dialog->accept();
+        if (o.value("reject").toBool())
+            dialog->reject();
+        if (o.contains("save")) {
+            if (dialog->result() != QDialog::Accepted)
+                throw EditError("RAW not accepted");
+            State state;
+            state.name = "RAW persistence validation";
+            state.size = dialog->results().front().pixels.size();
+            state.layers = dialog->results();
+            save_project({state, 1}, o.value("save").toString());
+            const auto reopened = load_project(o.value("save").toString());
+            if (reopened.layers.front().raw_source != state.layers.front().raw_source ||
+                reopened.layers.front().raw_recipe != state.layers.front().raw_recipe ||
+                reopened.layers.front().pixels != state.layers.front().pixels)
+                throw EditError("RAW persistence mismatch");
+        }
+        return {{"ready", dialog->findChild<QPushButton*>("rawApply")->isEnabled()},
+                {"visible", dialog->isVisible()},
+                {"result", dialog->result()},
+                {"status", dialog->findChild<QLabel*>("rawStatus")->text()},
+                {"recipe", dialog->results().front().raw_recipe}};
+    }
+    if (op == "raw_develop") {
+        RawOptions options;
+        options.denoise = o.value("denoise").toBool();
+        options.directml = o.value("directml").toBool(true);
+        options.model_path = o.value("model").toString();
+        options.exposure = o.value("exposure").toDouble();
+        std::atomic_bool cancelled{o.value("cancelled").toBool()};
+        QJsonArray progress;
+        QElapsedTimer timer;
+        timer.start();
+        const auto result = develop_raw(
+            o.value("path").toString(), options, cancelled, [&](int completed, int total) {
+                progress.append(QJsonArray{completed, total});
+                if (o.contains("cancelAfter") && completed >= o.value("cancelAfter").toInt())
+                    cancelled.store(true);
+            });
+        if (o.contains("floatOutput")) {
+            QFile file(o.value("floatOutput").toString());
+            if (!file.open(QIODevice::WriteOnly) ||
+                file.write(reinterpret_cast<const char*>(result.image.constBits()),
+                           result.image.sizeInBytes()) != result.image.sizeInBytes())
+                throw EditError("Cannot write float evidence");
+        }
+        if (o.contains("preview"))
+            if (!display_image(result.image).save(o.value("preview").toString()))
+                throw EditError("Cannot write RAW preview evidence");
+        return {{"metadata", result.metadata},
+                {"progress", progress},
+                {"width", result.image.width()},
+                {"height", result.image.height()},
+                {"seconds", timer.elapsed() / 1000.}};
+    }
     if (op == "init") {
         if (!d.application) {
             QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
@@ -668,6 +809,8 @@ QJsonObject run(const QJsonObject& o) {
                         ++rangeCount;
         const auto origin = c->view_transform().map(QPointF());
         return {{"tool", int(c->tool())},
+                {"quickMask", c->quick_mask},
+                {"screenMode", d.window->property("screenMode").toInt()},
                 {"pending", c->transforming()},
                 {"sx", matrix.m11()},
                 {"sy", matrix.m22()},
@@ -728,7 +871,7 @@ QJsonObject run(const QJsonObject& o) {
         auto* panel = d.window->findChild<QWidget*>("toolGrid");
         if (panel) {
             for (auto* button : panel->findChildren<QToolButton*>()) {
-                if (!button->defaultAction())
+                if (!button->defaultAction() || !button->objectName().startsWith("toolButton_"))
                     continue;
                 if (o.contains("click") &&
                     button->defaultAction()->data().toInt() == o.value("click").toInt())
@@ -766,6 +909,7 @@ QJsonObject run(const QJsonObject& o) {
         return {{"ok", d.window->grab().save(o.value("path").toString())}};
     }
     if (op == "shutdown") {
+        d.raw_window.reset();
         d.window.reset();
         d.project.reset();
         d.snapshot.reset();

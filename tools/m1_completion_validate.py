@@ -192,7 +192,7 @@ def main():
    call('window_open',path=str(legacy));assert layer('legacy layer')['tx']==70 and not layer('legacy layer')['warped'] and probe(x=120,y=110)['rgba'][3]>0
   test('schema2_layer_document_migrates_without_mesh',legacy_schema)
   def chrome():
-   scene([dict(name='image',color='white')]);chrome=call('window_chrome');buttons=chrome['buttons'];assert len(buttons)==14
+   scene([dict(name='image',color='white')]);chrome=call('window_chrome');buttons=chrome['buttons'];assert len(buttons)>=14
    assert len({b['x'] for b in buttons})==2 and all(b['visible'] for b in buttons)
    for a in buttons:
     for b in buttons:

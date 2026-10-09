@@ -1,7 +1,9 @@
 #pragma once
 #include "huelith/editing/blend.h"
+#include "huelith/editing/tone.h"
 #include <QColorSpace>
 #include <QImage>
+#include <QJsonObject>
 #include <QMap>
 #include <QPainterPath>
 #include <QString>
@@ -49,6 +51,9 @@ struct Layer {
     bool gradient{};
     QString linked_path;
     QByteArray linked_hash;
+    QByteArray raw_source;  // Original camera bytes; re-development survives a missing linked file.
+    QJsonObject raw_recipe; // Versioned source-level parameters, separate from layer effects.
+    ToneSettings tone;
     std::vector<Layer> children; // Bottom to top, also editable nested composition content.
 };
 struct State {

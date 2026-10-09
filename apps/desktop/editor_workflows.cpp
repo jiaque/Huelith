@@ -1,5 +1,6 @@
 #include "canvas_view.h"
 #include "editor_controller.h"
+#include "huelith/editing/tiff_io.h"
 #include "main_window.h"
 #include <QAction>
 #include <QApplication>
@@ -234,7 +235,7 @@ void EditorController::show_export() {
     layout->addLayout(form);
     auto* format = new QComboBox(&dialog);
     format->setObjectName("exportFormat");
-    format->addItems({"PNG", "JPEG"});
+    format->addItems({"PNG", "JPEG", "TIFF"});
     form->addRow(tr("格式"), format);
     auto* profile = new QComboBox(&dialog);
     profile->setObjectName("exportProfile");
@@ -242,7 +243,7 @@ void EditorController::show_export() {
     form->addRow(tr("色彩空间"), profile);
     auto* depth = new QComboBox(&dialog);
     depth->setObjectName("exportDepth");
-    depth->addItems({tr("8位"), tr("16位（PNG）")});
+    depth->addItems({tr("8位"), tr("16位")});
     form->addRow(tr("位深"), depth);
     auto* width = new QSpinBox(&dialog);
     width->setObjectName("exportWidth");
@@ -346,8 +347,13 @@ void EditorController::show_export() {
         return;
     const bool jpeg = format->currentIndex() == 1;
     const auto path = QFileDialog::getSaveFileName(
-        window_, tr("导出图片"), c->project().state().name + (jpeg ? ".jpg" : ".png"),
-        jpeg ? "JPEG (*.jpg)" : "PNG (*.png)");
+        window_, tr("导出图片"),
+        c->project().state().name + (jpeg                          ? ".jpg"
+                                     : format->currentIndex() == 2 ? ".tif"
+                                                                   : ".png"),
+        jpeg                          ? "JPEG (*.jpg)"
+        : format->currentIndex() == 2 ? "TIFF (*.tif *.tiff)"
+                                      : "PNG (*.png)");
     if (path.isEmpty())
         return;
     if (!jpeg && depth->currentIndex() == 1) {
@@ -366,6 +372,11 @@ void EditorController::show_export() {
             painter.end();
             converted = filled;
         }
+    }
+    if (format->currentIndex() == 2) {
+        write_tiff(converted, path, depth->currentIndex() == 1 ? 16 : 8, std::atomic_bool{false},
+                   c->project().state().ppi);
+        return;
     }
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))

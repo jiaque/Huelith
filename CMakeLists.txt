@@ -30,9 +30,23 @@ add_library(huelith_document src/document/canvas_spec.cpp)
 target_include_directories(huelith_document PUBLIC include)
 target_link_libraries(huelith_document PUBLIC huelith_build_options)
 
-add_library(huelith_editing src/editing/project.cpp src/editing/project_io.cpp src/editing/blend.cpp)
+find_package(libraw CONFIG REQUIRED)
+set(TIFF_INCLUDE_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include" CACHE PATH "Pinned TIFF headers" FORCE)
+set(TIFF_LIBRARY_RELEASE "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/tiff.lib" CACHE FILEPATH "Pinned TIFF library" FORCE)
+set(TIFF_LIBRARY_DEBUG "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/lib/tiffd.lib" CACHE FILEPATH "Pinned TIFF debug library" FORCE)
+set(CMAKE_FIND_PACKAGE_PREFER_CONFIG FALSE)
+set(CMAKE_DISABLE_FIND_PACKAGE_Tiff TRUE)
+find_package(TIFF MODULE REQUIRED)
+set(HUELITH_ORT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/dependencies/onnxruntime-directml" CACHE PATH "Pinned ONNX Runtime DirectML native SDK")
+add_library(huelith_ort SHARED IMPORTED)
+set_target_properties(huelith_ort PROPERTIES
+    IMPORTED_IMPLIB "${HUELITH_ORT_DIR}/onnxruntime.lib"
+    IMPORTED_LOCATION "${HUELITH_ORT_DIR}/onnxruntime.dll"
+    INTERFACE_INCLUDE_DIRECTORIES "${HUELITH_ORT_DIR}")
+add_library(huelith_editing src/editing/project.cpp src/editing/project_io.cpp src/editing/blend.cpp src/editing/photo_operations.cpp src/editing/raw_develop.cpp src/editing/tiff_io.cpp src/editing/tone.cpp)
 target_include_directories(huelith_editing PUBLIC include)
-target_link_libraries(huelith_editing PUBLIC huelith_build_options Qt6::Gui)
+target_link_libraries(huelith_editing PUBLIC huelith_build_options Qt6::Gui PRIVATE libraw::raw_r TIFF::TIFF huelith_ort)
+target_compile_definitions(huelith_editing PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 
 # M0 isolated research prototypes. These do not add M1 product editing features.
 add_library(huelith_validation src/validation/state.cpp src/validation/image_math.cpp src/validation/artistic_blend.cpp)
@@ -49,6 +63,11 @@ add_library(huelith_desktop
     apps/desktop/application_icon.cpp
     apps/desktop/window_header.cpp
     apps/desktop/canvas_view.cpp
+    apps/desktop/canvas_photo.cpp
+    apps/desktop/photo_tools.cpp
+    apps/desktop/raw_dialog.cpp
+    apps/desktop/tone_panel.cpp
+    apps/desktop/tone_workflow.cpp
     apps/desktop/editor_controller.cpp
     apps/desktop/editor_workflows.cpp
     apps/desktop/new_document_dialog.cpp
@@ -116,3 +135,7 @@ if(HUELITH_PYTHON_DRIVER)
     add_library(huelith_python_driver SHARED tools/python_driver.cpp)
     target_link_libraries(huelith_python_driver PRIVATE huelith_desktop)
 endif()
+
+foreach(raw_runtime onnxruntime.dll onnxruntime_providers_shared.dll DirectML.dll)
+    configure_file("${HUELITH_ORT_DIR}/${raw_runtime}" "${CMAKE_CURRENT_BINARY_DIR}/${raw_runtime}" COPYONLY)
+endforeach()

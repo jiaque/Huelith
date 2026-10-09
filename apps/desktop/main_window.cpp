@@ -142,7 +142,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(pages_);
     document_status_ = new QLabel(this);
     statusBar()->addWidget(document_status_, 1);
-    statusBar()->addPermanentWidget(new QLabel(tr("M1 · 通用图片编辑"), this));
+    statusBar()->addPermanentWidget(new QLabel(tr("M2 · 开发中"), this));
     menus_ = new QMenuBar(this);
     build_menus();
     build_panels();

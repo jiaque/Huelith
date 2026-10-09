@@ -1,5 +1,6 @@
 #pragma once
 #include "huelith/document/canvas_spec.h"
+#include "huelith/editing/photo_operations.h"
 #include "huelith/editing/project.h"
 #include <QWidget>
 #include <array>
@@ -22,7 +23,18 @@ enum class CanvasTool {
     color_range,
     zoom,
     path_select,
-    history_brush
+    history_brush,
+    bucket,
+    eyedropper,
+    clone,
+    heal,
+    spot,
+    blur,
+    sharpen,
+    dodge,
+    burn,
+    sponge,
+    crop
 };
 class CanvasView final : public QWidget {
   public:
@@ -96,6 +108,18 @@ class CanvasView final : public QWidget {
     bool snap{true};
     double rotation{};
     double brush_radius{20};
+    editing::RetouchOptions photo_brush;
+    bool clone_aligned{true};
+    bool sample_all_layers{};
+    bool quick_mask{};
+    void toggle_quick_mask();
+    [[nodiscard]] bool painting_tool() const;
+    [[nodiscard]] bool retouch_tool() const;
+    [[nodiscard]] bool cropping() const {
+        return crop_bounds_.has_value();
+    }
+    void commit_crop();
+    void cancel_crop();
     QColor foreground{Qt::black};
     QColor background{Qt::white};
     editing::RangeOp range_operation{editing::RangeOp::replace};
@@ -119,6 +143,11 @@ class CanvasView final : public QWidget {
     void tabletEvent(QTabletEvent*) override;
 
   private:
+    bool photo_press(QPointF point, Qt::KeyboardModifiers modifiers);
+    void photo_preview();
+    std::optional<QPointF> clone_source_;
+    std::optional<QPointF> clone_offset_;
+    std::optional<QRectF> crop_bounds_;
     QRectF target_rect() const;
     QTransform parent_transform() const;
     const editing::State& visible_state() const;
