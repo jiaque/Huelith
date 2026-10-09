@@ -33,6 +33,7 @@ class EditorController final : public QObject {
     void layer_action(const QString& operation);
     void selection_action(const QString& operation);
     void configure_menus();
+    void refresh_tools();
     void build_properties();
     void update_recent(const QString& path);
     void autosave();

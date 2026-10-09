@@ -151,7 +151,7 @@ void MainWindow::build_menus() {
     create->setShortcut(QKeySequence::New);
     connect(create, &QAction::triggered, this, [this] { request_new_document(); });
     auto* close = file->addAction(tr("关闭图片"));
-    close->setShortcut(QKeySequence::Close);
+    close->setShortcuts({QKeySequence("Ctrl+W"), QKeySequence("Ctrl+F4")});
     connect(close, &QAction::triggered, this,
             [this] { request_close_document(documents_->currentIndex()); });
     file->addSeparator();

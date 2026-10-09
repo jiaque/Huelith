@@ -1,6 +1,7 @@
 #include "editor_controller.h"
 #include "canvas_view.h"
 #include "main_window.h"
+#include <QActionGroup>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -33,6 +34,7 @@
 #include <QSlider>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QSvgRenderer>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolBar>
@@ -144,6 +146,7 @@ EditorController::EditorController(MainWindow* window) : QObject(window), window
     dock->setWidget(panel);
     connect(layers_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int column) {
         if (auto* c = canvas()) {
+            c->commit_transform();
             c->active_layer = item->data(0, Qt::UserRole).toUuid();
             c->mask_target = column == 2;
             c->mask_view =
@@ -214,6 +217,7 @@ void EditorController::command(const QString&, const std::function<void()>& acti
         guarded(action);
 }
 void EditorController::bind(CanvasView* c) {
+    c->tool_changed = [this] { refresh_tools(); };
     c->changed = [this] {
         QTimer::singleShot(0, this, [this] {
             window_->refresh_document_state();
@@ -236,6 +240,10 @@ void EditorController::refresh() {
     auto* c = canvas();
     if (c) {
         const auto& s = c->project().state();
+        if (!find_layer(s.layers, c->active_layer)) {
+            c->active_layer = s.layers.empty() ? QUuid{} : s.layers.back().id;
+            c->mask_target = false;
+        }
         add_rows(layers_, nullptr, s.layers, c->active_layer);
         for (QTreeWidgetItemIterator it(layers_); *it; ++it)
             if (selected.contains((*it)->data(0, Qt::UserRole).toUuid()))
@@ -254,12 +262,17 @@ void EditorController::refresh() {
             isolated_->setChecked(layer->isolated);
             locked_->setChecked(layer->locked);
             clipping_->setChecked(layer->clipped);
+            mask_->setEnabled(!layer->mask.isNull());
+            linked_->setEnabled(!layer->mask.isNull());
+            isolated_->setVisible(layer->kind == LayerKind::group ||
+                                  layer->kind == LayerKind::composition);
         }
         const int index = window_->documents_->indexOf(c);
         if (index >= 0)
             window_->documents_->setTabText(index, s.name + (c->project().dirty() ? " *" : ""));
     }
     refreshing_ = false;
+    refresh_tools();
 }
 void EditorController::build_properties() {
     auto* dock = window_->findChild<QDockWidget*>("propertiesDock");
@@ -431,6 +444,8 @@ bool EditorController::open(const QString& path, bool place) {
             layer.linked_hash =
                 QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256);
         if (place && canvas()) {
+            layer.transform.translate((canvas()->spec().width - layer.pixels.width()) / 2.,
+                                      (canvas()->spec().height - layer.pixels.height()) / 2.);
             canvas()->edit(tr("置入图片"), [&](State& s) { s.layers.push_back(layer); });
             canvas()->active_layer = layer.id;
         } else {
@@ -447,6 +462,9 @@ bool EditorController::open(const QString& path, bool place) {
             canvas()->active_layer = layer.id;
         }
     }
+    layers_->clearSelection();
+    if (canvas())
+        canvas()->prepare_inserted_layer();
     update_recent(path);
     refresh();
     return true;
@@ -459,6 +477,7 @@ bool EditorController::save(CanvasView* c, bool save_as, bool asynchronous) {
     }
     if (!c)
         return false;
+    c->commit_transform();
     QString path = c->filename;
     if (save_as || path.isEmpty())
         path = QFileDialog::getSaveFileName(window_, tr("保存 Huelith 工程"),
@@ -778,17 +797,45 @@ void EditorController::configure_menus() {
     auto* edit = window_->menus_->addMenu(tr("编辑(&E)"));
     add(edit, tr("撤销"), "Ctrl+Z", [this] {
         if (auto* c = canvas()) {
+            c->cancel_transform();
             c->project().undo();
             c->refresh();
         }
     });
     add(edit, tr("重做"), "Ctrl+Shift+Z", [this] {
         if (auto* c = canvas()) {
+            c->cancel_transform();
             c->project().redo();
             c->refresh();
         }
     });
-    add(edit, tr("复制合成"), "Ctrl+C", [this] {
+    add(edit, tr("复制"), "Ctrl+C", [this] {
+        if (auto* c = canvas()) {
+            c->commit_transform();
+            auto state = c->project().state();
+            const auto* selected = find_layer(state.layers, c->active_layer);
+            if (!selected)
+                return;
+            auto layer = *selected;
+            layer.visible = true;
+            layer.transform = c->current_layer_transform();
+            state.layers = {layer};
+            auto image = display_image(render(state));
+            QRect bounds;
+            for (int y = 0; y < image.height(); ++y)
+                for (int x = 0; x < image.width(); ++x) {
+                    auto color = image.pixelColor(x, y);
+                    if (!state.selection.isNull())
+                        color.setAlpha(color.alpha() * state.selection.constScanLine(y)[x] / 255);
+                    image.setPixelColor(x, y, color);
+                    if (color.alpha())
+                        bounds = bounds.united(QRect(x, y, 1, 1));
+                }
+            if (!bounds.isEmpty())
+                QApplication::clipboard()->setImage(image.copy(bounds));
+        }
+    });
+    add(edit, tr("复制合成"), "Ctrl+Shift+C", [this] {
         if (auto* c = canvas()) {
             auto image = display_image(render(c->project().state()));
             if (!c->project().state().selection.isNull()) {
@@ -811,9 +858,12 @@ void EditorController::configure_menus() {
             Layer l;
             l.name = tr("粘贴");
             l.pixels = to_working(image);
+            l.transform.translate((c->spec().width - image.width()) / 2.,
+                                  (c->spec().height - image.height()) / 2.);
             c->edit(tr("粘贴"), [&](State& s) { s.layers.push_back(l); });
             layers_->clearSelection();
             c->active_layer = l.id;
+            c->prepare_inserted_layer();
             refresh();
         }
     });
@@ -825,7 +875,7 @@ void EditorController::configure_menus() {
     for (const auto& text : {tr("复制图层"), tr("蒙版"), tr("反相蒙版"), tr("蒙版转选区"),
                              tr("路径转矢量蒙版"), tr("上移"), tr("下移"), tr("嵌入资源"),
                              tr("盖印可见副本"), tr("合并可见图层"), tr("删除")})
-        add(layers, text, {}, [this, text] {
+        add(layers, text, text == tr("复制图层") ? QString("Ctrl+J") : QString{}, [this, text] {
             if (text == tr("合并可见图层") &&
                 QMessageBox::question(
                     window_, text,
@@ -850,7 +900,13 @@ void EditorController::configure_menus() {
             l.linked_hash.clear();
         });
     });
-    add(layers, tr("数值变换…"), "Ctrl+T", [this] {
+    add(edit, tr("自由变换"), "Ctrl+T", [this] {
+        if (auto* c = canvas()) {
+            c->begin_transform();
+            c->setFocus();
+        }
+    });
+    add(layers, tr("数值变换…"), {}, [this] {
         auto* c = canvas();
         if (!c)
             return;
@@ -890,7 +946,11 @@ void EditorController::configure_menus() {
          {tr("全选"), tr("取消选区"), tr("反选"), tr("羽化"), tr("扩张"), tr("收缩"), tr("平滑"),
           tr("保存选区"), tr("载入选区"), tr("保存路径"), tr("路径转选区"), tr("亮度范围"),
           tr("线性渐变范围"), tr("径向渐变范围")})
-        add(selection, text, text == tr("取消选区") ? "Ctrl+D" : QString{},
+        add(selection, text,
+            text == tr("取消选区") ? "Ctrl+D"
+            : text == tr("全选")   ? "Ctrl+A"
+            : text == tr("反选")   ? "Ctrl+Shift+I"
+                                   : QString{},
             [this, text] { selection_action(text); });
     auto* view = window_->menus_->actions().at(1)->menu();
     add(view, tr("旋转视图…"), {}, [this] {
@@ -1174,57 +1234,148 @@ void EditorController::configure_menus() {
     const QStringList labels{tr("移动 V"), tr("抓手 H"), tr("矩形 M"),  tr("椭圆"),
                              tr("套索 L"), tr("多边形"), tr("钢笔 P"),  tr("画笔 B"),
                              tr("橡皮 E"), tr("魔棒 W"), tr("颜色范围")};
-    for (int i = 0; i < labels.size(); ++i) {
-        QPixmap icon(24, 24);
-        icon.fill(Qt::transparent);
-        {
-            QPainter painter(&icon);
-            painter.setRenderHint(QPainter::Antialiasing);
-            painter.setPen(QPen(QColor("#d8dde2"), 1.5));
-            if (i == 2)
-                painter.drawRect(4, 5, 16, 14);
-            else if (i == 3)
-                painter.drawEllipse(4, 5, 16, 14);
-            else if (i == 0) {
-                painter.drawLine(12, 2, 12, 22);
-                painter.drawLine(2, 12, 22, 12);
-            } else if (i == 6) {
-                painter.drawLine(5, 19, 19, 5);
-                painter.drawRect(3, 17, 4, 4);
-                painter.drawRect(17, 3, 4, 4);
-            } else {
-                QFont font = painter.font();
-                font.setPixelSize(17);
-                painter.setFont(font);
-                painter.drawText(
-                    icon.rect(), Qt::AlignCenter,
-                    QStringList{"V", "H", "M", "O", "L", "G", "P", "B", "E", "W", "C"}[i]);
-            }
-        }
-        auto* action = tools->addAction(QIcon(icon), labels[i]);
+    tools->setStyleSheet(
+        "QToolBar { spacing:2px; } QToolButton { width:28px; height:28px; padding:3px; border:1px "
+        "solid transparent; border-radius:3px; } QToolButton:hover { background:#383e44; } "
+        "QToolButton:checked { background:#245a86; border-color:#529ad3; }");
+    auto* group = new QActionGroup(tools);
+    group->setObjectName("toolActions");
+    const QStringList drawings{
+        R"(<path d="M5 3v16l4-4 4 7 3-2-4-6h7Z"/>)",
+        R"(<path d="M8 12V6q0-3 2-1v6-7q2-3 3 0v7-6q2-2 3 0v7-4q2-2 3 1v7q0 6-6 6h-1q-3 0-5-4l-4-5q0-3 3-1l2 2"/>)",
+        R"(<rect x="4" y="5" width="16" height="14" stroke-dasharray="2 2"/>)",
+        R"(<ellipse cx="12" cy="12" rx="8" ry="7" stroke-dasharray="2 2"/>)",
+        R"(<path d="M7 17C-3 10 5 3 13 4s11 10 2 13q-8 3-9-1t5 0q1 5-5 6"/>)",
+        R"(<path d="m4 5 16 3-4 12-12-5Z" stroke-dasharray="3 2"/>)",
+        R"(<path d="m4 20 3-11L19 3l-6 12Z M4 20l6-8"/><circle cx="11" cy="11" r="2"/>)",
+        R"(<path d="M9 14 19 3q3-1 2 2L12 17Z M9 15q-6-1-5 4l-2 2q8 1 8-5"/>)",
+        R"(<path d="m4 13 9-10 8 7-10 11H8Z M8 9l8 7 M11 21h10"/>)",
+        R"(<path d="m4 21 13-13 3 3L7 24 M14 11l3 3 M6 2v6 M3 5h6 M18 1v4 M16 3h4 M21 17v5 M19 19h4"/>)",
+        R"(<circle cx="9" cy="10" r="6"/><circle cx="15" cy="15" r="6"/><path d="m8 12 4-4 M10 15l5-5"/>)"};
+    for (int i : {0, 2, 3, 4, 5, 9, 10, 6, 7, 8, 1}) {
+        const auto svg =
+            ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 26 26'><g fill='none' "
+             "stroke='#d5d9df' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'>" +
+             drawings[i] + "</g></svg>")
+                .toUtf8();
+        QPixmap pixmap(48, 48);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        QSvgRenderer renderer(svg);
+        renderer.render(&painter);
+        painter.end();
+        pixmap.setDevicePixelRatio(2);
+        auto* action = tools->addAction(QIcon(pixmap), labels[i]);
+        action->setCheckable(true);
+        action->setData(i);
+        group->addAction(action);
         action->setToolTip(labels[i]);
         connect(action, &QAction::triggered, this, [this, i] {
-            if (auto* c = canvas())
+            if (auto* c = canvas()) {
                 c->set_tool(static_cast<CanvasTool>(i));
+                c->setFocus();
+            }
         });
     }
     auto* options = window_->findChild<QToolBar*>("viewToolbar");
     auto* operation = new QComboBox(options);
     operation->addItems({tr("替换选区"), tr("相加"), tr("相减"), tr("相交")});
-    options->addWidget(operation);
+    options->addWidget(operation)->setObjectName("selectionOptions");
     connect(operation, &QComboBox::currentIndexChanged, this, [this](int index) {
         if (auto* c = canvas())
             c->range_operation = static_cast<RangeOp>(index);
     });
     auto* radius = new QDoubleSpinBox(options);
+    radius->setObjectName("brushRadius");
     radius->setRange(1, 500);
     radius->setValue(20);
     radius->setPrefix(tr("笔刷半径 "));
-    options->addWidget(radius);
+    options->addWidget(radius)->setObjectName("brushOptions");
     connect(radius, &QDoubleSpinBox::valueChanged, this, [this](double value) {
         if (auto* c = canvas())
             c->brush_radius = value;
     });
+    for (const auto& entry : {std::pair{"autoSelect", tr("自动选择：图层")},
+                              std::pair{"transformControls", tr("显示变换控件")},
+                              std::pair{"keepAspect", tr("保持比例")}}) {
+        auto* check = new QCheckBox(entry.second, options);
+        check->setObjectName(entry.first);
+        check->setChecked(true);
+        options->addWidget(check)->setObjectName(QString("move_") + entry.first);
+        connect(check, &QCheckBox::toggled, this, [this, name = QString(entry.first)](bool value) {
+            if (auto* c = canvas()) {
+                if (name == "autoSelect")
+                    c->auto_select = value;
+                else if (name == "transformControls")
+                    c->show_transform_controls = value;
+                else
+                    c->keep_aspect = value;
+                c->update();
+            }
+        });
+    }
+    auto* apply = options->addAction(tr("确认 ✓"));
+    apply->setObjectName("transformApply");
+    connect(apply, &QAction::triggered, this, [this] {
+        if (auto* c = canvas())
+            c->commit_transform();
+    });
+    auto* cancel = options->addAction(tr("取消 ×"));
+    cancel->setObjectName("transformCancel");
+    connect(cancel, &QAction::triggered, this, [this] {
+        if (auto* c = canvas())
+            c->cancel_transform();
+    });
+    auto* color = options->addAction(tr("前景色"));
+    color->setObjectName("brushColor");
+    connect(color, &QAction::triggered, this, [this] {
+        if (auto* c = canvas()) {
+            const auto selected = QColorDialog::getColor(c->foreground, window_, tr("前景色"));
+            if (selected.isValid()) {
+                c->foreground = selected;
+                refresh_tools();
+            }
+        }
+    });
+    refresh_tools();
+}
+void EditorController::refresh_tools() {
+    auto* c = canvas();
+    const auto tool = c ? c->tool() : CanvasTool::move;
+    if (auto* group = window_->findChild<QActionGroup*>("toolActions"))
+        for (auto* action : group->actions()) {
+            action->setChecked(action->data().toInt() == int(tool));
+            action->setEnabled(c != nullptr);
+        }
+    auto* options = window_->findChild<QToolBar*>("viewToolbar");
+    if (!options)
+        return;
+    for (auto* action : options->actions()) {
+        const auto name = action->objectName();
+        if (name.startsWith("move_"))
+            action->setVisible(c && tool == CanvasTool::move);
+        if (name == "selectionOptions")
+            action->setVisible(c && (tool == CanvasTool::rectangle || tool == CanvasTool::ellipse ||
+                                     tool == CanvasTool::lasso || tool == CanvasTool::polygon ||
+                                     tool == CanvasTool::wand || tool == CanvasTool::color_range));
+        if (name == "brushOptions" || name == "brushColor")
+            action->setVisible(c && (tool == CanvasTool::brush || tool == CanvasTool::eraser));
+        if (name == "transformApply" || name == "transformCancel")
+            action->setVisible(c && c->transforming());
+    }
+    if (c)
+        if (auto* radius = options->findChild<QDoubleSpinBox*>("brushRadius")) {
+            QSignalBlocker blocker(radius);
+            radius->setValue(c->brush_radius);
+        }
+    if (c)
+        for (const auto& entry : {std::pair{"autoSelect", c->auto_select},
+                                  std::pair{"transformControls", c->show_transform_controls},
+                                  std::pair{"keepAspect", c->keep_aspect}})
+            if (auto* check = options->findChild<QCheckBox*>(entry.first)) {
+                QSignalBlocker blocker(check);
+                check->setChecked(entry.second);
+            }
 }
 bool EditorController::eventFilter(QObject* object, QEvent* event) {
     if (object == window_ && event->type() == QEvent::DragEnter) {

@@ -5,18 +5,22 @@
 #include "main_window.h"
 #include <QAction>
 #include <QApplication>
+#include <QClipboard>
 #include <QDialog>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QSettings>
 #include <QSlider>
 #include <QTabWidget>
 #include <QTimer>
+#include <QToolBar>
 #include <QTreeWidget>
+#include <QWheelEvent>
 #include <memory>
 #include <optional>
 
@@ -206,6 +210,123 @@ QJsonObject run(const QJsonObject& o) {
         QApplication::processEvents();
         return {{"ok", true}};
     }
+    if (op == "window_clipboard") {
+        QApplication::clipboard()->setImage(QImage(o.value("path").toString()));
+        return {{"ok", true}};
+    }
+    if (op == "window_key") {
+        auto* c = d.window->active_canvas();
+        c->setFocus();
+        const auto keys = QKeySequence(o.value("key").toString());
+        const auto combination = keys[0];
+        QKeyEvent press(o.value("release").toBool() ? QEvent::KeyRelease : QEvent::KeyPress,
+                        combination.key(), combination.keyboardModifiers());
+        QApplication::sendEvent(c, &press);
+        QApplication::processEvents();
+        return {{"ok", true}};
+    }
+    if (op == "window_gesture") {
+        auto* c = d.window->active_canvas();
+        QPointF a, b;
+        if (o.contains("handle")) {
+            const auto points = c->transform_handles();
+            a = points[std::size_t(o.value("handle").toInt(4))];
+            const double scale = o.value("scale").toDouble(.5);
+            b = points[0] + QPointF((a.x() - points[0].x()) * o.value("scaleX").toDouble(scale),
+                                    (a.y() - points[0].y()) * o.value("scaleY").toDouble(scale));
+            if (o.contains("rotate")) {
+                const auto center = (points[0] + points[4]) / 2.;
+                const auto radial = a - center;
+                a += radial / QLineF(QPointF(), radial).length() * 14.;
+                QTransform rotation;
+                rotation.rotate(o.value("rotate").toDouble());
+                b = center + rotation.map(a - center);
+            }
+
+        } else {
+            a = c->view_transform().map(
+                QPointF(o.value("x").toDouble(20), o.value("y").toDouble(20)));
+            b = c->view_transform().map(
+                QPointF(o.value("endX").toDouble(120), o.value("endY").toDouble(100)));
+        }
+        const auto modifiers = Qt::KeyboardModifiers(o.value("modifiers").toInt());
+        QMouseEvent press(QEvent::MouseButtonPress, a, c->mapToGlobal(a.toPoint()), Qt::LeftButton,
+                          Qt::LeftButton, modifiers);
+        QApplication::sendEvent(c, &press);
+        QMouseEvent move(QEvent::MouseMove, b, c->mapToGlobal(b.toPoint()), Qt::NoButton,
+                         Qt::LeftButton, modifiers);
+        QApplication::sendEvent(c, &move);
+        QMouseEvent release(QEvent::MouseButtonRelease, b, c->mapToGlobal(b.toPoint()),
+                            Qt::LeftButton, Qt::NoButton, modifiers);
+        QApplication::sendEvent(c, &release);
+        QApplication::processEvents();
+        return {{"ok", true}};
+    }
+    if (op == "window_view") {
+        auto* c = d.window->active_canvas();
+        c->rotation = o.value("rotation").toDouble();
+        c->set_zoom(o.value("zoom").toDouble(1));
+        return {{"ok", true}};
+    }
+    if (op == "window_wheel") {
+        auto* c = d.window->active_canvas();
+        const QPointF point(c->width() / 2., c->height() / 2.);
+        QWheelEvent event(point, c->mapToGlobal(point.toPoint()), QPoint(), QPoint(0, 120),
+                          Qt::NoButton, Qt::KeyboardModifiers(o.value("modifiers").toInt()),
+                          Qt::NoScrollPhase, false);
+        QApplication::sendEvent(c, &event);
+        return {{"ok", true}};
+    }
+    if (op == "window_interaction_state") {
+        auto* c = d.window->active_canvas();
+        const auto* layer = find_layer(c->project().state().layers, c->active_layer);
+        const auto matrix = c->current_layer_transform();
+        QJsonArray handles;
+        for (const auto& point : c->transform_handles())
+            handles.append(QJsonArray{point.x(), point.y()});
+        QJsonArray options, actions;
+        for (auto* action : d.window->findChild<QToolBar*>("viewToolbar")->actions())
+            if (action->isVisible())
+                options.append(action->objectName());
+        for (auto* action : d.window->findChildren<QAction*>())
+            if (!action->shortcut().isEmpty())
+                actions.append(QJsonObject{{"text", action->text()},
+                                           {"shortcut", action->shortcut().toString()}});
+        int selected = 0;
+        for (auto* action : d.window->findChild<QToolBar*>("editingTools")->actions())
+            if (action->isChecked())
+                ++selected;
+        int rangeCount = 0;
+        const auto& range = c->project().state().selection;
+        if (!range.isNull())
+            for (int y = 0; y < range.height(); ++y)
+                for (int x = 0; x < range.width(); ++x)
+                    if (range.constScanLine(y)[x])
+                        ++rangeCount;
+        const auto origin = c->view_transform().map(QPointF());
+        return {{"tool", int(c->tool())},
+                {"pending", c->transforming()},
+                {"sx", matrix.m11()},
+                {"sy", matrix.m22()},
+                {"tx", matrix.dx()},
+                {"ty", matrix.dy()},
+                {"width", layer ? layer->pixels.width() : 0},
+                {"height", layer ? layer->pixels.height() : 0},
+                {"revision", qint64(c->project().revision())},
+                {"handles", handles},
+                {"options", options},
+                {"shortcuts", actions},
+                {"checkedTools", selected},
+                {"rangeCount", rangeCount},
+                {"radius", c->brush_radius},
+                {"zoom", c->zoom()},
+                {"foreground", c->foreground.name()},
+                {"m12", matrix.m12()},
+                {"viewportWidth", c->width()},
+                {"viewportHeight", c->height()},
+                {"viewX", origin.x()},
+                {"viewY", origin.y()}};
+    }
     if (op == "window_capture") {
         QApplication::processEvents();
         return {{"ok", d.window->grab().save(o.value("path").toString())}};
@@ -214,7 +335,9 @@ QJsonObject run(const QJsonObject& o) {
         d.window.reset();
         d.project.reset();
         d.snapshot.reset();
+        QApplication::clipboard()->clear();
         QApplication::processEvents();
+        d.application.reset();
         return {{"ok", true}};
     }
     if (!d.project)

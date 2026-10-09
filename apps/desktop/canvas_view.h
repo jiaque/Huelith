@@ -2,8 +2,10 @@
 #include "huelith/document/canvas_spec.h"
 #include "huelith/editing/project.h"
 #include <QWidget>
+#include <array>
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace huelith::desktop {
 enum class CanvasTool {
@@ -41,6 +43,23 @@ class CanvasView final : public QWidget {
     void refresh();
     void preview(const editing::State& state);
     void set_tool(CanvasTool tool);
+    [[nodiscard]] CanvasTool tool() const noexcept {
+        return tool_;
+    }
+    bool show_transform_controls{true};
+    bool keep_aspect{true};
+    bool auto_select{true};
+    bool begin_transform();
+    void commit_transform();
+    void cancel_transform();
+    [[nodiscard]] bool transforming() const noexcept {
+        return transform_draft_.has_value();
+    }
+    [[nodiscard]] std::array<QPointF, 8> transform_handles() const;
+    [[nodiscard]] QTransform current_layer_transform() const;
+    void prepare_inserted_layer();
+    std::function<void()> tool_changed;
+
     [[nodiscard]] QTransform view_transform() const;
     [[nodiscard]] QPointF image_point(QPointF widget_point) const;
     QUuid active_layer;
@@ -51,6 +70,8 @@ class CanvasView final : public QWidget {
     bool snap{true};
     double rotation{};
     double brush_radius{20};
+    QColor foreground{Qt::black};
+    QColor background{Qt::white};
     editing::RangeOp range_operation{editing::RangeOp::replace};
     QPainterPath path;
     QString filename;
@@ -67,8 +88,24 @@ class CanvasView final : public QWidget {
     void mouseDoubleClickEvent(QMouseEvent*) override;
     void wheelEvent(QWheelEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
+    void keyReleaseEvent(QKeyEvent*) override;
 
   private:
+    QRectF target_rect() const;
+    QTransform parent_transform() const;
+    const editing::State& visible_state() const;
+    int transform_hit(QPointF point) const;
+    void transform_motion(QPointF point, Qt::KeyboardModifiers modifiers);
+    std::optional<editing::State> transform_draft_;
+    QUuid transform_target_;
+    bool transform_mask_{};
+    quint64 transform_revision_{};
+    int transform_handle_{-1};
+    QTransform drag_transform_;
+    QTransform drag_mask_transform_;
+    QPointF transform_press_;
+    bool transform_modified_{};
+    bool move_gesture_{};
     void finish_path();
     void apply_stroke();
     CanvasSpec spec_;
@@ -88,5 +125,8 @@ class CanvasView final : public QWidget {
     int node_index_{-1};
     int guide_axis_{};
     bool dragging_{};
+    bool temporary_hand_{};
+    bool pan_gesture_{};
+    editing::RangeOp gesture_range_{editing::RangeOp::replace};
 };
 } // namespace huelith::desktop
