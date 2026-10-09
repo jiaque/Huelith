@@ -191,6 +191,31 @@ def main():
     for name,data in entries.items():z.writestr(name,data)
    call('window_open',path=str(legacy));assert layer('legacy layer')['tx']==70 and not layer('legacy layer')['warped'] and probe(x=120,y=110)['rgba'][3]>0
   test('schema2_layer_document_migrates_without_mesh',legacy_schema)
+  def chrome():
+   scene([dict(name='image',color='white')]);chrome=call('window_chrome');buttons=chrome['buttons'];assert len(buttons)==14
+   assert len({b['x'] for b in buttons})==2 and all(b['visible'] for b in buttons)
+   for a in buttons:
+    for b in buttons:
+     if a['tool']!=b['tool']:assert a['x']+a['width']<=b['x'] or b['x']+b['width']<=a['x'] or a['y']+a['height']<=b['y'] or b['y']+b['height']<=a['y']
+   for index in range(14):
+    call('window_chrome',click=index);assert state()['tool']==index and state()['checkedTools']==1
+   paths={m['text']:m['path'] for m in chrome['menus']}
+   for text,segment in [('反相蒙版','/图层蒙版/'),('右对齐','/对齐/'),('水平分布','/分布/'),('羽化','/修改/'),('网格','/显示/'),('保存工作区布局','/工作区/'),('原位粘贴','/选择性粘贴/'),('数值变换…','/变换/'),('导出 PNG / JPEG…','/导出/')]:assert segment in paths[text],(text,paths.get(text))
+   assert len(paths)==len(chrome['menus']), 'Duplicate menu command'
+   assert paths['设置菜单快捷键…'].startswith('/编辑') and paths['恢复未保存文档…'].startswith('/文件')
+   key('V');key('B');assert state()['tool']==7;action('像素');key('Ctrl+Z');assert len(probe()['layers'])==1
+   (out/f'{args.build}-chrome.json').write_text(json.dumps(chrome,ensure_ascii=False,indent=2),encoding='utf-8')
+  test('two_column_tools_click_shortcuts_and_menu_groups',chrome)
+  def color_swatches():
+   scene([dict(name='paint',color='transparent')]);before=state()['revision']
+   call('window_color_button',name='foregroundSwatch',color='#e43b2c',capture=str(out/f'{args.build}-color-picker.png'));assert state()['foreground']=='#e43b2c'
+   call('window_color_button',name='backgroundSwatch',color='#248fc6');assert state()['background']=='#248fc6'
+   call('window_color_button',name='foregroundSwatch',color='#00ff00',accept=False);assert state()['foreground']=='#e43b2c' and state()['revision']==before
+   key('B');control('brushHardness',100);control('brushOpacity',100);control('brushFlow',100);click(100,100);rgba=probe(x=100,y=100)['rgba'];assert all(abs(a-b)<=1 for a,b in zip(rgba,[228,59,44,255])),rgba
+   call('window_color_button',name='swapColors');assert state()['foreground']=='#248fc6' and state()['background']=='#e43b2c';key('X');assert state()['foreground']=='#e43b2c'
+   call('window_color_button',name='resetColors');assert state()['foreground']=='#000000' and state()['background']=='#ffffff'
+   call('window_color_button',name='swapColors');key('D');assert state()['foreground']=='#000000' and state()['background']=='#ffffff'
+  test('foreground_background_picker_cancel_swap_reset_and_actual_paint',color_swatches)
   def capture():
    product=Image.new('RGBA',(240,240));d=ImageDraw.Draw(product);d.rounded_rectangle((65,35,175,220),radius=16,fill='#d1a962');d.rectangle((82,15,158,46),fill='#35434f');d.rounded_rectangle((76,95,164,170),radius=5,fill='#e9dbb9');d.text((98,122),'HUELITH',fill='#35434f');asset=folder/'bottle.png';product.save(asset)
    scene([dict(name='背景',color='#34424c'),dict(name='产品 · 源图片',kind=1,path=str(asset),x=80,y=30,mask=255)]);key('V');call('window_capture',path=str(out/f'{args.build}-workspace.png'))

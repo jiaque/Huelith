@@ -23,6 +23,8 @@ def main():
     (evidence/'package-deploy.log').write_text(result.stdout+'\n'+result.stderr,encoding='utf-8')
     if result.returncode:
         raise RuntimeError('Qt deployment failed; inspect package-deploy.log')
+    translations=destination/'translations';translations.mkdir(exist_ok=True)
+    shutil.copy2(qt/'translations/qtbase_zh_CN.qm',translations/'qtbase_zh_CN.qm')
     report={'path':str(destination),'exe_sha256':hashlib.sha256((destination/app.name).read_bytes()).hexdigest(),'deployment_exit':result.returncode}
     try:
         check=subprocess.run([str(destination/app.name),'--smoke-test'],cwd=destination,capture_output=True,text=True,timeout=30)

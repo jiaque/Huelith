@@ -10,6 +10,7 @@
 #include <QDockWidget>
 #include <QFile>
 #include <QLabel>
+#include <QLibraryInfo>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPalette>
@@ -21,6 +22,7 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QToolBar>
+#include <QTranslator>
 #include <QVBoxLayout>
 #ifdef Q_OS_WIN
 #define NOMINMAX
@@ -45,6 +47,14 @@ class EditorStyle final : public QProxyStyle {
 } // namespace
 
 void apply_dark_theme() {
+    if (!qApp->findChild<QTranslator*>("qtZhCn")) {
+        auto* translations = new QTranslator(qApp);
+        translations->setObjectName("qtZhCn");
+        if (translations->load("qtbase_zh_CN",
+                               QCoreApplication::applicationDirPath() + "/translations") ||
+            translations->load("qtbase_zh_CN", QLibraryInfo::path(QLibraryInfo::TranslationsPath)))
+            QCoreApplication::installTranslator(translations);
+    }
     QApplication::setStyle(new EditorStyle); // QApplication takes ownership.
     QPalette palette;
     palette.setColor(QPalette::Window, QColor("#252a2e"));

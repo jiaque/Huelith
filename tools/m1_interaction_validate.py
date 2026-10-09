@@ -13,6 +13,11 @@ def main():
     command.argtypes=[ctypes.c_char_p];command.restype=ctypes.c_char_p
     transcript=[];results=[]
     def call(op,**values):
+        # Native resize/activation messages can arrive after processEvents returns.
+        # Drain them before reading handle positions or dispatching the next gesture.
+        if args.platform=='windows' and op in ('window_key','window_gesture','window_interaction_state'):
+            settled=json.loads(command(b'{"op":"pump","waitMs":30}'))
+            if 'error' in settled:raise RuntimeError(settled['error'])
         request=dict(op=op,**values);result=json.loads(command(json.dumps(request,ensure_ascii=False).encode()))
         transcript.append(dict(request=request,result=result))
         if 'error' in result:raise RuntimeError(result['error'])

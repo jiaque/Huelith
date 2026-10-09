@@ -4,9 +4,11 @@
 #include "huelith/editing/project.h"
 #include "main_window.h"
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -14,6 +16,7 @@
 #include <QDoubleSpinBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QInputDialog>
 #include <QJsonArray>
@@ -24,6 +27,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -37,6 +42,7 @@
 #include <QTabletEvent>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QWheelEvent>
 #include <memory>
@@ -317,7 +323,14 @@ QJsonObject run(const QJsonObject& o) {
         return {{"ok", success}, {"count", d.window->document_count()}};
     }
     if (op == "pump") {
-        QApplication::processEvents();
+        if (o.value("waitMs").toInt() > 0) {
+            QEventLoop loop;
+            QTimer::singleShot(std::clamp(o.value("waitMs").toInt(), 1, 100), &loop,
+                               &QEventLoop::quit);
+            loop.exec();
+        } else {
+            QApplication::processEvents();
+        }
         return {{"ok", true}};
     }
     if (op == "window_filename") {
@@ -643,7 +656,7 @@ QJsonObject run(const QJsonObject& o) {
                 actions.append(QJsonObject{{"text", action->text()},
                                            {"shortcut", action->shortcut().toString()}});
         int selected = 0;
-        for (auto* action : d.window->findChild<QToolBar*>("editingTools")->actions())
+        for (auto* action : d.window->findChild<QActionGroup*>("toolActions")->actions())
             if (action->isChecked())
                 ++selected;
         int rangeCount = 0;
@@ -671,11 +684,82 @@ QJsonObject run(const QJsonObject& o) {
                 {"radius", c->brush_radius},
                 {"zoom", c->zoom()},
                 {"foreground", c->foreground.name()},
+                {"background", c->background.name()},
                 {"m12", matrix.m12()},
                 {"viewportWidth", c->width()},
                 {"viewportHeight", c->height()},
                 {"viewX", origin.x()},
                 {"viewY", origin.y()}};
+    }
+    if (op == "window_color_button") {
+        auto* button = d.window->findChild<QToolButton*>(o.value("name").toString());
+        if (!button)
+            throw EditError("color control missing");
+        auto* timer = new QTimer(d.window.get());
+        timer->setInterval(20);
+        const auto options = o;
+        auto ticks = std::make_shared<int>(0);
+        QObject::connect(timer, &QTimer::timeout, d.window.get(), [timer, options, ticks] {
+            if (auto* dialog = qobject_cast<QColorDialog*>(QApplication::activeModalWidget())) {
+                dialog->setCurrentColor(QColor(options.value("color").toString("#123456")));
+                if (options.contains("capture"))
+                    dialog->grab().save(options.value("capture").toString());
+                if (options.value("accept").toBool(true))
+                    dialog->accept();
+                else
+                    dialog->reject();
+                timer->stop();
+            } else if (++*ticks > 100) {
+                if (auto* active = qobject_cast<QDialog*>(QApplication::activeModalWidget()))
+                    active->reject();
+                timer->stop();
+            }
+        });
+        timer->start();
+        button->click();
+        timer->stop();
+        timer->deleteLater();
+        QApplication::processEvents();
+        return {{"enabled", button->isEnabled()}, {"visible", button->isVisible()}};
+    }
+    if (op == "window_chrome") {
+        QApplication::processEvents();
+        QJsonArray buttons, menus;
+        auto* panel = d.window->findChild<QWidget*>("toolGrid");
+        if (panel) {
+            for (auto* button : panel->findChildren<QToolButton*>()) {
+                if (!button->defaultAction())
+                    continue;
+                if (o.contains("click") &&
+                    button->defaultAction()->data().toInt() == o.value("click").toInt())
+                    button->click();
+                const auto position = button->mapTo(panel, QPoint());
+                buttons.append(QJsonObject{{"tool", button->defaultAction()->data().toInt()},
+                                           {"category", button->property("category").toString()},
+                                           {"x", position.x()},
+                                           {"y", position.y()},
+                                           {"width", button->width()},
+                                           {"height", button->height()},
+                                           {"visible", button->isVisible()},
+                                           {"checked", button->isChecked()}});
+            }
+        }
+        const auto visit = [&](const auto& self, const QList<QAction*>& actions,
+                               const QString& prefix) -> void {
+            for (auto* action : actions) {
+                if (action->isSeparator())
+                    continue;
+                const auto path = prefix + "/" + action->text();
+                if (action->menu())
+                    self(self, action->menu()->actions(), path);
+                else
+                    menus.append(QJsonObject{{"path", path},
+                                             {"text", action->text()},
+                                             {"shortcut", action->shortcut().toString()}});
+            }
+        };
+        visit(visit, d.window->findChild<QMenuBar*>()->actions(), QString{});
+        return {{"buttons", buttons}, {"menus", menus}};
     }
     if (op == "window_capture") {
         QApplication::processEvents();

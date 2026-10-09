@@ -1275,6 +1275,70 @@ void EditorController::configure_menus() {
             }
         }
     });
+    // Move existing actions, preserving their callbacks and persisted shortcut names.
+    const auto move_actions = [](QMenu* source, QMenu* destination, const QStringList& names) {
+        for (const auto& name : names) {
+            for (auto* action : source->actions()) {
+                if (action->text() == name) {
+                    source->removeAction(action);
+                    destination->addAction(action);
+                    break;
+                }
+            }
+        }
+    };
+    const auto subgroup = [&](QMenu* menu, const QString& title, const QStringList& names) {
+        auto* child = menu->addMenu(title);
+        move_actions(menu, child, names);
+        return child;
+    };
+    subgroup(file, tr("导出"), {tr("导出 PNG / JPEG…")});
+    auto* recovery_menu = subgroup(file, tr("恢复"), {tr("打开自动恢复…")});
+    move_actions(view, recovery_menu, {tr("恢复未保存文档…")});
+    // Reorder without QMenu::clear(), which would delete owned actions.
+    const auto file_actions = file->actions();
+    for (auto* action : file_actions)
+        file->removeAction(action);
+    for (const auto& name : {tr("新建图片…"), tr("打开…"), tr("最近打开"), QString{}, tr("置入…"),
+                             tr("关闭图片"), QString{}, tr("保存工程"), tr("另存工程…"), tr("导出"),
+                             tr("恢复"), QString{}, tr("退出")}) {
+        if (name.isEmpty()) {
+            file->addSeparator();
+            continue;
+        }
+        for (auto* action : file_actions)
+            if (!action->isSeparator() && action->text() == name)
+                file->addAction(action);
+    }
+    subgroup(edit, tr("选择性粘贴"), {tr("原位粘贴"), tr("贴入选区")});
+    auto* transform_menu = edit->addMenu(tr("变换"));
+    move_actions(layers, transform_menu, {tr("数值变换…")});
+    auto* comparison_menu = edit->addMenu(tr("比较快照"));
+    move_actions(view, comparison_menu, {tr("创建比较快照…"), tr("查看比较快照…")});
+    edit->addSeparator();
+    move_actions(view, edit, {tr("设置菜单快捷键…")});
+    subgroup(layers, tr("图层蒙版"), {tr("蒙版"), tr("反相蒙版"), tr("蒙版转选区")});
+    subgroup(layers, tr("矢量蒙版"), {tr("路径转矢量蒙版")});
+    subgroup(layers, tr("源与嵌套合成"),
+             {tr("嵌入资源"), tr("替换 / 重新定位源…"), tr("编辑嵌套合成…")});
+    subgroup(layers, tr("排列"), {tr("上移"), tr("下移")});
+    subgroup(layers, tr("对齐"),
+             {tr("左对齐画布"), tr("水平居中画布"), tr("右对齐"), tr("顶对齐"), tr("垂直居中画布"),
+              tr("底对齐")});
+    subgroup(layers, tr("分布"), {tr("水平分布"), tr("垂直分布")});
+    subgroup(layers, tr("合并"), {tr("盖印可见副本"), tr("合并可见图层")});
+    subgroup(selection, tr("修改"), {tr("羽化"), tr("扩张"), tr("收缩"), tr("平滑")});
+    subgroup(selection, tr("范围"), {tr("亮度范围"), tr("线性渐变范围"), tr("径向渐变范围")});
+    subgroup(selection, tr("路径"),
+             {tr("保存路径"), tr("路径转选区"), tr("重命名路径…"), tr("隐藏当前路径"),
+              tr("删除已存路径")});
+    subgroup(view, tr("显示"), {tr("网格"), tr("显示参考线")});
+    subgroup(view, tr("参考线"), {tr("添加参考线…"), tr("锁定参考线"), tr("清除参考线")});
+    subgroup(view, tr("网格设置"), {tr("网格间距…")});
+    auto* window_menu = window_->menus_->actions().at(2)->menu();
+    auto* workspace_menu = window_menu->addMenu(tr("工作区"));
+    move_actions(view, workspace_menu, {tr("保存工作区布局"), tr("恢复已存工作区")});
+    move_actions(window_menu, workspace_menu, {tr("重置工作区")});
     const auto top = window_->menus_->actions();
     for (auto* action : top)
         window_->menus_->removeAction(action);
@@ -1291,7 +1355,7 @@ void EditorController::configure_menus() {
     tools->setObjectName("editingTools");
     tools->setToolButtonStyle(Qt::ToolButtonIconOnly);
     tools->setIconSize(QSize(19, 19));
-    tools->setFixedWidth(34);
+    tools->setFixedWidth(66);
     tools->setMovable(false);
     window_->addToolBar(Qt::LeftToolBarArea, tools);
     const QStringList labels{tr("移动 V"),     tr("抓手 H"),    tr("矩形 M"),   tr("椭圆"),
@@ -1316,7 +1380,33 @@ void EditorController::configure_menus() {
         R"(<path d="m4 13 9-10 8 7-10 11H8Z M8 9l8 7 M11 21h10"/>)",
         R"(<path d="m4 21 13-13 3 3L7 24 M14 11l3 3 M6 2v6 M3 5h6 M18 1v4 M16 3h4 M21 17v5 M19 19h4"/>)",
         R"(<circle cx="9" cy="10" r="6"/><circle cx="15" cy="15" r="6"/><path d="m8 12 4-4 M10 15l5-5"/>)"};
-    for (int i : {0, 2, 3, 4, 5, 9, 10, 6, 12, 7, 8, 13, 1, 11}) {
+    auto* tool_panel = new QWidget(tools);
+    tool_panel->setObjectName("toolGrid");
+    auto* tool_layout = new QGridLayout(tool_panel);
+    tool_layout->setContentsMargins(3, 3, 3, 3);
+    tool_layout->setHorizontalSpacing(0);
+    tool_layout->setVerticalSpacing(2);
+    tools->addWidget(tool_panel);
+    struct ToolSlot {
+        int index;
+        int row;
+        int column;
+        const char* category;
+    };
+    const ToolSlot tool_slots[]{
+        {0, 0, 0, "move"},        {2, 2, 0, "selection"},   {3, 2, 1, "selection"},
+        {4, 3, 0, "selection"},   {5, 3, 1, "selection"},   {9, 4, 0, "selection"},
+        {10, 4, 1, "selection"},  {7, 6, 0, "painting"},    {8, 6, 1, "painting"},
+        {13, 7, 0, "painting"},   {6, 9, 0, "paths"},       {12, 9, 1, "paths"},
+        {1, 11, 0, "navigation"}, {11, 11, 1, "navigation"}};
+    for (const int row : {1, 5, 8, 10}) {
+        auto* separator = new QWidget(tool_panel);
+        separator->setFixedHeight(1);
+        separator->setStyleSheet("background:#3b4147;");
+        tool_layout->addWidget(separator, row, 0, 1, 2);
+    }
+    for (const auto& slot : tool_slots) {
+        const int i = slot.index;
         const auto svg =
             ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 26 26'><g fill='none' "
              "stroke='#d5d9df' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'>" +
@@ -1335,7 +1425,15 @@ void EditorController::configure_menus() {
         renderer.render(&painter);
         painter.end();
         pixmap.setDevicePixelRatio(2);
-        auto* action = tools->addAction(QIcon(pixmap), labels[i]);
+        auto* action = new QAction(QIcon(pixmap), labels[i], tools);
+        auto* button = new QToolButton(tool_panel);
+        button->setObjectName(QString("toolButton_%1").arg(i));
+        button->setProperty("category", slot.category);
+        button->setAccessibleName(labels[i]);
+        button->setIconSize(QSize(19, 19));
+        button->setFixedSize(29, 29);
+        button->setDefaultAction(action);
+        tool_layout->addWidget(button, slot.row, slot.column);
         action->setCheckable(true);
         const QStringList keys{"V", "H", "M", "", "L", "", "P", "B", "E", "W", "", "Z", "A", "Y"};
         action->setShortcutContext(Qt::WidgetShortcut);
@@ -1354,6 +1452,69 @@ void EditorController::configure_menus() {
             }
         });
     }
+    const auto choose_color = [this](bool foreground) {
+        if (auto* c = canvas()) {
+            const auto selected = QColorDialog::getColor(
+                foreground ? c->foreground : c->background, window_,
+                foreground ? tr("前景色") : tr("背景色"), QColorDialog::DontUseNativeDialog);
+            if (selected.isValid()) {
+                (foreground ? c->foreground : c->background) = selected;
+                refresh_tools();
+            }
+        }
+    };
+    auto* colors = new QWidget(tool_panel);
+    colors->setObjectName("toolColors");
+    colors->setFixedSize(58, 64);
+    tool_layout->addWidget(colors, 13, 0, 1, 2);
+    tool_layout->setRowMinimumHeight(12, 6);
+    const auto color_button = [&](const char* name, const QString& label, const QRect& bounds) {
+        auto* button = new QToolButton(colors);
+        button->setObjectName(name);
+        button->setAccessibleName(label);
+        button->setToolTip(label);
+        button->setGeometry(bounds);
+        return button;
+    };
+    auto* background_button =
+        color_button("backgroundSwatch", tr("背景色：点击选择"), QRect(23, 33, 31, 29));
+    auto* foreground_button =
+        color_button("foregroundSwatch", tr("前景色：点击选择"), QRect(5, 18, 31, 29));
+    auto* defaults =
+        color_button("resetColors", tr("默认前景色和背景色（D）"), QRect(0, 0, 22, 18));
+    auto* swap = color_button("swapColors", tr("交换前景色和背景色（X）"), QRect(36, 0, 22, 21));
+    const auto color_icon = [](const QByteArray& svg) {
+        QPixmap pixmap(40, 40);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        QSvgRenderer renderer(svg);
+        renderer.render(&painter);
+        painter.end();
+        pixmap.setDevicePixelRatio(2);
+        return QIcon(pixmap);
+    };
+    defaults->setIcon(color_icon(
+        R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><rect x="8" y="8" width="10" height="10" fill="white" stroke="#959ba2"/><rect x="2" y="2" width="10" height="10" fill="black" stroke="#d5d9df"/></svg>)"));
+    swap->setIcon(color_icon(
+        R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M3 5h10v10 M10 12l3 3 3-3 M6 2 3 5l3 3" fill="none" stroke="#d5d9df" stroke-width="1.5"/></svg>)"));
+    connect(foreground_button, &QToolButton::clicked, this, [choose_color] { choose_color(true); });
+    connect(background_button, &QToolButton::clicked, this,
+            [choose_color] { choose_color(false); });
+    connect(defaults, &QToolButton::clicked, this, [this] {
+        if (auto* c = canvas()) {
+            c->foreground = Qt::black;
+            c->background = Qt::white;
+            refresh_tools();
+            c->setFocus();
+        }
+    });
+    connect(swap, &QToolButton::clicked, this, [this] {
+        if (auto* c = canvas()) {
+            std::swap(c->foreground, c->background);
+            refresh_tools();
+            c->setFocus();
+        }
+    });
     auto* options = window_->findChild<QToolBar*>("viewToolbar");
     auto* range_operation_combo = new QComboBox(options);
     range_operation_combo->addItems({tr("替换选区"), tr("相加"), tr("相减"), tr("相交")});
@@ -1405,15 +1566,7 @@ void EditorController::configure_menus() {
     });
     auto* color = options->addAction(tr("前景色"));
     color->setObjectName("brushColor");
-    connect(color, &QAction::triggered, this, [this] {
-        if (auto* c = canvas()) {
-            const auto selected = QColorDialog::getColor(c->foreground, window_, tr("前景色"));
-            if (selected.isValid()) {
-                c->foreground = selected;
-                refresh_tools();
-            }
-        }
-    });
+    connect(color, &QAction::triggered, this, [choose_color] { choose_color(true); });
     const auto number = [&](const char* name, const QString& label, double minimum, double maximum,
                             double initial, const std::function<void(CanvasView&, double)>& apply) {
         auto* field = new QDoubleSpinBox(options);
@@ -1526,6 +1679,21 @@ void EditorController::configure_menus() {
 void EditorController::refresh_tools() {
     auto* c = canvas();
     const auto tool = c ? c->tool() : CanvasTool::move;
+    for (const auto& entry :
+         {std::pair{"foregroundSwatch", c ? c->foreground : QColor(Qt::black)},
+          std::pair{"backgroundSwatch", c ? c->background : QColor(Qt::white)}}) {
+        if (auto* button = window_->findChild<QToolButton*>(entry.first)) {
+            button->setEnabled(c != nullptr);
+            button->setStyleSheet(QString("QToolButton { background:%1; border:2px solid #b8bec6; "
+                                          "border-radius:0; padding:0; } "
+                                          "QToolButton:hover { border-color:#529ad3; }")
+                                      .arg(entry.second.name()));
+            button->setToolTip(button->accessibleName() + " " + entry.second.name());
+        }
+    }
+    for (const auto* name : {"resetColors", "swapColors"})
+        if (auto* button = window_->findChild<QToolButton*>(name))
+            button->setEnabled(c != nullptr);
     if (auto* group = window_->findChild<QActionGroup*>("toolActions"))
         for (auto* action : group->actions()) {
             action->setChecked(action->data().toInt() == int(tool));
