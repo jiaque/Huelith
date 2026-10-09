@@ -12,6 +12,7 @@ import numpy as np
 import onnxruntime as ort
 import rawpy
 from PIL import Image
+from m0_color import camera_to_rec2020, camera_to_srgb, PIPELINE
 
 
 def pack(raw):
@@ -79,23 +80,21 @@ def main():
     # One gain across the completed image; matching each tile separately would create exposure seams.
     gain=float(np.mean(packed,dtype=np.float64)/np.mean(output,dtype=np.float64))
     output*=gain
-    # Follow pinned upstream Bayer demo: camera RGB -> XYZ D65 -> linear Rec.2020.
-    xyz_to_rec2020=np.array([[1.716651188,-.355670784,-.253366281],[-.666684352,1.616481237,.015768546],[.017639857,-.042770613,.942103121]])
-    rgb=np.einsum('...c,dc->...d',output,(xyz_to_rec2020@np.linalg.inv(matrix)).astype(np.float32))
+    # Version 2: normalize the camera matrix and explicitly apply metadata WB.
+    rgb=np.einsum('...c,dc->...d',output,camera_to_rec2020(matrix,report['wb']).astype(np.float32))
     np.save(args.output/'linear-rec2020.npy',rgb)
-    xyz_to_srgb=np.array([[3.2404542,-1.5371385,-.4985314],[-.969266,1.8760108,.041556],[.0556434,-.2040259,1.0572252]])
-    srgb_linear=np.einsum('...c,dc->...d',output,(xyz_to_srgb@np.linalg.inv(matrix)).astype(np.float32))
+    srgb_linear=np.einsum('...c,dc->...d',output,camera_to_srgb(matrix,report['wb']).astype(np.float32))
     rendered=preview(srgb_linear)
     Image.fromarray(rendered).resize((1200,800)).save(args.output/'denoised-preview.jpg',quality=95)
     h,w=rendered.shape[:2];Image.fromarray(rendered[h//2-512:h//2+512,w//2-512:w//2+512]).save(args.output/'center-100percent.png')
     cancelled,partial_times=tiled(session,packed[:,:512,:512],False,stop_after=1)
-    report.update(onnxruntime=ort.__version__,requested_provider=args.provider,providers=session.get_providers(),model_sha256=hashlib.sha256(args.model.read_bytes()).hexdigest(),
+    report.update(color_pipeline=PIPELINE,onnxruntime=ort.__version__,requested_provider=args.provider,providers=session.get_providers(),model_sha256=hashlib.sha256(args.model.read_bytes()).hexdigest(),
         tiles=len(times),tile_seconds_sum=sum(times),tile_seconds_p95=float(np.quantile(times,.95)),
         gain=gain,output_shape=list(rgb.shape),finite=bool(np.isfinite(rgb).all()),
         output_min=float(rgb.min()),output_max=float(rgb.max()),
         cancellation_discards_partial=cancelled is None,cancel_granularity_seconds=partial_times[-1],
         limitations=['No clean reference: no absolute denoising PSNR claimed.',
-        'Upstream color conversion is a candidate; white balance/DCP and camera color accuracy not approved.',
+        'Normalized camera matrix and metadata WB verified; no calibrated chart or DCP style parity claimed.',
         'Preview tone mapping differs from LibRaw baseline, so previews are not a controlled visual denoising comparison.'])
     (args.output/'raw-results.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
     print(json.dumps(report),flush=True)

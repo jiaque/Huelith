@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import rawpy
 from PIL import Image
+from m0_color import camera_to_srgb, camera_to_rec2020
 
 
 def main():
@@ -13,6 +14,7 @@ def main():
     parser.add_argument('--raw', type=Path, required=True)
     parser.add_argument('--denoised', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--color-version', choices=['v1','v2'], default='v1')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     xyz_to_rec = np.array([[1.716651188, -.355670784, -.253366281],
@@ -31,8 +33,9 @@ def main():
             user_flip=0, median_filter_passes=0,
             fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Off).astype(np.float32)/65535
     denoised_rec = np.load(args.denoised)
-    denoised_cam = np.einsum('...c,dc->...d', denoised_rec,
-        (matrix @ np.linalg.inv(xyz_to_rec)).astype(np.float32))
+    inverse = (np.linalg.inv(camera_to_rec2020(matrix,wb)) if args.color_version == 'v2'
+               else matrix @ np.linalg.inv(xyz_to_rec))
+    denoised_cam = np.einsum('...c,dc->...d', denoised_rec, inverse.astype(np.float32))
     if denoised_cam.shape != baseline.shape:
         raise ValueError('orientation/size mismatch')
     # A single image-wide scalar compensates differing LibRaw/model normalization.
@@ -48,7 +51,9 @@ def main():
     neutral_error = float(np.max(np.abs(camera_to_srgb @ np.ones(3) - 1)))
     if neutral_error > 1e-10:
         raise ValueError('normalized camera matrix fails neutral-axis invariant')
-    transform = (camera_to_srgb @ np.diag(wb)).astype(np.float32)
+    # Shared with full RAW inference; retain the independent neutral-axis check above.
+    from m0_color import camera_to_srgb as shared_transform
+    transform = shared_transform(matrix, wb).astype(np.float32)
     before = np.einsum('...c,dc->...d', baseline, transform)
     after = np.einsum('...c,dc->...d', denoised_cam, transform)
     exposure = .6 / max(float(np.quantile(np.maximum(before, 0), .99)), 1e-6)
@@ -70,7 +75,7 @@ def main():
         b = right[cy-256:cy+256, cx-256:cx+256]
         Image.fromarray(np.concatenate([a, b], axis=1)).save(args.output/(name+'-100percent.png'))
         crops.append(dict(name=name, bounds=[cx-256, cy-256, 512, 512]))
-    report = dict(raw=args.raw.name, normalization_gain=gain,
+    report = dict(raw=args.raw.name, color_version=args.color_version, normalization_gain=gain,
         shared_exposure=exposure, camera_wb=wb.tolist(), crops=crops,
         normalized_matrix_neutral_error=neutral_error,
         camera_to_linear_srgb=camera_to_srgb.tolist(),

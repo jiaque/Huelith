@@ -86,7 +86,7 @@ if(BUILD_TESTING)
     add_executable(huelith_unit_tests tests/unit/canvas_spec_test.cpp)
     target_link_libraries(huelith_unit_tests PRIVATE huelith_document GTest::gtest_main)
     gtest_discover_tests(huelith_unit_tests PROPERTIES LABELS unit)
-    add_executable(huelith_gui_tests tests/gui/main_window_test.cpp tests/gui/m0_session_test.cpp)
+    add_executable(huelith_gui_tests tests/gui/main_window_test.cpp tests/gui/m0_session_test.cpp tests/gui/m0_display_test.cpp)
     target_link_libraries(huelith_gui_tests PRIVATE huelith_desktop GTest::gtest)
     gtest_discover_tests(huelith_gui_tests PROPERTIES LABELS gui
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
