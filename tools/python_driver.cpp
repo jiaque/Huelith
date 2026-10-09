@@ -5,18 +5,36 @@
 #include "main_window.h"
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDialog>
+#include <QDialogButtonBox>
+#include <QDockWidget>
+#include <QDoubleSpinBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFileDialog>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
+#include <QKeySequenceEdit>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QMouseEvent>
+#include <QPointingDevice>
+#include <QPushButton>
 #include <QSettings>
 #include <QSlider>
+#include <QSpinBox>
 #include <QTabWidget>
+#include <QTableWidget>
+#include <QTabletEvent>
 #include <QTimer>
 #include <QToolBar>
 #include <QTreeWidget>
@@ -53,6 +71,7 @@ QJsonObject run(const QJsonObject& o) {
     const auto op = o.value("op").toString();
     if (op == "init") {
         if (!d.application) {
+            QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
             d.application = std::make_unique<QApplication>(d.argc, d.argv);
             QCoreApplication::setOrganizationName("HuelithValidation");
             QCoreApplication::setApplicationName("PythonM1");
@@ -75,6 +94,212 @@ QJsonObject run(const QJsonObject& o) {
         d.window->show();
         QApplication::processEvents();
         return {{"hwnd", QString::number(d.window->winId())}};
+    }
+    if (op == "window_scene") {
+        State state;
+        state.size = {o.value("width").toInt(400), o.value("height").toInt(300)};
+        state.name = "M1 Interaction";
+        std::function<Layer(QJsonObject)> make = [&](QJsonObject item) {
+            Layer layer;
+            layer.name = item.value("name").toString("layer");
+            layer.kind = static_cast<LayerKind>(item.value("kind").toInt());
+            layer.visible = item.value("visible").toBool(true);
+            layer.locked = item.value("locked").toBool();
+            layer.clipped = item.value("clipped").toBool();
+            layer.opacity = float(item.value("opacity").toDouble(1));
+            if (item.contains("path"))
+                layer.pixels = import_image(item.value("path").toString());
+            else if (item.contains("color")) {
+                QImage image(item.value("width").toInt(state.size.width()),
+                             item.value("height").toInt(state.size.height()),
+                             QImage::Format_RGBA8888);
+                image.fill(QColor(item.value("color").toString()));
+                layer.pixels = to_working(image);
+            }
+            layer.transform.translate(item.value("x").toDouble(), item.value("y").toDouble());
+            layer.transform.scale(item.value("scale").toDouble(1), item.value("scale").toDouble(1));
+            if (item.contains("mask")) {
+                layer.mask = QImage(state.size, QImage::Format_Grayscale8);
+                layer.mask.fill(item.value("mask").toInt());
+            }
+            layer.mask_linked = item.value("linked").toBool(true);
+            for (const auto& child : item.value("children").toArray())
+                layer.children.push_back(make(child.toObject()));
+            return layer;
+        };
+        for (const auto& item : o.value("layers").toArray())
+            state.layers.push_back(make(item.toObject()));
+        for (const auto& value : o.value("horizontal").toArray())
+            state.horizontal_guides.push_back(value.toDouble());
+        for (const auto& value : o.value("vertical").toArray())
+            state.vertical_guides.push_back(value.toDouble());
+        if (!d.window->active_canvas()) {
+            huelith::CanvasSpec spec;
+            spec.width = state.size.width();
+            spec.height = state.size.height();
+            if (!d.window->create_document(spec))
+                throw EditError("create failed");
+        }
+        d.window->active_canvas()->cancel_transform();
+        d.window->active_canvas()->selected_layers.clear();
+        d.window->active_canvas()->load_state(state, true);
+        d.window->active_canvas()->warp_mode = false;
+        d.window->active_canvas()->set_tool(huelith::desktop::CanvasTool::move);
+        QApplication::processEvents();
+        return {{"ok", true}};
+    }
+    if (op == "window_control") {
+        auto* widget = d.window->findChild<QWidget*>(o.value("name").toString());
+        if (!widget)
+            throw EditError("control missing");
+        if (auto* box = qobject_cast<QCheckBox*>(widget))
+            box->setChecked(o.value("value").toBool());
+        else if (auto* combo = qobject_cast<QComboBox*>(widget))
+            combo->setCurrentIndex(o.value("value").toInt());
+        else if (auto* spin = qobject_cast<QDoubleSpinBox*>(widget)) {
+            spin->setValue(o.value("value").toDouble());
+            QMetaObject::invokeMethod(spin, "editingFinished");
+        } else if (auto* list = qobject_cast<QListWidget*>(widget)) {
+            auto* item = list->item(o.value("value").toInt());
+            if (!item)
+                throw EditError("list item missing");
+            QMetaObject::invokeMethod(list, "itemClicked", Qt::DirectConnection,
+                                      Q_ARG(QListWidgetItem*, item));
+        } else
+            throw EditError("unsupported control");
+        QApplication::processEvents();
+        return {{"ok", true}};
+    }
+    if (op == "window_mouse") {
+        auto* c = d.window->active_canvas();
+        QPointF point(o.value("x").toDouble(), o.value("y").toDouble());
+        if (o.value("space").toString() != "widget")
+            point = c->view_transform().map(point);
+        if (o.contains("handle"))
+            point = c->transform_handles()[std::size_t(o.value("handle").toInt())];
+        if (o.contains("warp"))
+            point = c->warp_handles()[std::size_t(o.value("warp").toInt())];
+        point += QPointF(o.value("dx").toDouble(), o.value("dy").toDouble());
+        const auto phase = o.value("phase").toString();
+        const auto type = phase == "press"     ? QEvent::MouseButtonPress
+                          : phase == "release" ? QEvent::MouseButtonRelease
+                          : phase == "double"  ? QEvent::MouseButtonDblClick
+                                               : QEvent::MouseMove;
+        QMouseEvent event(type, point, c->mapToGlobal(point.toPoint()),
+                          type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                          type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+                          Qt::KeyboardModifiers(o.value("modifiers").toInt()));
+        QApplication::sendEvent(c, &event);
+        QApplication::processEvents();
+        return {{"x", point.x()}, {"y", point.y()}};
+    }
+    if (op == "window_tablet") {
+        auto* c = d.window->active_canvas();
+        const auto point =
+            c->view_transform().map(QPointF(o.value("x").toDouble(), o.value("y").toDouble()));
+        const auto phase = o.value("phase").toString();
+        const auto type = phase == "press"     ? QEvent::TabletPress
+                          : phase == "release" ? QEvent::TabletRelease
+                                               : QEvent::TabletMove;
+        QTabletEvent event(type, QPointingDevice::primaryPointingDevice(), point,
+                           c->mapToGlobal(point.toPoint()), o.value("pressure").toDouble(1), 0, 0,
+                           0, 0, 0, Qt::NoModifier, Qt::LeftButton,
+                           type == QEvent::TabletRelease ? Qt::NoButton : Qt::LeftButton);
+        QApplication::sendEvent(c, &event);
+        QApplication::processEvents();
+        return {{"ok", true}};
+    }
+    if (op == "window_recovery_file")
+        return {{"path", d.window->active_canvas()->recovery_file}};
+    if (op == "window_layout") {
+        QJsonObject result;
+        for (auto* dock : d.window->findChildren<QDockWidget*>()) {
+            if (o.value("hide").toBool())
+                dock->hide();
+            result.insert(dock->objectName(), dock->isVisible());
+        }
+        return result;
+    }
+    if (op == "clipboard_probe") {
+        return {{"width", QApplication::clipboard()->image().width()},
+                {"formats",
+                 QJsonArray::fromStringList(QApplication::clipboard()->mimeData()->formats())}};
+    }
+    if (op == "window_probe") {
+        auto* c = d.window->active_canvas();
+        const auto& state = c->display_state();
+        QJsonArray layers, guides_h, guides_v;
+        std::function<void(const std::vector<Layer>&)> visit = [&](const auto& values) {
+            for (const auto& layer : values) {
+                const auto matrix = layer.transform * parent_matrix(state, layer.id);
+                layers.append(QJsonObject{{"name", layer.name},
+                                          {"parent",
+                                           [&]() {
+                                               const auto p = parent_matrix(state, layer.id);
+                                               return p.dx();
+                                           }()},
+                                          {"id", layer.id.toString()},
+                                          {"tx", matrix.dx()},
+                                          {"ty", matrix.dy()},
+                                          {"sx", matrix.m11()},
+                                          {"sy", matrix.m22()},
+                                          {"m13", matrix.m13()},
+                                          {"m23", matrix.m23()},
+                                          {"maskTx", layer.mask_transform.dx()},
+                                          {"maskTy", layer.mask_transform.dy()},
+                                          {"maskSx", layer.mask_transform.m11()},
+                                          {"masked", !layer.mask.isNull()},
+                                          {"maskEnabled", layer.mask_enabled},
+                                          {"visible", layer.visible},
+                                          {"warped", layer.warped},
+                                          {"warpCenterY", layer.warp_grid[4].y()}});
+                visit(layer.children);
+            }
+        };
+        visit(state.layers);
+        for (double value : state.horizontal_guides)
+            guides_h.append(value);
+        for (double value : state.vertical_guides)
+            guides_v.append(value);
+        QJsonArray elements;
+        for (int i = 0; i < c->path.elementCount(); ++i) {
+            const auto e = c->path.elementAt(i);
+            elements.append(QJsonArray{e.x, e.y, int(e.type)});
+        }
+        QJsonObject result{
+            {"pathPoints", elements},
+            {"guidesVisible", c->show_guides},
+            {"guidesLocked", c->lock_guides},
+            {"grid", c->show_grid},
+            {"rulers", c->show_rulers},
+            {"snap", c->snap},
+            {"layers", layers},
+            {"active", c->active_layer.toString()},
+            {"selected", int(c->selected_layers.size())},
+            {"pending", c->transforming()},
+            {"phase", c->ants_phase()},
+            {"horizontal", guides_h},
+            {"vertical", guides_v},
+            {"pathElements", c->path.elementCount()},
+            {"pathClosed",
+             !c->path.isEmpty() && c->path.currentPosition() ==
+                                       QPointF(c->path.elementAt(0).x, c->path.elementAt(0).y)},
+            {"history", int(c->project().history_position())},
+            {"maskTarget", c->mask_target},
+            {"maskView", c->mask_view}};
+        if (o.contains("x")) {
+            const int x = o.value("x").toInt(), y = o.value("y").toInt();
+            const auto image = display_image(render(state));
+            if (image.rect().contains(x, y)) {
+                const auto pixel = image.pixelColor(x, y);
+                result.insert("rgba",
+                              QJsonArray{pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()});
+                result.insert("range", state.selection.isNull()
+                                           ? -1
+                                           : int(state.selection.constScanLine(y)[x]));
+            }
+        }
+        return result;
     }
     if (op == "window_open") {
         d.window->open_document(o.value("path").toString(), o.value("place").toBool());
@@ -117,6 +342,97 @@ QJsonObject run(const QJsonObject& o) {
         return {{"ok", true}};
     }
     if (op == "window_action") {
+        d.window->setProperty("conflictDetected", false);
+        if (o.contains("dialog")) {
+            auto* timer = new QTimer(d.window.get());
+            timer->setInterval(20);
+            auto phase = std::make_shared<int>(0);
+            auto ticks = std::make_shared<int>(0);
+            const auto settings = o.value("dialog").toObject();
+            QObject::connect(
+                timer, &QTimer::timeout, d.window.get(),
+                [timer, phase, settings, ticks, window = d.window.get()] {
+                    if (++*ticks > 500) {
+                        if (auto* active =
+                                qobject_cast<QDialog*>(QApplication::activeModalWidget()))
+                            active->reject();
+                        timer->stop();
+                        timer->deleteLater();
+                        return;
+                    }
+                    auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                    if (!modal)
+                        return;
+                    if (auto* file = qobject_cast<QFileDialog*>(modal)) {
+                        file->selectFile(settings.value("path").toString());
+                        static_cast<QDialog*>(file)->accept();
+                        timer->stop();
+                        timer->deleteLater();
+                        return;
+                    }
+                    if (*phase == 0) {
+                        for (auto it = settings.begin(); it != settings.end(); ++it) {
+                            if (auto* spin = modal->findChild<QSpinBox*>(it.key()))
+                                spin->setValue(it.value().toInt());
+                            else if (auto* combo = modal->findChild<QComboBox*>(it.key()))
+                                combo->setCurrentIndex(it.value().toInt());
+                            else if (auto* check = modal->findChild<QCheckBox*>(it.key()))
+                                check->setChecked(it.value().toBool());
+                        }
+                        if (settings.contains("capture"))
+                            modal->grab().save(settings.value("capture").toString());
+                        if (settings.contains("conflict")) {
+                            auto* table = modal->findChild<QTableWidget*>("shortcutTable");
+                            if (table && table->rowCount() > 1) {
+                                static_cast<QKeySequenceEdit*>(table->cellWidget(0, 1))
+                                    ->setKeySequence(QKeySequence("Ctrl+Q"));
+                                static_cast<QKeySequenceEdit*>(table->cellWidget(1, 1))
+                                    ->setKeySequence(QKeySequence("Ctrl+Q"));
+                                auto* box = modal->findChild<QDialogButtonBox*>();
+                                box->button(QDialogButtonBox::Ok)->click();
+                                window->setProperty(
+                                    "conflictDetected",
+                                    !modal->findChild<QLabel*>("shortcutError")->text().isEmpty());
+                            }
+                        }
+                        if (settings.contains("binding")) {
+                            const auto binding = settings.value("binding").toObject();
+                            auto* table = modal->findChild<QTableWidget*>("shortcutTable");
+                            if (table)
+                                for (int i = 0; i < table->rowCount(); ++i)
+                                    if (table->item(i, 0)->text() ==
+                                        binding.value("name").toString())
+                                        static_cast<QKeySequenceEdit*>(table->cellWidget(i, 1))
+                                            ->setKeySequence(
+                                                QKeySequence(binding.value("key").toString()));
+                        }
+                        if (settings.contains("capture"))
+                            modal->grab().save(settings.value("capture").toString());
+                        ++*phase;
+                        if (settings.value("accept").toBool()) {
+                            if (auto* box = modal->findChild<QDialogButtonBox*>()) {
+                                auto* button = box->button(QDialogButtonBox::Ok);
+                                if (!button)
+                                    button = box->button(QDialogButtonBox::Save);
+                                if (!button)
+                                    button = box->button(QDialogButtonBox::Open);
+                                if (button)
+                                    button->click();
+                                else
+                                    modal->accept();
+                            } else
+                                modal->accept();
+                        } else
+                            modal->reject();
+                        if (!settings.contains("path")) {
+                            timer->stop();
+                            timer->deleteLater();
+                        }
+                    }
+                });
+            timer->start();
+        }
+
         if (o.contains("answer")) {
             QTimer::singleShot(0, [o] {
                 auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
@@ -125,7 +441,10 @@ QJsonObject run(const QJsonObject& o) {
                     dialog->accept();
                 } else if (auto* box =
                                qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
-                    box->done(QMessageBox::Yes);
+                    box->done(o.value("answer").toString() == "cancel"    ? QMessageBox::Cancel
+                              : o.value("answer").toString() == "discard" ? QMessageBox::Discard
+                              : o.value("answer").toString() == "save"    ? QMessageBox::Save
+                                                                          : QMessageBox::Yes);
                 else if (auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
                     for (auto* widget : modal->findChildren<QWidget*>())
                         if (auto* nested = dynamic_cast<huelith::desktop::MainWindow*>(widget)) {
@@ -147,7 +466,8 @@ QJsonObject run(const QJsonObject& o) {
             if (action->text() == o.value("text").toString()) {
                 action->trigger();
                 QApplication::processEvents();
-                return {{"ok", true}};
+                return {{"ok", true},
+                        {"conflictDetected", d.window->property("conflictDetected").toBool()}};
             }
         }
         throw EditError("action missing");
@@ -158,8 +478,12 @@ QJsonObject run(const QJsonObject& o) {
         if (!item)
             throw EditError("row missing");
         const auto rect = tree->visualItemRect(item);
-        const QPointF point(rect.left() + 110, rect.center().y());
-        const auto modifiers = o.value("control").toBool() ? Qt::ControlModifier : Qt::NoModifier;
+        const int column = o.value("column").toInt();
+        const QPointF point(column == 2 ? tree->columnViewportPosition(2) + 20
+                                        : rect.left() + o.value("offset").toInt(110),
+                            rect.center().y());
+        const auto modifiers = Qt::KeyboardModifiers(
+            o.value("modifiers").toInt(o.value("control").toBool() ? int(Qt::ControlModifier) : 0));
         QMouseEvent press(QEvent::MouseButtonPress, point,
                           tree->viewport()->mapToGlobal(point.toPoint()), Qt::LeftButton,
                           Qt::LeftButton, modifiers);
@@ -168,6 +492,30 @@ QJsonObject run(const QJsonObject& o) {
                             tree->viewport()->mapToGlobal(point.toPoint()), Qt::LeftButton,
                             Qt::NoButton, modifiers);
         QApplication::sendEvent(tree->viewport(), &release);
+        if (o.value("double").toBool()) {
+            QMouseEvent click(QEvent::MouseButtonDblClick, point,
+                              tree->viewport()->mapToGlobal(point.toPoint()), Qt::LeftButton,
+                              Qt::LeftButton, modifiers);
+            QApplication::sendEvent(tree->viewport(), &click);
+            QApplication::processEvents();
+            if (o.contains("rename"))
+                if (auto* editor = tree->findChild<QLineEdit*>()) {
+                    editor->setText(o.value("rename").toString());
+                    QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                    QApplication::sendEvent(editor, &enter);
+                }
+        }
+        if (o.contains("drop")) {
+            const auto* destination = tree->topLevelItem(o.value("drop").toInt());
+            const auto where = tree->visualItemRect(destination).center();
+            std::unique_ptr<QMimeData> mime(
+                tree->model()->mimeData({tree->model()->index(o.value("index").toInt(), 0)}));
+            QDragEnterEvent enter(where, Qt::MoveAction, mime.get(), Qt::LeftButton,
+                                  Qt::NoModifier);
+            QApplication::sendEvent(tree->viewport(), &enter);
+            QDropEvent drop(where, Qt::MoveAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(tree->viewport(), &drop);
+        }
         QApplication::processEvents();
         return {{"ok", true}};
     }
@@ -216,6 +564,8 @@ QJsonObject run(const QJsonObject& o) {
     }
     if (op == "window_key") {
         auto* c = d.window->active_canvas();
+        d.window->activateWindow();
+        QApplication::processEvents();
         c->setFocus();
         const auto keys = QKeySequence(o.value("key").toString());
         const auto combination = keys[0];

@@ -25,15 +25,24 @@ void check_size(QSize size) {
 }
 float coverage(const Layer& layer, int x, int y) {
     float value = layer.opacity;
+    QPointF position(x + .5, y + .5);
+    if (layer.warped && layer.mask_linked && (!layer.mask.isNull() || layer.vector_enabled)) {
+        const auto local =
+            warp_point(layer, layer.pixels.isNull() ? layer.mask.size() : layer.pixels.size(),
+                       layer.transform.inverted().map(position), true);
+        if (!local)
+            return 0;
+        position = layer.transform.map(*local);
+    }
     if (layer.mask_enabled && !layer.mask.isNull()) {
-        const auto p = layer.mask_transform.inverted().map(QPointF(x + .5, y + .5));
+        const auto p = layer.mask_transform.inverted().map(position);
         const int mx = static_cast<int>(std::floor(p.x()));
         const int my = static_cast<int>(std::floor(p.y()));
         value *=
             layer.mask.rect().contains(mx, my) ? layer.mask.constScanLine(my)[mx] / 255.F : 0.F;
     }
     if (layer.vector_enabled &&
-        !layer.vector_mask.contains(layer.mask_transform.inverted().map(QPointF(x + .5, y + .5))))
+        !layer.vector_mask.contains(layer.mask_transform.inverted().map(position)))
         return 0.F;
     return value;
 }
@@ -101,6 +110,33 @@ void transform_children(std::vector<Layer>& children, const QTransform& transfor
     }
 }
 
+void paint_warp(QPainter& painter, const QImage& image, const Layer& layer) {
+    if (!layer.warped) {
+        painter.drawImage(QPointF(), image);
+        return;
+    }
+    for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x) {
+            const double w = image.width() / 2., h = image.height() / 2.;
+            const QRectF source(x * w, y * h, w, h);
+            const auto point = [&](int column, int row) {
+                const auto value = layer.warp_grid[std::size_t(row * 3 + column)];
+                return QPointF(value.x() * image.width(), value.y() * image.height());
+            };
+            const QPolygonF target{point(x, y), point(x + 1, y), point(x + 1, y + 1),
+                                   point(x, y + 1)};
+            QTransform matrix;
+            if (!QTransform::quadToQuad(QPolygonF{source.topLeft(), source.topRight(),
+                                                  source.bottomRight(), source.bottomLeft()},
+                                        target, matrix))
+                continue;
+            painter.save();
+            painter.setTransform(matrix, true);
+            painter.setClipRect(source);
+            painter.drawImage(QPointF(), image);
+            painter.restore();
+        }
+}
 void render_layers(QImage& target, const std::vector<Layer>& layers) {
     QImage base;
     for (const auto& layer : layers) {
@@ -127,7 +163,7 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
             continue;
         }
         if (layer.kind == LayerKind::group && !layer.isolated && !layer.clipped &&
-            layer.blend == Blend::normal) {
+            layer.blend == Blend::normal && !layer.warped) {
             const QImage before = target;
             auto children = layer.children;
             transform_children(children, layer.transform);
@@ -151,11 +187,11 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
         QImage local = blank(target.size());
         if (layer.kind == LayerKind::group || layer.kind == LayerKind::composition) {
             render_layers(local, layer.children);
-            if (!layer.transform.isIdentity()) {
+            if (!layer.transform.isIdentity() || layer.warped) {
                 QImage transformed = blank(target.size());
                 QPainter painter(&transformed);
                 painter.setTransform(layer.transform);
-                painter.drawImage(0, 0, local);
+                paint_warp(painter, local, layer);
                 painter.end();
                 local = transformed;
             }
@@ -172,7 +208,7 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
                 } else
                     painter.fillRect(local.rect(), working_color(layer.fill));
             } else
-                painter.drawImage(QPointF(), layer.pixels);
+                paint_warp(painter, layer.pixels, layer);
         }
         if (layer.exposure != 0) {
             const float gain = static_cast<float>(std::exp2(layer.exposure));
@@ -200,6 +236,16 @@ void validate_layers(const std::vector<Layer>& layers, QSet<QUuid>& ids, int dep
         if (layer.id.isNull() || ids.contains(layer.id) || ids.size() >= 4096)
             throw EditError(QStringLiteral("图层标识重复或数量过多"));
         ids.insert(layer.id);
+        for (const auto& matrix : {layer.transform, layer.mask_transform})
+            for (double value :
+                 {matrix.m11(), matrix.m12(), matrix.m13(), matrix.m21(), matrix.m22(),
+                  matrix.m23(), matrix.m31(), matrix.m32(), matrix.m33()})
+                if (!std::isfinite(value))
+                    throw EditError(QStringLiteral("变换含非有限数值"));
+        for (const auto& point : layer.warp_grid)
+            if (!std::isfinite(point.x()) || !std::isfinite(point.y()) ||
+                std::abs(point.x()) > 100 || std::abs(point.y()) > 100)
+                throw EditError(QStringLiteral("无效网格变形坐标"));
         if (layer.name.trimmed().isEmpty() || !std::isfinite(layer.opacity) || layer.opacity < 0 ||
             layer.opacity > 1 || !std::isfinite(layer.exposure) || std::abs(layer.exposure) > 16 ||
             !layer.transform.isInvertible() || !layer.mask_transform.isInvertible())
@@ -457,5 +503,184 @@ QStringList Project::history_names() const {
     for (const auto& entry : history_)
         result << entry.name;
     return result;
+}
+
+bool Project::seek_history(std::size_t position) {
+    if (position >= history_.size())
+        return false;
+    position_ = position;
+    state_ = history_[position].state;
+    revision_ = history_[position].revision;
+    return true;
+}
+State Project::history_state(std::size_t position) const {
+    if (position >= history_.size())
+        throw EditError(QStringLiteral("无效历史位置"));
+    return history_[position].state;
+}
+QTransform parent_matrix(const State& state, const QUuid& id) {
+    QTransform result;
+    std::function<bool(const std::vector<Layer>&, QTransform)> visit;
+    visit = [&](const auto& layers, QTransform parent) {
+        for (const auto& layer : layers) {
+            if (layer.id == id) {
+                result = parent;
+                return true;
+            }
+            if (visit(layer.children, layer.transform * parent))
+                return true;
+        }
+        return false;
+    };
+    visit(state.layers, {});
+    return result;
+}
+QRectF layer_bounds(const State& state, const QUuid& id) {
+    const auto* layer = find_layer(state.layers, id);
+    if (!layer)
+        return {};
+    if (!layer->children.empty()) {
+        QRectF bounds;
+        for (const auto& child : layer->children)
+            bounds = bounds.united(layer_bounds(state, child.id));
+        return bounds;
+    }
+    const QRectF rect = layer->pixels.isNull() ? QRectF(QPointF(), QSizeF(state.size))
+                                               : QRectF(layer->pixels.rect());
+    return (layer->transform * parent_matrix(state, id)).mapRect(rect);
+}
+std::vector<QUuid> root_targets(const State& state, const std::vector<QUuid>& ids) {
+    std::vector<QUuid> result;
+    std::function<void(const std::vector<Layer>&)> visit = [&](const auto& layers) {
+        for (const auto& layer : layers) {
+            if (std::find(ids.begin(), ids.end(), layer.id) != ids.end()) {
+                result.push_back(layer.id);
+            } else
+                visit(layer.children);
+        }
+    };
+    visit(state.layers);
+    return result;
+}
+void transform_targets(State& state, const std::vector<QUuid>& ids, const QTransform& delta,
+                       bool mask) {
+    for (const auto& id : root_targets(state, ids)) {
+        if (layer_locked(state.layers, id))
+            throw EditError(QStringLiteral("选择包含锁定图层"));
+        const auto parent = parent_matrix(state, id);
+        auto* layer = find_layer(state.layers, id);
+        const auto local = parent * delta * parent.inverted();
+        if (mask)
+            layer->mask_transform *= local;
+        else {
+            layer->transform *= local;
+            if (layer->mask_linked)
+                layer->mask_transform *= local;
+        }
+    }
+}
+std::optional<QPointF> warp_point(const Layer& layer, QSize size, QPointF point, bool inverse) {
+    if (!layer.warped)
+        return point;
+    if (size.isEmpty())
+        return std::nullopt;
+    for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x) {
+            const double w = size.width() / 2., h = size.height() / 2.;
+            const QRectF source(x * w, y * h, w, h);
+            const auto grid = [&](int col, int row) {
+                const auto p = layer.warp_grid[std::size_t(row * 3 + col)];
+                return QPointF(p.x() * size.width(), p.y() * size.height());
+            };
+            const QPolygonF target{grid(x, y), grid(x + 1, y), grid(x + 1, y + 1), grid(x, y + 1)};
+            QTransform matrix;
+            if (!QTransform::quadToQuad(QPolygonF{source.topLeft(), source.topRight(),
+                                                  source.bottomRight(), source.bottomLeft()},
+                                        target, matrix))
+                continue;
+            if (inverse) {
+                const auto mapped = matrix.inverted().map(point);
+                if (source.adjusted(-1e-8, -1e-8, 1e-8, 1e-8).contains(mapped))
+                    return mapped;
+            } else if (source.contains(point))
+                return matrix.map(point);
+        }
+    return std::nullopt;
+}
+QUuid hit_layer(const State& state, QPointF point, double tolerance) {
+    // Use visible source alpha, nested transforms and clipping bases, not rectangular bounds.
+    std::function<float(const Layer&, QTransform, QPointF)> alpha_at;
+    alpha_at = [&](const Layer& layer, QTransform parent, QPointF p) -> float {
+        if (!layer.visible || layer.kind == LayerKind::adjustment)
+            return 0;
+        const auto world = layer.transform * parent;
+        const auto size = layer.pixels.isNull() ? state.size : layer.pixels.size();
+        const auto local = warp_point(layer, size, world.inverted().map(p), true);
+        if (!local)
+            return 0;
+        const auto original = world.map(*local);
+        Layer mask_layer = layer;
+        mask_layer.warped = false;
+        mask_layer.mask_transform *= parent;
+        const auto mask_position = layer.mask_linked ? original : p;
+        float alpha = coverage(mask_layer, int(std::floor(mask_position.x())),
+                               int(std::floor(mask_position.y())));
+        if (!layer.children.empty()) {
+            float combined = 0, base = 0;
+            for (const auto& child : layer.children) {
+                float value = alpha_at(child, world, original);
+                if (child.clipped)
+                    value *= base;
+                else
+                    base = value;
+                combined = value + combined * (1 - value);
+            }
+            return alpha * combined;
+        }
+        if (layer.kind == LayerKind::fill)
+            return QRectF(QPointF(), QSizeF(state.size)).contains(*local)
+                       ? alpha * float(layer.fill.alphaF())
+                       : 0;
+        const QPoint pixel(int(std::floor(local->x())), int(std::floor(local->y())));
+        return layer.pixels.rect().contains(pixel)
+                   ? alpha * reinterpret_cast<const float*>(
+                                 layer.pixels.constScanLine(pixel.y()))[pixel.x() * 4 + 3]
+                   : 0;
+    };
+    std::function<QUuid(const std::vector<Layer>&, QTransform, QPointF)> visit;
+    visit = [&](const auto& layers, QTransform parent, QPointF p) -> QUuid {
+        for (std::size_t index = layers.size(); index > 0; --index) {
+            const auto& layer = layers[index - 1];
+            if (layer.locked || !layer.visible)
+                continue;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const QPointF sample = p + QPointF(dx * tolerance, dy * tolerance);
+                    float alpha = alpha_at(layer, parent, sample);
+                    if (layer.clipped) {
+                        std::size_t base = index - 1;
+                        while (base > 0 && layers[base].clipped)
+                            --base;
+                        alpha *= layers[base].clipped ? 0 : alpha_at(layers[base], parent, sample);
+                    }
+                    if (alpha <= .01F)
+                        continue;
+                    if (!layer.children.empty()) {
+                        const auto world = layer.transform * parent;
+                        const auto local =
+                            warp_point(layer, state.size, world.inverted().map(sample), true);
+                        if (local) {
+                            const auto child = visit(layer.children, world, world.map(*local));
+                            if (!child.isNull())
+                                return child;
+                        }
+                        continue;
+                    }
+                    return layer.id;
+                }
+        }
+        return {};
+    };
+    return visit(state.layers, {}, point);
 }
 } // namespace huelith::editing

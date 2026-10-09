@@ -167,7 +167,7 @@ def main():
             image=folder/'source.png';Image.new('RGB',(128,96),(190,100,40)).save(image)
             original=hashlib.sha256(image.read_bytes()).hexdigest()
             call('window_open',path=str(image));assert call('window_state')['count']==2
-            call('window_open',path=str(image),place=True);state=call('window_state');assert state['layers']==2 and state['treeRows']==2
+            call('window_open',path=str(image),place=True);call('window_key',key='Return');state=call('window_state');assert state['layers']==2 and state['treeRows']==2
             assert hashlib.sha256(image.read_bytes()).hexdigest()==original
             before=call('window_state')['revision'];call('window_slider');after=call('window_state')['revision'];assert after==before+1
             call('window_action',text='撤销');assert call('window_state')['revision']==before

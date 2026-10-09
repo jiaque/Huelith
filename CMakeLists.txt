@@ -50,6 +50,7 @@ add_library(huelith_desktop
     apps/desktop/window_header.cpp
     apps/desktop/canvas_view.cpp
     apps/desktop/editor_controller.cpp
+    apps/desktop/editor_workflows.cpp
     apps/desktop/new_document_dialog.cpp
     apps/desktop/validation_session.cpp
     apps/desktop/main_window.cpp)

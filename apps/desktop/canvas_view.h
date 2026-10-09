@@ -19,7 +19,10 @@ enum class CanvasTool {
     brush,
     eraser,
     wand,
-    color_range
+    color_range,
+    zoom,
+    path_select,
+    history_brush
 };
 class CanvasView final : public QWidget {
   public:
@@ -47,9 +50,30 @@ class CanvasView final : public QWidget {
         return tool_;
     }
     bool show_transform_controls{true};
+    bool warp_mode{};
+    [[nodiscard]] std::array<QPointF, 9> warp_handles() const;
+    [[nodiscard]] const editing::State& display_state() const {
+        return brush_draft_ ? *brush_draft_ : visible_state();
+    }
     bool keep_aspect{true};
     bool auto_select{true};
-    bool begin_transform();
+    bool begin_transform(bool selection = false);
+    void stage_layer(editing::Layer layer);
+    std::vector<QUuid> selected_layers;
+    double hit_tolerance{3};
+    int color_tolerance{32};
+    bool contiguous{true};
+    bool antialias{true};
+    double brush_hardness{.8};
+    double brush_opacity{1};
+    double brush_flow{1};
+    bool pressure_enabled{true};
+    QImage history_source;
+    double grid_spacing{100};
+    [[nodiscard]] int ants_phase() const noexcept {
+        return ants_phase_;
+    }
+
     void commit_transform();
     void cancel_transform();
     [[nodiscard]] bool transforming() const noexcept {
@@ -66,6 +90,8 @@ class CanvasView final : public QWidget {
     bool mask_target{};
     bool mask_view{};
     bool show_grid{};
+    bool show_guides{true};
+    bool lock_guides{};
     bool show_rulers{true};
     bool snap{true};
     double rotation{};
@@ -74,6 +100,7 @@ class CanvasView final : public QWidget {
     QColor background{Qt::white};
     editing::RangeOp range_operation{editing::RangeOp::replace};
     QPainterPath path;
+    void set_path(QPainterPath value);
     QString filename;
     QString recovery_file;
     QString comparison;
@@ -89,6 +116,7 @@ class CanvasView final : public QWidget {
     void wheelEvent(QWheelEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
     void keyReleaseEvent(QKeyEvent*) override;
+    void tabletEvent(QTabletEvent*) override;
 
   private:
     QRectF target_rect() const;
@@ -106,6 +134,36 @@ class CanvasView final : public QWidget {
     QPointF transform_press_;
     bool transform_modified_{};
     bool move_gesture_{};
+    bool selection_transform_{};
+    bool placement_{};
+    QRectF transform_rect_;
+    QTransform transform_frame_, drag_frame_;
+    editing::State drag_state_;
+    std::vector<QUuid> transform_ids_;
+    void start_transform_drag(int handle, QPointF position);
+    void apply_transform_delta(const QTransform& delta);
+    void update_selection_outline();
+    QPainterPath selection_outline_;
+    qint64 selection_cache_key_{};
+    int ants_phase_{};
+    int guide_index_{-1};
+    QPointF cursor_position_;
+    double pressure_{1};
+    QImage stroke_coverage_;
+    std::optional<editing::State> stroke_base_;
+    void stamp_brush(QPointF from, QPointF to);
+    void update_brush_preview();
+    struct PenNode {
+        QPointF anchor, incoming, outgoing;
+    };
+    std::vector<PenNode> pen_nodes_;
+    bool pen_closed_{};
+    int pen_drag_node_{-1};
+    int pen_drag_control_{};
+    void rebuild_pen();
+    std::optional<editing::State> brush_draft_;
+    quint64 brush_revision_{};
+
     void finish_path();
     void apply_stroke();
     CanvasSpec spec_;
@@ -127,6 +185,7 @@ class CanvasView final : public QWidget {
     bool dragging_{};
     bool temporary_hand_{};
     bool pan_gesture_{};
+    Qt::KeyboardModifiers selection_start_modifiers_{};
     editing::RangeOp gesture_range_{editing::RangeOp::replace};
 };
 } // namespace huelith::desktop

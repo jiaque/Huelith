@@ -4,11 +4,11 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 ROOT=Path(__file__).resolve().parents[1]
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--build',default='windows-release');args=parser.parse_args()
-    output=ROOT/'docs/test-evidence/M1/interaction';output.mkdir(parents=True,exist_ok=True)
+    parser=argparse.ArgumentParser();parser.add_argument('--build',default='windows-release');parser.add_argument('--platform',default='windows');args=parser.parse_args()
+    output=ROOT/('docs/test-evidence/M1/interaction' if args.platform=='windows' else 'docs/test-evidence/M1/interaction-offscreen');output.mkdir(parents=True,exist_ok=True)
     qt=Path(r'D:\Program Files\Qt\6.10.3\msvc2022_64')
     handles=[os.add_dll_directory(str(qt/'bin')),os.add_dll_directory(str(ROOT/'build'/args.build))]
-    os.environ['QT_PLUGIN_PATH']=str(qt/'plugins');os.environ['QT_QPA_PLATFORM']='windows'
+    os.environ['QT_PLUGIN_PATH']=str(qt/'plugins');os.environ['QT_QPA_PLATFORM']=args.platform
     library=ctypes.CDLL(str(ROOT/'build'/args.build/'huelith_python_driver.dll'));command=library.huelith_python_command
     command.argtypes=[ctypes.c_char_p];command.restype=ctypes.c_char_p
     transcript=[];results=[]

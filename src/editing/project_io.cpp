@@ -12,7 +12,7 @@
 namespace huelith::editing {
 namespace {
 constexpr qint64 file_budget = 1024LL * 1024 * 1024;
-constexpr quint32 schema = 2;
+constexpr quint32 schema = 3;
 void checked(QDataStream& stream) {
     if (stream.status() != QDataStream::Ok)
         throw EditError(QStringLiteral("工程截断或数据无效"));
@@ -69,12 +69,15 @@ void write_layers(QDataStream& out, const std::vector<Layer>& layers) {
             << layer.clipped << layer.isolated << layer.opacity << qint32(layer.blend)
             << layer.exposure << layer.fill << layer.fill_end << layer.gradient << layer.linked_path
             << layer.linked_hash;
+        out << layer.warped;
+        for (const auto& point : layer.warp_grid)
+            out << point;
         write_image(out, layer.pixels);
         write_image(out, layer.mask);
         write_layers(out, layer.children);
     }
 }
-std::vector<Layer> read_layers(QDataStream& in, int depth, int& count) {
+std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 version) {
     quint32 size{};
     in >> size;
     checked(in);
@@ -95,9 +98,14 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count) {
             throw EditError(QStringLiteral("工程含未知图层，已拒绝打开并保留原文件"));
         layer.kind = static_cast<LayerKind>(kind);
         layer.blend = static_cast<Blend>(blend);
+        if (version >= 3) {
+            in >> layer.warped;
+            for (auto& point : layer.warp_grid)
+                in >> point;
+        }
         layer.pixels = read_image(in);
         layer.mask = read_image(in);
-        layer.children = read_layers(in, depth + 1, count);
+        layer.children = read_layers(in, depth + 1, count, version);
         layers.push_back(std::move(layer));
     }
     return layers;
@@ -245,7 +253,7 @@ State load_project(const QString& path) {
         throw EditError(QStringLiteral("工程超过当前读取预算"));
     const auto entries = unarchive(file.readAll());
     const auto manifest = QJsonDocument::fromJson(entries.value("manifest.json")).object();
-    if (manifest.value("schema").toInt() != int(schema) ||
+    if ((manifest.value("schema").toInt() < 2 || manifest.value("schema").toInt() > int(schema)) ||
         manifest.value("pixels").toString() != "rgba-f32-le-premultiplied")
         throw EditError(QStringLiteral("不支持的工程版本，原文件未修改"));
     QDataStream in(entries.value("document.bin"));
@@ -254,10 +262,10 @@ State load_project(const QString& path) {
     quint32 version{};
     State state;
     in >> version >> state.size >> state.name >> state.ppi;
-    if (version != schema)
+    if (version < 2 || version > schema || int(version) != manifest.value("schema").toInt())
         throw EditError(QStringLiteral("工程版本不匹配"));
     int count{};
-    state.layers = read_layers(in, 0, count);
+    state.layers = read_layers(in, 0, count, version);
     state.selection = read_image(in);
     state.saved_selections = read_images(in);
     state.snapshots = read_images(in);

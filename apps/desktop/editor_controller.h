@@ -1,8 +1,11 @@
 #pragma once
 #include <QObject>
+#include <QPoint>
 #include <QUuid>
 #include <functional>
 #include <memory>
+#include <optional>
+class QWidget;
 class QTreeWidget;
 class QListWidget;
 class QDoubleSpinBox;
@@ -18,7 +21,7 @@ class EditorController final : public QObject {
     explicit EditorController(MainWindow* window);
     ~EditorController() override;
     void bind(CanvasView* canvas);
-    void refresh();
+    void refresh(bool rebuild_tree = true);
     bool open(const QString& path, bool place = false);
     bool save(CanvasView* canvas, bool save_as = false, bool asynchronous = true);
     bool confirm_close(CanvasView* canvas);
@@ -34,6 +37,12 @@ class EditorController final : public QObject {
     void selection_action(const QString& operation);
     void configure_menus();
     void refresh_tools();
+    void copy_pixels(bool merged, bool cut);
+    void paste_pixels(bool in_place, bool into_selection);
+    void align_layers(const QString& operation);
+    void show_export();
+    void show_shortcuts();
+    void offer_recovery();
     void build_properties();
     void update_recent(const QString& path);
     void autosave();
@@ -55,5 +64,8 @@ class EditorController final : public QObject {
     QMenu* recent_{};
     QComboBox* blend_{};
     bool refreshing_{};
+    QWidget* layer_controls_{};
+    bool align_to_canvas_{true};
+    Qt::KeyboardModifiers layer_click_modifiers_{};
 };
 } // namespace huelith::desktop

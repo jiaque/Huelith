@@ -7,7 +7,9 @@
 #include <QString>
 #include <QTransform>
 #include <QUuid>
+#include <array>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -26,6 +28,10 @@ struct Layer {
     QImage pixels; // Immutable source, linear Rec.2020 floating-point premultiplied RGBA.
     QImage mask;   // Grayscale coverage in canvas coordinates before mask_transform.
     QTransform transform;
+    bool warped{};
+    std::array<QPointF, 9> warp_grid{QPointF(0, 0),  QPointF(.5, 0),  QPointF(1, 0),
+                                     QPointF(0, .5), QPointF(.5, .5), QPointF(1, .5),
+                                     QPointF(0, 1),  QPointF(.5, 1),  QPointF(1, 1)};
     QTransform mask_transform;
     QPainterPath vector_mask;
     bool vector_enabled{};
@@ -77,6 +83,12 @@ void modify_range(State& state, int radius, int operation); // 0 blur, 1 expand,
 void export_image(const State& state, const QString& path, QColor matte = Qt::white,
                   int quality = 95);
 
+[[nodiscard]] QTransform parent_matrix(const State& state, const QUuid& id);
+[[nodiscard]] QRectF layer_bounds(const State& state, const QUuid& id);
+[[nodiscard]] QUuid hit_layer(const State& state, QPointF point, double tolerance);
+[[nodiscard]] std::vector<QUuid> root_targets(const State& state, const std::vector<QUuid>& ids);
+void transform_targets(State& state, const std::vector<QUuid>& ids, const QTransform& delta,
+                       bool mask);
 struct Snapshot {
     State state;
     quint64 revision{};
@@ -106,6 +118,11 @@ class Project final {
     void edit(const QString& name, const std::function<void(State&)>& operation);
     bool undo();
     bool redo();
+    bool seek_history(std::size_t position);
+    [[nodiscard]] std::size_t history_position() const noexcept {
+        return position_;
+    }
+    [[nodiscard]] State history_state(std::size_t position) const;
     void mark_saved(quint64 revision) noexcept {
         saved_revision_ = revision;
     }
@@ -126,4 +143,6 @@ class Project final {
 // Atomic snapshot writes. Saving a snapshot never marks newer edits as saved.
 void save_project(const Snapshot& snapshot, const QString& path, bool simulate_failure = false);
 [[nodiscard]] State load_project(const QString& path);
+[[nodiscard]] std::optional<QPointF> warp_point(const Layer& layer, QSize size, QPointF point,
+                                                bool inverse);
 } // namespace huelith::editing
