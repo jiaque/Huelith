@@ -10,25 +10,29 @@ class QMenuBar;
 
 namespace huelith::desktop {
 class CanvasView;
+class EditorController;
 class MainWindow final : public QMainWindow {
-public:
+  public:
     explicit MainWindow(QWidget* parent = nullptr);
     [[nodiscard]] bool create_document(const CanvasSpec& spec);
     [[nodiscard]] int document_count() const noexcept;
     void reset_workspace();
+    [[nodiscard]] CanvasView* active_canvas() const;
+    bool open_document(const QString& path, bool place = false);
 
-protected:
+  protected:
     void closeEvent(QCloseEvent* event) override;
     bool nativeEvent(const QByteArray& event_type, void* message, qintptr* result) override;
 
-private:
+  private:
+    friend class EditorController;
+    EditorController* editor_{};
     void build_menus();
     void build_panels();
     void request_new_document();
     void request_close_document(int index);
     void refresh_document_state();
     void change_zoom(double multiplier);
-    [[nodiscard]] CanvasView* active_canvas() const;
     [[nodiscard]] bool confirm_discard();
 
     // Qt parent ownership; these pointers only observe child widgets.

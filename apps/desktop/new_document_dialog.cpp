@@ -38,7 +38,7 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent) : QDialog(parent) {
     background_ = new QComboBox(this);
     background_->addItems({tr("透明"), tr("白色")});
     form->addRow(tr("背景"), background_);
-    form->addRow(tr("工作色彩"), new QLabel(tr("线性 sRGB（原型暂定）"), this));
+    form->addRow(tr("工作色彩"), new QLabel(tr("线性 Rec.2020 · FP32"), this));
     error_ = new QLabel(this);
     error_->setAccessibleName(tr("输入提示"));
     layout->addWidget(error_);
@@ -50,19 +50,24 @@ NewDocumentDialog::NewDocumentDialog(QWidget* parent) : QDialog(parent) {
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(name_, &QLineEdit::textChanged, this, [this] { update_validation(); });
+    connect(width_, &QSpinBox::valueChanged, this, [this] { update_validation(); });
+    connect(height_, &QSpinBox::valueChanged, this, [this] { update_validation(); });
     update_validation();
 }
 
 CanvasSpec NewDocumentDialog::specification() const {
-    return {name_->text().trimmed().toUtf8().toStdString(), width_->value(), height_->value(),
-            resolution_->value(), background_->currentIndex() == 0
-                ? CanvasBackground::transparent : CanvasBackground::white,
-            WorkingSpace::linear_srgb};
+    return {name_->text().trimmed().toUtf8().toStdString(),
+            width_->value(),
+            height_->value(),
+            resolution_->value(),
+            background_->currentIndex() == 0 ? CanvasBackground::transparent
+                                             : CanvasBackground::white,
+            WorkingSpace::linear_rec2020};
 }
 
 void NewDocumentDialog::update_validation() {
     const bool valid = !validate(specification());
     create_->setEnabled(valid);
-    error_->setText(valid ? QString{} : tr("请输入图片名称。"));
+    error_->setText(valid ? QString{} : tr("请输入名称；当前单张图片上限为 6400 万像素。"));
 }
 } // namespace huelith::desktop

@@ -30,6 +30,10 @@ add_library(huelith_document src/document/canvas_spec.cpp)
 target_include_directories(huelith_document PUBLIC include)
 target_link_libraries(huelith_document PUBLIC huelith_build_options)
 
+add_library(huelith_editing src/editing/project.cpp src/editing/project_io.cpp src/editing/blend.cpp)
+target_include_directories(huelith_editing PUBLIC include)
+target_link_libraries(huelith_editing PUBLIC huelith_build_options Qt6::Gui)
+
 # M0 isolated research prototypes. These do not add M1 product editing features.
 add_library(huelith_validation src/validation/state.cpp src/validation/image_math.cpp src/validation/artistic_blend.cpp)
 target_include_directories(huelith_validation PUBLIC include)
@@ -37,7 +41,7 @@ target_link_libraries(huelith_validation PUBLIC huelith_build_options Qt6::Gui)
 if(WIN32)
     target_sources(huelith_validation PRIVATE src/validation/gpu_probe.cpp)
     target_link_libraries(huelith_validation PRIVATE d3d12 dxgi d3dcompiler)
-    add_executable(huelith_m0_environment tools/m0_environment.cpp)
+    add_executable(huelith_m0_environment EXCLUDE_FROM_ALL tools/m0_environment.cpp)
     target_link_libraries(huelith_m0_environment PRIVATE huelith_build_options Qt6::Gui gdi32)
 endif()
 
@@ -45,17 +49,21 @@ add_library(huelith_desktop
     apps/desktop/application_icon.cpp
     apps/desktop/window_header.cpp
     apps/desktop/canvas_view.cpp
+    apps/desktop/editor_controller.cpp
     apps/desktop/new_document_dialog.cpp
     apps/desktop/validation_session.cpp
     apps/desktop/main_window.cpp)
 target_include_directories(huelith_desktop PUBLIC apps/desktop)
-target_link_libraries(huelith_desktop PUBLIC huelith_document huelith_validation Qt6::Widgets Qt6::Svg)
+target_link_libraries(huelith_desktop PUBLIC huelith_document huelith_editing huelith_validation Qt6::Widgets Qt6::Svg)
+if(WIN32)
+    target_link_libraries(huelith_desktop PRIVATE gdi32)
+endif()
 qt_add_resources(huelith_desktop huelith_assets PREFIX "/huelith"
     BASE apps/desktop/assets FILES apps/desktop/assets/huelith.svg)
 
 qt_add_executable(Huelith WIN32 apps/desktop/main.cpp)
 target_link_libraries(Huelith PRIVATE huelith_desktop)
-qt_add_executable(HuelithM0 WIN32 apps/desktop/m0_workbench.cpp)
+qt_add_executable(HuelithM0 EXCLUDE_FROM_ALL WIN32 apps/desktop/m0_workbench.cpp)
 target_link_libraries(HuelithM0 PRIVATE huelith_desktop)
 if(WIN32)
     enable_language(RC)
@@ -66,7 +74,8 @@ endif()
 add_executable(huelith_icon_export EXCLUDE_FROM_ALL tools/export_windows_icon.cpp)
 target_link_libraries(huelith_icon_export PRIVATE huelith_build_options Qt6::Svg Qt6::Gui)
 
-if(BUILD_TESTING)
+option(HUELITH_BUILD_LEGACY_CPP_TESTS "Historical M0 C++ test executables (Python is the default validation runner)" OFF)
+if(BUILD_TESTING AND HUELITH_BUILD_LEGACY_CPP_TESTS)
     add_test(NAME app_startup COMMAND Huelith --smoke-test)
     set_tests_properties(app_startup PROPERTIES LABELS integration TIMEOUT 30
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
@@ -99,3 +108,10 @@ install(TARGETS Huelith RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS HuelithM0 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 qt_generate_deploy_app_script(TARGET Huelith OUTPUT_SCRIPT deploy_script NO_UNSUPPORTED_PLATFORM_ERROR)
 install(SCRIPT ${deploy_script})
+
+# Python drives production C++ code in-process. No additional test executable.
+option(HUELITH_PYTHON_DRIVER "Build the local Python validation bridge" ON)
+if(HUELITH_PYTHON_DRIVER)
+    add_library(huelith_python_driver SHARED tools/python_driver.cpp)
+    target_link_libraries(huelith_python_driver PRIVATE huelith_desktop)
+endif()

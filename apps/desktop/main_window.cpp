@@ -1,23 +1,25 @@
 #include "main_window.h"
+#include "application_icon.h"
 #include "canvas_view.h"
+#include "editor_controller.h"
 #include "new_document_dialog.h"
 #include "window_header.h"
 #include "window_icons.h"
-#include "application_icon.h"
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDockWidget>
+#include <QFile>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPalette>
 #include <QProxyStyle>
-#include <QStyleFactory>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QStatusBar>
-#include <QTabWidget>
+#include <QStyleFactory>
 #include <QTabBar>
+#include <QTabWidget>
 #include <QToolBar>
 #include <QVBoxLayout>
 #ifdef Q_OS_WIN
@@ -29,7 +31,7 @@
 namespace huelith::desktop {
 namespace {
 class EditorStyle final : public QProxyStyle {
-public:
+  public:
     EditorStyle() : QProxyStyle(QStyleFactory::create("Fusion")) {}
     QIcon standardIcon(StandardPixmap icon, const QStyleOption* option,
                        const QWidget* widget) const override {
@@ -130,14 +132,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(pages_);
     document_status_ = new QLabel(this);
     statusBar()->addWidget(document_status_, 1);
-    statusBar()->addPermanentWidget(new QLabel(tr("M0 · 窗口与空白画布原型"), this));
+    statusBar()->addPermanentWidget(new QLabel(tr("M1 · 通用图片编辑"), this));
     menus_ = new QMenuBar(this);
     build_menus();
     build_panels();
+    editor_ = new EditorController(this);
     setMenuWidget(new WindowHeader(menus_, this));
     default_layout_ = saveState(1);
-    connect(documents_, &QTabWidget::currentChanged, this,
-            [this] { refresh_document_state(); });
+    connect(documents_, &QTabWidget::currentChanged, this, [this] { refresh_document_state(); });
     connect(documents_, &QTabWidget::tabCloseRequested, this,
             [this](int index) { request_close_document(index); });
     refresh_document_state();
@@ -222,6 +224,8 @@ bool MainWindow::create_document(const CanvasSpec& spec) {
         return false;
     }
     auto* canvas = new CanvasView(spec, documents_);
+    if (editor_)
+        editor_->bind(canvas);
     const auto name = QString::fromUtf8(spec.name.data(), static_cast<qsizetype>(spec.name.size()));
     const auto index = documents_->addTab(canvas, name + " *");
     documents_->setCurrentIndex(index);
@@ -229,6 +233,10 @@ bool MainWindow::create_document(const CanvasSpec& spec) {
     canvas->fit_to_view();
     refresh_document_state();
     return true;
+}
+
+bool MainWindow::open_document(const QString& path, bool place) {
+    return editor_->open(path, place);
 }
 
 int MainWindow::document_count() const noexcept {
@@ -256,29 +264,34 @@ void MainWindow::request_new_document() {
 }
 
 bool MainWindow::confirm_discard() {
-    QMessageBox prompt(QMessageBox::Warning, tr("关闭未保存图片"),
-                       tr("当前开发版本尚不支持保存工程。关闭后将丢弃空白图片及其设置。"),
-                       QMessageBox::Discard | QMessageBox::Cancel, this);
-    prompt.button(QMessageBox::Discard)->setText(tr("丢弃并关闭"));
-    prompt.button(QMessageBox::Cancel)->setText(tr("继续编辑"));
-    prompt.setDefaultButton(QMessageBox::Cancel);
-    return prompt.exec() == QMessageBox::Discard;
+    return !editor_ || editor_->confirm_close(active_canvas());
 }
 
 void MainWindow::request_close_document(int index) {
-    if (index < 0 || index >= documents_->count() || !confirm_discard()) {
+    if (index < 0 || index >= documents_->count() ||
+        (editor_ &&
+         !editor_->confirm_close(dynamic_cast<CanvasView*>(documents_->widget(index))))) {
         return;
     }
     auto* page = documents_->widget(index);
+    if (auto* canvas = dynamic_cast<CanvasView*>(page))
+        QFile::remove(canvas->recovery_file);
     documents_->removeTab(index);
     page->deleteLater();
     refresh_document_state();
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (document_count() != 0 && !confirm_discard()) {
-        event->ignore();
-        return;
+    for (int i = 0; i < documents_->count(); ++i) {
+        auto* canvas = dynamic_cast<CanvasView*>(documents_->widget(i));
+        if (editor_ && !editor_->confirm_close(canvas)) {
+            event->ignore();
+            return;
+        }
+    }
+    for (int i = 0; i < documents_->count(); ++i) {
+        if (auto* canvas = dynamic_cast<CanvasView*>(documents_->widget(i)))
+            QFile::remove(canvas->recovery_file);
     }
     event->accept();
 }
@@ -313,9 +326,14 @@ bool MainWindow::nativeEvent(const QByteArray& event_type, void* message, qintpt
             const bool top = y >= bounds.top && y < bounds.top + border;
             const bool bottom = y < bounds.bottom && y >= bounds.bottom - border;
             if (top || bottom || left || right) {
-                *result = top ? (left ? HTTOPLEFT : right ? HTTOPRIGHT : HTTOP)
-                    : bottom ? (left ? HTBOTTOMLEFT : right ? HTBOTTOMRIGHT : HTBOTTOM)
-                    : left ? HTLEFT : HTRIGHT;
+                *result = top      ? (left    ? HTTOPLEFT
+                                      : right ? HTTOPRIGHT
+                                              : HTTOP)
+                          : bottom ? (left    ? HTBOTTOMLEFT
+                                      : right ? HTBOTTOMRIGHT
+                                              : HTBOTTOM)
+                          : left   ? HTLEFT
+                                   : HTRIGHT;
                 return true;
             }
         }
@@ -334,11 +352,23 @@ void MainWindow::refresh_document_state() {
         pages_->setCurrentIndex(0);
         properties_->setText(tr("未打开图片"));
         document_status_->setText(tr("就绪"));
+        if (editor_)
+            editor_->refresh();
         return;
     }
     const auto& spec = canvas->spec();
-    properties_->setText(tr("画布属性\n\n%1 × %2 像素\n%3 ppi\n\n线性 sRGB（原型暂定）\n\n当前仅显示空白画布；高精度图像处理尚未接入。")
-                             .arg(spec.width).arg(spec.height).arg(spec.resolution_ppi));
-    document_status_->setText(tr("%1 × %2 像素  |  未保存").arg(spec.width).arg(spec.height));
+    properties_->setText(tr("%1\n%2 × %3 像素 · %4 ppi\n线性 Rec.2020 · FP32\n当前目标：%5")
+                             .arg(canvas->project().state().name)
+                             .arg(spec.width)
+                             .arg(spec.height)
+                             .arg(spec.resolution_ppi)
+                             .arg(canvas->mask_target ? tr("蒙版") : tr("图层内容")));
+    document_status_->setText(
+        tr("%1 × %2 像素 | %3")
+            .arg(spec.width)
+            .arg(spec.height)
+            .arg(canvas->project().dirty() ? tr("有未保存修改") : tr("已保存")));
+    if (editor_)
+        editor_->refresh();
 }
 } // namespace huelith::desktop

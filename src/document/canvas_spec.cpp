@@ -7,7 +7,7 @@ std::optional<CanvasSpecError> validate(const CanvasSpec& spec) noexcept {
         return CanvasSpecError::empty_name;
     }
     if (spec.width < 1 || spec.height < 1 || spec.width > max_canvas_dimension ||
-        spec.height > max_canvas_dimension) {
+        spec.height > max_canvas_dimension || std::int64_t(spec.width) * spec.height > 64'000'000) {
         return CanvasSpecError::invalid_dimensions;
     }
     if (!std::isfinite(spec.resolution_ppi) || spec.resolution_ppi <= 0.0) {
@@ -15,7 +15,7 @@ std::optional<CanvasSpecError> validate(const CanvasSpec& spec) noexcept {
     }
     if ((spec.background != CanvasBackground::transparent &&
          spec.background != CanvasBackground::white) ||
-        spec.working_space != WorkingSpace::linear_srgb) {
+        spec.working_space != WorkingSpace::linear_rec2020) {
         return CanvasSpecError::invalid_enum;
     }
     return std::nullopt;
