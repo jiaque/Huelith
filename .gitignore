@@ -1,0 +1,39 @@
+# Local planning documents, designs, research snapshots and reference assets
+/docs/
+/design/
+/research/
+/README.md
+
+# Local agent and editor state
+/.agents/
+/.codex/
+/.idea/
+/.vs/
+/CMakeUserPresets.json
+*.user
+*.suo
+
+# Generated build and dependency output
+/build/
+/build-*/
+/cmake-build-*/
+/out/
+/dist/
+/vcpkg_installed/
+CMakeFiles/
+CMakeCache.txt
+Testing/
+
+# Local secrets, logs and temporary files
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+*.bak
+Thumbs.db
+Desktop.ini
+
+# Downloaded model weights and local caches; keep future manifests trackable
+/models/weights/
+/cache/
