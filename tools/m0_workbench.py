@@ -255,12 +255,19 @@ def self_test(app, output):
     session.change(70); session.select('P1'); assert session.value.get() == 30
     assert app.document.state == initial
     app.root.update()
-    box = (session.window.winfo_rootx(),session.window.winfo_rooty(),
-           session.window.winfo_rootx()+session.window.winfo_width(),
-           session.window.winfo_rooty()+session.window.winfo_height())
     screenshot_error = None
     try:
-        ImageGrab.grab(bbox=box,all_screens=True).save(output/'python-person-session.png')
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        # Tk's widget HWND is inside the native top-level wrapper. Capture only
+        # that owned top-level window; never fall back to desktop capture.
+        hwnd = user32.GetAncestor(session.window.winfo_id(), 2)
+        if not hwnd:
+            raise OSError('Unable to resolve the validation window HWND')
+        ImageGrab.grab(window=hwnd).save(output/'python-person-session.png')
     except OSError as error:
         screenshot_error = str(error)
     session.cancel(); assert app.document.state == initial
@@ -284,6 +291,7 @@ def self_test(app, output):
         assert path.read_bytes() == before
         assert json.loads(before)['state'] == initial
     report = dict(passed=True,detected_people=app.people, screenshot_error=screenshot_error,
+        screenshot_method='Pillow window HWND (owned Tk top-level only)',
         checks=['no selection is inert','P1/P2 independent drafts','switch restores parameters',
                 'cancel preserves main','commit changes selected person only','one undo restores',
                 'stale RAW session rejected','different document rejected at same revision',
