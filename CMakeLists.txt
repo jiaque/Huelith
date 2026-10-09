@@ -3,7 +3,7 @@ project(Huelith VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
 option(HUELITH_ENABLE_ASAN "Instrument project targets with AddressSanitizer" OFF)
-find_package(Qt6 6.10.3 EXACT REQUIRED COMPONENTS Widgets)
+find_package(Qt6 6.10.3 EXACT REQUIRED COMPONENTS Widgets Svg)
 
 add_library(huelith_build_options INTERFACE)
 target_compile_features(huelith_build_options INTERFACE cxx_std_20)
@@ -31,15 +31,25 @@ target_include_directories(huelith_document PUBLIC include)
 target_link_libraries(huelith_document PUBLIC huelith_build_options)
 
 add_library(huelith_desktop
+    apps/desktop/application_icon.cpp
     apps/desktop/window_header.cpp
     apps/desktop/canvas_view.cpp
     apps/desktop/new_document_dialog.cpp
     apps/desktop/main_window.cpp)
 target_include_directories(huelith_desktop PUBLIC apps/desktop)
-target_link_libraries(huelith_desktop PUBLIC huelith_document Qt6::Widgets)
+target_link_libraries(huelith_desktop PUBLIC huelith_document Qt6::Widgets Qt6::Svg)
+qt_add_resources(huelith_desktop huelith_assets PREFIX "/huelith"
+    BASE apps/desktop/assets FILES apps/desktop/assets/huelith.svg)
 
 qt_add_executable(Huelith WIN32 apps/desktop/main.cpp)
 target_link_libraries(Huelith PRIVATE huelith_desktop)
+if(WIN32)
+    enable_language(RC)
+    configure_file(apps/desktop/assets/huelith.rc.in "${CMAKE_CURRENT_BINARY_DIR}/huelith.rc" @ONLY)
+    target_sources(Huelith PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/huelith.rc")
+endif()
+add_executable(huelith_icon_export EXCLUDE_FROM_ALL tools/export_windows_icon.cpp)
+target_link_libraries(huelith_icon_export PRIVATE huelith_build_options Qt6::Svg Qt6::Gui)
 
 if(BUILD_TESTING)
     add_test(NAME app_startup COMMAND Huelith --smoke-test)

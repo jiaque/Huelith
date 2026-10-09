@@ -3,6 +3,7 @@
 #include "new_document_dialog.h"
 #include "window_header.h"
 #include "window_icons.h"
+#include "application_icon.h"
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDockWidget>
@@ -94,6 +95,7 @@ void apply_dark_theme() {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(tr("Huelith — 开发预览"));
+    setWindowIcon(application_icon());
     setWindowFlag(Qt::FramelessWindowHint);
     resize(1440, 900);
     setMinimumSize(800, 560);

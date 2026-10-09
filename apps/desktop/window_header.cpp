@@ -1,5 +1,6 @@
 #include "window_header.h"
 #include "window_icons.h"
+#include "application_icon.h"
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -13,13 +14,17 @@ WindowHeader::WindowHeader(QMenuBar* menus, QWidget* host) : QWidget(host) {
     setObjectName("windowHeader");
     setFixedHeight(36);
     auto* layout = new QHBoxLayout(this);
-    layout->setContentsMargins(16, 0, 0, 0);
+    layout->setContentsMargins(10, 0, 0, 0);
     layout->setSpacing(0);
-    auto* title = new QLabel(tr("Huelith"), this);
+    auto* title = new QLabel(this);
     title->setObjectName("appTitle");
-    title->setMinimumWidth(190);
+    title->setAccessibleName(tr("Huelith"));
+    title->setToolTip(tr("Huelith"));
+    title->setFixedSize(24, 24);
+    title->setPixmap(application_icon().pixmap(QSize(24, 24), devicePixelRatioF()));
     title->setAttribute(Qt::WA_TransparentForMouseEvents);
     layout->addWidget(title);
+    layout->addSpacing(4);
     menus->setParent(this);
     layout->addWidget(menus);
     layout->addStretch();
