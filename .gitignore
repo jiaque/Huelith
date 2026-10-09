@@ -37,3 +37,7 @@ Desktop.ini
 # Downloaded model weights and local caches; keep future manifests trackable
 /models/weights/
 /cache/
+
+# Research-script bytecode (scripts themselves remain tracked)
+__pycache__/
+*.pyc
