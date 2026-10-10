@@ -2,6 +2,7 @@
 #include <QFile>
 #include <QKeyEvent>
 #include <QScreen>
+#include <QSettings>
 #ifdef Q_OS_WIN
 #define NOMINMAX
 #include <windows.h>
@@ -124,13 +125,20 @@ void CanvasView::set_zoom(double zoom) {
         return;
     fit_mode_ = false;
     zoom_ = std::clamp(zoom, .001, 32.);
+    if (tool_changed)
+        tool_changed();
     update();
 }
 void CanvasView::fit_to_view() {
-    zoom_ = std::clamp(std::min((width() - 64.) / spec_.width, (height() - 64.) / spec_.height),
-                       .001, 32.);
+    QTransform rotated;
+    rotated.rotate(rotation);
+    const auto bounds = rotated.mapRect(QRectF(0, 0, spec_.width, spec_.height));
+    zoom_ = std::clamp(
+        std::min((width() - 64.) / bounds.width(), (height() - 64.) / bounds.height()), .001, 32.);
     fit_mode_ = true;
     pan_ = {};
+    if (tool_changed)
+        tool_changed();
     update();
 }
 QTransform CanvasView::view_transform() const {
@@ -562,7 +570,11 @@ void CanvasView::paintEvent(QPaintEvent*) {
         p.fillRect(0, 0, 8, 8, QColor(120, 120, 120));
         p.fillRect(8, 8, 8, 8, QColor(120, 120, 120));
     }
-    painter.fillRect(QRect(QPoint(), project_->state().size), QBrush(checker));
+    // Bound raster work to the visible source region even at very large zoom factors.
+    const QRectF visible =
+        view_transform().inverted().mapRect(QRectF(rect())).adjusted(-1, -1, 1, 1);
+    painter.fillRect(visible.intersected(QRectF(QPointF(), project_->state().size)),
+                     QBrush(checker));
     QImage image = preview_;
     if (!comparison.isEmpty())
         image =
@@ -572,7 +584,9 @@ void CanvasView::paintEvent(QPaintEvent*) {
             layer && !layer->mask.isNull())
             image = layer->mask;
     }
-    painter.drawImage(0, 0, image);
+    const QRectF source = visible.intersected(QRectF(image.rect()));
+    if (!source.isEmpty())
+        painter.drawImage(source, image, source);
     if (quick_mask) {
         const auto& range = display_state().selection;
         if (!range.isNull()) {
@@ -736,11 +750,18 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
     setFocus();
     if (event->button() != Qt::LeftButton && event->button() != Qt::MiddleButton)
         return;
-    if (tool_ == CanvasTool::zoom ||
-        (temporary_hand_ && event->modifiers().testFlag(Qt::ControlModifier))) {
+    if (event->button() == Qt::LeftButton &&
+        ((tool_ == CanvasTool::zoom && !temporary_hand_) ||
+         (temporary_hand_ && (event->modifiers().testFlag(Qt::ControlModifier) ||
+                              event->modifiers().testFlag(Qt::AltModifier))))) {
         const auto fixed = image_point(event->position());
-        set_zoom(zoom_ * (event->modifiers().testFlag(Qt::AltModifier) ? .5 : 2));
-        pan_ += event->position() - view_transform().map(fixed);
+        const bool reverse = event->modifiers().testFlag(Qt::AltModifier);
+        const bool out = temporary_hand_ ? reverse : zoom_out != reverse;
+        set_zoom(zoom_ * (out ? .5 : 2));
+        const QPointF target = QSettings().value("navigation/centerClicked", false).toBool()
+                                   ? QPointF(width() / 2., height() / 2.)
+                                   : event->position();
+        pan_ += target - view_transform().map(fixed);
         update();
         return;
     }
@@ -1310,14 +1331,20 @@ void CanvasView::mouseDoubleClickEvent(QMouseEvent*) {
         finish_path();
 }
 void CanvasView::wheelEvent(QWheelEvent* event) {
-    if (event->modifiers().testFlag(Qt::AltModifier)) {
+    const bool wheel_zoom = QSettings().value("navigation/wheelZoom", false).toBool();
+    if (wheel_zoom != event->modifiers().testFlag(Qt::AltModifier)) {
         const auto fixed = image_point(event->position());
-        set_zoom(zoom_ * std::pow(1.2, event->angleDelta().y() / 120.));
+        const double delta = event->pixelDelta().isNull() ? event->angleDelta().y() / 120.
+                                                          : event->pixelDelta().y() / 40.;
+        set_zoom(zoom_ * std::pow(1.2, std::clamp(delta, -20., 20.)));
         pan_ += event->position() - view_transform().map(fixed);
     } else {
-        pan_ += event->modifiers().testFlag(Qt::ControlModifier)
-                    ? QPointF(event->angleDelta().y() / 2., 0)
-                    : QPointF(0, event->angleDelta().y() / 2.);
+        const QPointF delta = event->pixelDelta().isNull() ? QPointF(event->angleDelta()) / 2.
+                                                           : QPointF(event->pixelDelta());
+        pan_ += event->modifiers().testFlag(Qt::ShiftModifier) ||
+                        event->modifiers().testFlag(Qt::ControlModifier)
+                    ? QPointF(delta.y(), delta.x())
+                    : delta;
         fit_mode_ = false;
     }
     update();

@@ -13,7 +13,7 @@ MODEL_SHA = 'da27509dab6a2915da67e988acd86cf71f9d5bbc8d1aa0ed32933578a887b901'
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--output', type=Path, default=ROOT / 'build/releases/M2-preview-20261010-ui-r3')
+    parser.add_argument('--output', type=Path, default=ROOT / 'build/releases/M2-preview-20261010-navigation-r4')
     args = parser.parse_args()
     destination = args.output.resolve()
     release_root = (ROOT / 'build/releases').resolve()
@@ -48,7 +48,7 @@ def main():
     (destination / 'translations').mkdir(exist_ok=True)
     shutil.copy2(qt / 'translations/qtbase_zh_CN.qm', destination / 'translations/qtbase_zh_CN.qm')
     (destination / 'README.txt').write_text(
-        'Huelith M2 开发预览（交互与效果链更新，非 M2 完成版）\n'
+        'Huelith M2 开发预览（缩放与画面操控更新，非 M2 完成版）\n'
         '双击本目录 Huelith.exe。不要只移动 exe；整个目录保留。\n'
         '文件 > 打开，选择 CR3 等 RAW 后进入独立显影窗口。\n'
         '右侧效果包含去薄雾。细节中 AI 降噪默认使用随包内置模型，无需浏览研究目录。\n'
@@ -57,6 +57,8 @@ def main():
         '样例：D:\\project\\wifi\\Huelith\\research\\m0\\samples\\r10-5871.CR3\n'
         '颜色混合器有通道选项卡；滤镜 > 智能效果管理调色/LUT与预设。\n'
         '选区组合按钮、像素直径、RAW蒙版工具和后台调色预览已更新。\n'
+        '缩放工具上方可选放大/缩小；编辑 > 首选项 > 工具与画面操控可启用滚轮缩放。\n'
+        'Alt临时反向，空格拖动，Ctrl+0适合窗口，Ctrl+1显示100%。\n'
         '尚非 Camera Raw 完整复刻；光学、完整白平衡、语义蒙版等仍在 M2 待办中。\n',
         encoding='utf-8')
     environment = os.environ.copy()

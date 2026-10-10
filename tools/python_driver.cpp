@@ -1381,12 +1381,29 @@ QJsonObject run(const QJsonObject& o) {
         c->set_zoom(o.value("zoom").toDouble(1));
         return {{"ok", true}};
     }
+    if (op == "window_navigation_frames") {
+        auto* c = d.window->active_canvas();
+        QJsonArray frames;
+        for (const auto zoom : o.value("zooms").toArray()) {
+            QElapsedTimer timer;
+            timer.start();
+            c->set_zoom(zoom.toDouble());
+            c->repaint();
+            QApplication::processEvents();
+            frames.append(timer.nsecsElapsed() / 1e6);
+        }
+        const auto bounds =
+            c->view_transform().mapRect(QRectF(QPointF(), c->project().state().size));
+        return {
+            {"frameMs", frames}, {"zoom", c->zoom()}, {"fits", QRectF(c->rect()).contains(bounds)}};
+    }
     if (op == "window_wheel") {
         auto* c = d.window->active_canvas();
         const QPointF point(c->width() / 2., c->height() / 2.);
-        QWheelEvent event(point, c->mapToGlobal(point.toPoint()), QPoint(), QPoint(0, 120),
-                          Qt::NoButton, Qt::KeyboardModifiers(o.value("modifiers").toInt()),
-                          Qt::NoScrollPhase, false);
+        QWheelEvent event(point, c->mapToGlobal(point.toPoint()), QPoint(),
+                          QPoint(0, o.value("delta").toInt(120)), Qt::NoButton,
+                          Qt::KeyboardModifiers(o.value("modifiers").toInt()), Qt::NoScrollPhase,
+                          false);
         QApplication::sendEvent(c, &event);
         return {{"ok", true}};
     }

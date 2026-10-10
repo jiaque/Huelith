@@ -72,6 +72,7 @@ class CanvasView final : public QWidget {
     bool begin_transform(bool selection = false);
     void stage_layer(editing::Layer layer);
     std::vector<QUuid> selected_layers;
+    bool zoom_out{};
     double hit_tolerance{3};
     int color_tolerance{32};
     bool contiguous{true};

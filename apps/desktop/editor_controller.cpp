@@ -1618,6 +1618,74 @@ void EditorController::configure_menus() {
         }
     });
     auto* options = window_->findChild<QToolBar*>("viewToolbar");
+    for (int mode = 0; mode < 2; ++mode) {
+        auto* button = new QToolButton(options);
+        button->setObjectName(mode ? "zoomOutMode" : "zoomInMode");
+        button->setStyleSheet(
+            "QToolButton:checked { background:#3a4148; border:1px solid #737b85; }");
+        button->setText(mode ? tr("缩小 −") : tr("放大 +"));
+        button->setToolTip(tr("点击选择缩放方向；Alt 临时反向；空格拖动平移"));
+        button->setCheckable(true);
+        options->addWidget(button)->setObjectName("zoomOptionsMode");
+        connect(button, &QToolButton::clicked, this, [this, mode] {
+            if (auto* c = canvas()) {
+                c->zoom_out = mode != 0;
+                refresh_tools();
+                c->setFocus();
+            }
+        });
+    }
+    auto* zoom_value = new QDoubleSpinBox(options);
+    zoom_value->setObjectName("zoomPercent");
+    zoom_value->setRange(.1, 3200);
+    zoom_value->setDecimals(1);
+    zoom_value->setSuffix(" %");
+    zoom_value->setKeyboardTracking(false);
+    zoom_value->setToolTip(tr("显示缩放比例；不改变图像尺寸"));
+    options->addWidget(zoom_value)->setObjectName("zoomOptionsPercent");
+    connect(zoom_value, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        if (auto* c = canvas())
+            c->set_zoom(value / 100);
+    });
+    auto* actual_size = options->addAction(tr("100%"));
+    actual_size->setObjectName("zoomOptionsActual");
+    connect(actual_size, &QAction::triggered, this, [this] {
+        if (auto* c = canvas())
+            c->set_zoom(1);
+    });
+    for (auto* menu_action : window_->findChild<QMenuBar*>()->actions()) {
+        if (!menu_action->text().startsWith(tr("编辑")))
+            continue;
+        auto* preferences = menu_action->menu()->addMenu(tr("首选项"));
+        auto* navigation = preferences->addAction(tr("工具与画面操控…"));
+        connect(navigation, &QAction::triggered, this, [this] {
+            QDialog dialog(window_);
+            dialog.setObjectName("navigationPreferences");
+            dialog.setWindowTitle(tr("首选项 · 工具与画面操控"));
+            QFormLayout form(&dialog);
+            QCheckBox wheel(tr("使用滚轮缩放")), center(tr("将缩放点击位置置于中心"));
+            wheel.setObjectName("wheelZoomPreference");
+            center.setObjectName("centerZoomPreference");
+            wheel.setChecked(QSettings().value("navigation/wheelZoom", false).toBool());
+            center.setChecked(QSettings().value("navigation/centerClicked", false).toBool());
+            form.addRow(&wheel);
+            form.addRow(&center);
+            form.addRow(
+                new QLabel(tr("关闭滚轮缩放时：滚轮平移，Alt+滚轮缩放。\n开启时：滚轮缩放，Alt+"
+                              "滚轮平移。\n空格拖动平移；Ctrl+0适合窗口，Ctrl+1显示100%。"),
+                           &dialog));
+            QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+            form.addRow(&buttons);
+            connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+            connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            if (dialog.exec() == QDialog::Accepted) {
+                QSettings settings;
+                settings.setValue("navigation/wheelZoom", wheel.isChecked());
+                settings.setValue("navigation/centerClicked", center.isChecked());
+            }
+        });
+        break;
+    }
     auto* range_operations = new QWidget(options);
     range_operations->setObjectName("selectionModeButtons");
     auto* range_layout = new QHBoxLayout(range_operations);
@@ -1863,6 +1931,8 @@ void EditorController::refresh_tools() {
         const auto name = action->objectName();
         if (name.startsWith("move_"))
             action->setVisible(c && tool == CanvasTool::move);
+        if (name.startsWith("zoomOptions"))
+            action->setVisible(c && (tool == CanvasTool::zoom || tool == CanvasTool::hand));
         if (name == "selectionOptions")
             action->setVisible(c && (tool == CanvasTool::rectangle || tool == CanvasTool::ellipse ||
                                      tool == CanvasTool::lasso || tool == CanvasTool::polygon ||
@@ -1888,6 +1958,16 @@ void EditorController::refresh_tools() {
             action->setVisible(c && (c->transforming() || tool == CanvasTool::crop));
     }
     if (c) {
+        if (auto* value = options->findChild<QDoubleSpinBox*>("zoomPercent")) {
+            const QSignalBlocker blocker(value);
+            value->setValue(c->zoom() * 100);
+        }
+        for (int mode = 0; mode < 2; ++mode)
+            if (auto* button =
+                    options->findChild<QToolButton*>(mode ? "zoomOutMode" : "zoomInMode")) {
+                const QSignalBlocker blocker(button);
+                button->setChecked(c->zoom_out == (mode != 0));
+            }
         for (int index = 0; index < 4; ++index)
             if (auto* button =
                     options->findChild<QToolButton*>(QString("selectionMode%1").arg(index))) {
