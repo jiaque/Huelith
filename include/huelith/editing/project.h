@@ -1,5 +1,6 @@
 #pragma once
 #include "huelith/editing/blend.h"
+#include "huelith/editing/effects.h"
 #include "huelith/editing/tone.h"
 #include <QColorSpace>
 #include <QImage>
@@ -55,6 +56,7 @@ struct Layer {
     QByteArray raw_source;  // Original camera bytes; re-development survives a missing linked file.
     QJsonObject raw_recipe; // Versioned source-level parameters, separate from layer effects.
     ToneSettings tone;
+    std::vector<Effect> effects;
     std::vector<Layer> children; // Bottom to top, also editable nested composition content.
 };
 struct State {
@@ -73,6 +75,7 @@ struct State {
 [[nodiscard]] QImage import_image(const QString& path);
 [[nodiscard]] QImage to_working(QImage image);
 [[nodiscard]] QImage render(const State& state);
+[[nodiscard]] State preview_state(const State& state, int maximum_edge = 1280);
 [[nodiscard]] QImage display_image(const QImage& linear,
                                    const QColorSpace& output = QColorSpace::SRgb);
 [[nodiscard]] Layer* find_layer(std::vector<Layer>& layers, const QUuid& id);

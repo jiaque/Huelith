@@ -31,7 +31,7 @@ def main():
   folder=Path(folder);call('init',settings=str(folder));call('window')
   sample=Image.new('RGB',(240,180),'white');d=ImageDraw.Draw(sample);d.rectangle((20,30,59,79),fill='red');d.rectangle((140,30,179,79),fill='red');path=folder/'sample.png';sample.save(path)
   def scene():
-   call('window_scene',width=240,height=180,layers=[dict(name='pixels',path=str(path))]);key('D');control('brushHardness',100);control('brushOpacity',100);control('brushFlow',100);control('brushRadius',6)
+   call('window_scene',width=240,height=180,layers=[dict(name='pixels',path=str(path))]);key('D');control('brushHardness',100);control('brushOpacity',100);control('brushFlow',100);control('brushDiameter',12)
   def palette():
    scene();buttons=call('window_chrome')['buttons'];assert len(buttons)==25 and len({b['x'] for b in buttons})==2
    for index in range(25):tool(index);assert state()['tool']==index and state()['checkedTools']==1
@@ -85,7 +85,7 @@ def main():
    call('window_new',width=240,height=180,whiteBackground=True);key('V');before=state()['revision']
    assert state()['backgroundLayer']
    key('Ctrl+T');assert not state()['pending'];key('Right');assert state()['tx']==0 and state()['revision']==before
-   key('B');key('D');control('brushRadius',8);click(100,100);assert pixel(100,100)==[0,0,0,255]
+   key('B');key('D');control('brushDiameter',16);click(100,100);assert pixel(100,100)==[0,0,0,255]
    key('E');click(100,100);assert pixel(100,100)==[255,255,255,255]
    call('window_action',text='背景转换为普通图层');assert not state()['backgroundLayer']
    key('V');key('Ctrl+T');assert state()['pending'];call('window_gesture',handle=4,scale=.5);key('Return');assert abs(state()['sx']-.5)<1e-6

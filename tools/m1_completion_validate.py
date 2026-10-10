@@ -182,7 +182,8 @@ def main():
   test('recovery_dialog_cancel_retains_open_dirty_copy',recovery)
   def legacy_schema():
    scene([dict(name='legacy layer',path=str(shape),x=70,y=60)]);current=folder/'schema3.huelith';call('window_filename',path=str(current));action('保存工程');deadline=time.monotonic()+8
-   while not current.exists() and time.monotonic()<deadline:call('pump')
+   while (not current.exists() or call('window_state')['dirty']) and time.monotonic()<deadline:call('pump',waitMs=50)
+   assert current.exists() and not call('window_state')['dirty'], 'Save completion was not delivered'
    with zipfile.ZipFile(current) as z:entries={name:z.read(name) for name in z.namelist()}
    # Strip later layer fields to construct a real schema-2 payload (one-layer fixture).
    grid=b'\0'+b''.join(struct.pack('<dd',x,y) for y in (0,.5,1) for x in (0,.5,1));payload=entries['document.bin'];assert payload.count(grid)==1
@@ -192,6 +193,9 @@ def main():
     assert size!=0xfffffffe,'Extended QByteArray length unexpected in small fixture'
     if size!=0xffffffff:end+=size
    if version>=6:end+=1 # Dedicated background flag; absent in legacy schema.
+   if version>=7:
+    assert struct.unpack_from('<I',payload,end)[0]==0,'Fixture should contain no effects'
+    end+=4
    assert end<=len(payload)
    entries['document.bin']=struct.pack('<I',2)+payload[4:start]+payload[end:];manifest=json.loads(entries['manifest.json']);manifest['schema']=2;entries['manifest.json']=json.dumps(manifest).encode();legacy=folder/'schema2.huelith'
    with zipfile.ZipFile(legacy,'w',compression=zipfile.ZIP_STORED) as z:

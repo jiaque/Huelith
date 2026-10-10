@@ -13,6 +13,8 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStackedWidget>
+#include <QSvgRenderer>
+#include <QTabBar>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -21,6 +23,237 @@
 
 namespace huelith::desktop {
 namespace {
+class ColorBandSlider final : public QSlider {
+  public:
+    ColorBandSlider(int channel, int band, QWidget* parent)
+        : QSlider(Qt::Horizontal, parent), channel_(channel), band_(band) {
+        setRange(-100, 100);
+        setFixedHeight(16);
+        setFocusPolicy(Qt::StrongFocus);
+        setTracking(true);
+        setToolTip(tr("拖动或点击调整；方向键微调；双击归零"));
+    }
+    void set_default(int value) {
+        default_ = value;
+        setToolTip(tr("拖动或点击调整；方向键微调；双击恢复默认值"));
+    }
+
+  protected:
+    void paintEvent(QPaintEvent*) override {
+        static constexpr std::array<double, 8> hues{0, 30, 60, 120, 180, 240, 270, 300};
+        const double hue = hues[band_] / 360;
+        const auto color = [](double h, double s, double v) {
+            return QColor::fromHsvF(std::fmod(h + 1, 1.), s, v);
+        };
+        QLinearGradient gradient(6, 0, width() - 6, 0);
+        if (channel_ < 0) {
+            gradient.setColorAt(0, QColor("#8a8a8a"));
+            gradient.setColorAt(1, QColor("#8a8a8a"));
+        } else if (channel_ == 0) {
+            gradient.setColorAt(0, color(hue - .08, .55, .65));
+            gradient.setColorAt(.5, color(hue, .55, .65));
+            gradient.setColorAt(1, color(hue + .08, .55, .65));
+        } else if (channel_ == 1) {
+            gradient.setColorAt(0, QColor("#737373"));
+            gradient.setColorAt(1, color(hue, .9, .9));
+        } else {
+            gradient.setColorAt(0, color(hue, .6, .16));
+            gradient.setColorAt(.5, color(hue, .65, .65));
+            gradient.setColorAt(1, color(hue, .2, 1));
+        }
+        QPainter painter(this);
+        painter.fillRect(QRectF(6, 6, width() - 12, 3), gradient);
+        const double x = 6 + (width() - 12.) * (value() - minimum()) / (maximum() - minimum());
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor("#303030"), .8));
+        painter.setBrush(isEnabled() ? QColor("#cccccc") : QColor("#707070"));
+        painter.drawPolygon(QPolygonF{QPointF(x, 3), QPointF(x + 5, 11), QPointF(x - 5, 11)});
+        if (hasFocus()) {
+            painter.setPen(QPen(QColor("#999999"), 1, Qt::DotLine));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(rect().adjusted(0, 0, -1, -1));
+        }
+    }
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton)
+            return;
+        setFocus(Qt::MouseFocusReason);
+        setSliderDown(true);
+        set_at(event->position().x());
+        event->accept();
+    }
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (isSliderDown())
+            set_at(event->position().x());
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton || !isSliderDown())
+            return;
+        set_at(event->position().x());
+        setSliderDown(false);
+        event->accept();
+    }
+    void mouseDoubleClickEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton)
+            return;
+        setSliderDown(true);
+        setValue(default_);
+        setSliderDown(false);
+        event->accept();
+    }
+
+  private:
+    void set_at(double x) {
+        const double position = std::clamp((x - 6) / std::max(1., width() - 12.), 0., 1.);
+        setValue(qRound(minimum() + (maximum() - minimum()) * position));
+    }
+    int channel_;
+    int band_;
+    int default_{};
+};
+
+class HslMixer final : public QWidget {
+  public:
+    HslMixer(editing::ToneSettings& settings, std::function<void()> changed, QWidget* parent)
+        : QWidget(parent), settings_(settings), changed_(std::move(changed)) {
+        setObjectName("rawHslMixer");
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(3);
+        auto* adjust = new QHBoxLayout;
+        adjust->addWidget(new QLabel(tr("调整"), this));
+        mode_ = new QComboBox(this);
+        mode_->setObjectName("rawHslMode");
+        mode_->addItems({tr("HSL"), tr("颜色")});
+        adjust->addWidget(mode_, 1);
+        layout->addLayout(adjust);
+        channels_ = new QTabBar(this);
+        channels_->setObjectName("rawHslTabs");
+        colors_ = new QTabBar(this);
+        colors_->setObjectName("rawHslColors");
+        for (auto* tabs : {channels_, colors_}) {
+            tabs->setDrawBase(false);
+            tabs->setExpanding(false);
+            tabs->setElideMode(Qt::ElideNone);
+            tabs->setStyleSheet(
+                "QTabBar::tab { background:transparent; color:#aeb2b6; border:0; "
+                "border-bottom:2px solid transparent; padding:5px 9px; } "
+                "QTabBar::tab:selected { color:#ededed; border-bottom-color:#cccccc; }");
+        }
+        const QStringList channel_names{tr("色相"), tr("饱和度"), tr("明度")};
+        const QStringList names{tr("红色"),   tr("橙色"), tr("黄色"), tr("绿色"),
+                                tr("水绿色"), tr("蓝色"), tr("紫色"), tr("洋红色")};
+        for (const auto& name : channel_names)
+            channels_->addTab(name);
+        channels_->addTab(tr("全部"));
+        const QStringList swatches{"#d35b65", "#dc8b48", "#c5b952", "#66a661",
+                                   "#52aca9", "#638ccd", "#9973bc", "#bc6caa"};
+        for (int i = 0; i < 8; ++i) {
+            QPixmap swatch(12, 12);
+            swatch.fill(QColor(swatches[i]));
+            colors_->addTab(QIcon(swatch), {});
+            colors_->setTabToolTip(i, names[i]);
+            colors_->setAccessibleTabName(i, names[i]);
+        }
+        layout->addWidget(channels_);
+        layout->addWidget(colors_);
+        for (int c = 0; c < 3; ++c) {
+            groups_[c] = new QWidget(this);
+            auto* group = new QVBoxLayout(groups_[c]);
+            group->setContentsMargins(0, 0, 0, 0);
+            group->setSpacing(2);
+            titles_[c] = new QLabel(channel_names[c], groups_[c]);
+            group->addWidget(titles_[c]);
+            for (int i = 0; i < 8; ++i) {
+                auto* row = new QWidget(groups_[c]);
+                rows_[c][i] = row;
+                auto* box = new QVBoxLayout(row);
+                box->setContentsMargins(0, 0, 0, 0);
+                box->setSpacing(0);
+                auto* top = new QHBoxLayout;
+                labels_[c][i] = new QLabel(names[i], row);
+                labels_[c][i]->setProperty("bandName", names[i]);
+                labels_[c][i]->setProperty("channelName", channel_names[c]);
+                top->addWidget(labels_[c][i]);
+                top->addStretch();
+                auto* spin = new QDoubleSpinBox(row);
+                spin->setObjectName(QString("rawHsl%1Band%2").arg(c).arg(i));
+                spin->setRange(-100, 100);
+                spin->setDecimals(0);
+                spin->setFixedWidth(48);
+                spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+                spin->setAccessibleName(channel_names[c] + names[i]);
+                auto* slider = new ColorBandSlider(c, i, row);
+                slider->setObjectName(spin->objectName() + "Slider");
+                slider->setAccessibleName(spin->accessibleName());
+                spins_[c][i] = spin;
+                sliders_[c][i] = slider;
+                top->addWidget(spin);
+                box->addLayout(top);
+                box->addWidget(slider);
+                group->addWidget(row);
+                connect(slider, &QSlider::valueChanged, spin,
+                        [spin](int value) { spin->setValue(value); });
+                connect(spin, &QDoubleSpinBox::valueChanged, this,
+                        [this, c, i, slider](double value) {
+                            const QSignalBlocker blocker(slider);
+                            slider->setValue(qRound(value));
+                            values(c)[i] = value;
+                            if (changed_)
+                                changed_();
+                        });
+            }
+            layout->addWidget(groups_[c]);
+        }
+        connect(channels_, &QTabBar::currentChanged, this, [this] { show_channels(); });
+        connect(colors_, &QTabBar::currentChanged, this, [this] { show_channels(); });
+        connect(mode_, &QComboBox::currentIndexChanged, this, [this] { show_channels(); });
+        refresh();
+        show_channels();
+    }
+    void refresh() {
+        for (int c = 0; c < 3; ++c)
+            for (int i = 0; i < 8; ++i) {
+                const QSignalBlocker block_spin(spins_[c][i]), block_slider(sliders_[c][i]);
+                spins_[c][i]->setValue(values(c)[i]);
+                sliders_[c][i]->setValue(qRound(values(c)[i]));
+            }
+    }
+
+  private:
+    std::array<double, 8>& values(int channel) {
+        return channel == 0   ? settings_.hue
+               : channel == 1 ? settings_.saturation_bands
+                              : settings_.luminance_bands;
+    }
+    void show_channels() {
+        const bool color_mode = mode_->currentIndex() == 1;
+        channels_->setVisible(!color_mode);
+        colors_->setVisible(color_mode);
+        for (int c = 0; c < 3; ++c) {
+            groups_[c]->setVisible(color_mode || channels_->currentIndex() == 3 ||
+                                   channels_->currentIndex() == c);
+            titles_[c]->setVisible(!color_mode && channels_->currentIndex() == 3);
+            for (int i = 0; i < 8; ++i) {
+                rows_[c][i]->setVisible(!color_mode || colors_->currentIndex() == i);
+                labels_[c][i]->setText(
+                    labels_[c][i]->property(color_mode ? "channelName" : "bandName").toString());
+            }
+        }
+    }
+    editing::ToneSettings& settings_;
+    std::function<void()> changed_;
+    QComboBox* mode_{};
+    QTabBar* channels_{};
+    QTabBar* colors_{};
+    std::array<QWidget*, 3> groups_{};
+    std::array<QLabel*, 3> titles_{};
+    std::array<std::array<QWidget*, 8>, 3> rows_{};
+    std::array<std::array<QLabel*, 8>, 3> labels_{};
+    std::array<std::array<QDoubleSpinBox*, 8>, 3> spins_{};
+    std::array<std::array<QSlider*, 8>, 3> sliders_{};
+};
+
 class ColorWheel final : public QWidget {
   public:
     ColorWheel(double& hue, double& saturation, QWidget* parent)
@@ -193,7 +426,7 @@ TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
     categories_ = new QListWidget(this);
     categories_->setObjectName("toneCategories");
     categories_->addItems(
-        {tr("光线"), tr("颜色"), tr("色阶"), tr("曲线"), tr("颜色混合"), tr("色彩分级")});
+        {tr("光线"), tr("颜色"), tr("色阶"), tr("曲线"), tr("色彩混合器"), tr("色彩分级")});
     categories_->setFixedWidth(92);
     categories_->setStyleSheet(
         "QListWidget { border: 0; } QListWidget::item { min-height: 30px; padding: 3px 5px; }");
@@ -226,10 +459,14 @@ TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
         auto* row = new QWidget(this);
         auto* row_layout = new QHBoxLayout(row);
         row_layout->setContentsMargins(0, 0, 0, 0);
-        auto* slider = new QSlider(Qt::Horizontal, row);
+        auto* slider = new ColorBandSlider(-1, 0, row);
         slider->setObjectName(QString::fromLatin1(name) + "Slider");
         slider->setRange(qRound(low / step), qRound(high / step));
         slider->setValue(qRound(value / step));
+        slider->set_default(qRound(
+            (QLatin1String(name) == "toneGamma" || QLatin1String(name) == "toneWhitePoint" ? 1.
+                                                                                           : 0.) /
+            step));
         slider->setTracking(false);
         row_layout->addWidget(slider, 1);
         row_layout->addWidget(spin);
@@ -365,6 +602,8 @@ void TonePanel::use_accordion() {
     auto* box = new QVBoxLayout(accordion);
     box->setContentsMargins(0, 0, 0, 0);
     box->setSpacing(1);
+    box->setSizeConstraint(QLayout::SetMinimumSize);
+    layout()->setSizeConstraint(QLayout::SetMinimumSize);
     // Keep the existing shared controls and their bindings; only change their presentation.
     std::vector<QWidget*> pages;
     while (pages_->count()) {
@@ -376,58 +615,14 @@ void TonePanel::use_accordion() {
     for (int i = 0; i < hsl_form->count(); ++i)
         if (auto* widget = hsl_form->itemAt(i)->widget())
             widget->hide();
-    auto* mixer = new QWidget(pages[4]);
-    auto* mixer_form = new QFormLayout(mixer);
-    mixer_form->setContentsMargins(0, 0, 0, 0);
-    auto* channel = new QComboBox(mixer);
-    channel->setObjectName("rawHslChannel");
-    channel->addItems({tr("色相"), tr("饱和度"), tr("明度")});
-    mixer_form->addRow(channel);
-    const QStringList names{tr("红色"), tr("橙色"), tr("黄色"), tr("绿色"),
-                            tr("青色"), tr("蓝色"), tr("紫色"), tr("洋红色")};
-    std::array<QDoubleSpinBox*, 8> hsl_spins{};
-    const auto band_array = [this](int c) -> std::array<double, 8>& {
-        return c == 0   ? settings_.hue
-               : c == 1 ? settings_.saturation_bands
-                        : settings_.luminance_bands;
-    };
-    for (int i = 0; i < 8; ++i) {
-        auto* row = new QWidget(mixer);
-        auto* layout = new QHBoxLayout(row);
-        layout->setContentsMargins(0, 0, 0, 0);
-        auto* slider = new QSlider(Qt::Horizontal, row);
-        slider->setRange(-100, 100);
-        auto* spin = new QDoubleSpinBox(row);
-        spin->setObjectName(QString("rawHslBand%1").arg(i));
-        spin->setRange(-100, 100);
-        spin->setDecimals(0);
-        spin->setFixedWidth(58);
-        spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
-        layout->addWidget(slider, 1);
-        layout->addWidget(spin);
-        mixer_form->addRow(names[i], row);
-        hsl_spins[i] = spin;
-        connect(slider, &QSlider::valueChanged, spin, [spin](int value) { spin->setValue(value); });
-        connect(spin, &QDoubleSpinBox::valueChanged, this,
-                [this, channel, band_array, i, slider](double value) {
-                    const QSignalBlocker blocker(slider);
-                    slider->setValue(qRound(value));
-                    band_array(channel->currentIndex())[i] = value;
-                    if (changed)
-                        changed();
-                });
-    }
-    const auto refresh_hsl = [channel, hsl_spins, band_array] {
-        for (int i = 0; i < 8; ++i) {
-            const QSignalBlocker blocker(hsl_spins[i]);
-            const auto value = band_array(channel->currentIndex())[i];
-            hsl_spins[i]->setValue(value);
-            auto* slider = hsl_spins[i]->parentWidget()->findChild<QSlider*>();
-            const QSignalBlocker slider_blocker(slider);
-            slider->setValue(qRound(value));
-        }
-    };
-    connect(channel, &QComboBox::currentIndexChanged, this, [refresh_hsl] { refresh_hsl(); });
+    auto* mixer = new HslMixer(
+        settings_,
+        [this] {
+            if (changed)
+                changed();
+        },
+        pages[4]);
+    const auto refresh_hsl = [mixer] { mixer->refresh(); };
     hsl_form->addRow(mixer);
     auto* grading_form = qobject_cast<QFormLayout*>(pages[5]->layout());
     auto* wheels = new QWidget(pages[5]);
@@ -472,7 +667,37 @@ void TonePanel::use_accordion() {
         header->setCheckable(true);
         header->setChecked(index == 0);
         header->setArrowType(index == 0 ? Qt::DownArrow : Qt::RightArrow);
-        box->addWidget(header);
+        auto* header_row = new QHBoxLayout;
+        header_row->setContentsMargins(0, 0, 0, 0);
+        header_row->setSpacing(0);
+        header_row->addWidget(header, 1);
+        auto* enabled = new QToolButton(accordion);
+        enabled->setObjectName(QString("rawSectionEnable%1").arg(index));
+        enabled->setCheckable(true);
+        enabled->setChecked(settings_.sections[index]);
+        enabled->setFixedSize(30, 34);
+        enabled->setToolTip(tr("启用/停用本组调整，保留参数"));
+        enabled->setAccessibleName(header->text() + tr("效果开关"));
+        QPixmap icon(36, 36);
+        icon.fill(Qt::transparent);
+        QPainter painter(&icon);
+        QSvgRenderer eye(
+            QByteArray("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='none' "
+                       "stroke='#c6c6c6' stroke-width='1.5'><path d='M2 12Q12 1 22 12Q12 23 2 "
+                       "12Z'/><circle cx='12' cy='12' r='3'/></g></svg>"));
+        eye.render(&painter);
+        painter.end();
+        icon.setDevicePixelRatio(2);
+        enabled->setIcon(QIcon(icon));
+        enabled->setStyleSheet("QToolButton {border:0;} QToolButton:checked {background:#34383b;} "
+                               "QToolButton:!checked {background:#202427;}");
+        header_row->addWidget(enabled);
+        box->addLayout(header_row);
+        connect(enabled, &QToolButton::toggled, this, [this, index](bool value) {
+            settings_.sections[index] = value;
+            if (changed)
+                changed();
+        });
         pages[index]->setObjectName(QString("rawSectionBody%1").arg(index));
         box->addWidget(pages[index]);
         pages[index]->setVisible(index == 0);
@@ -486,6 +711,8 @@ void TonePanel::use_accordion() {
         slider->setTracking(true);
     for (auto* page : pages) {
         auto* form = qobject_cast<QFormLayout*>(page->layout());
+        form->setSizeConstraint(QLayout::SetMinimumSize);
+        page->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
         form->setContentsMargins(12, 6, 12, 8);
         form->setVerticalSpacing(4);
         for (int r = 0; r < form->rowCount(); ++r) {
@@ -526,6 +753,11 @@ void TonePanel::set_category(int index) {
 }
 void TonePanel::set_settings(editing::ToneSettings settings) {
     settings_ = std::move(settings);
+    for (int i = 0; i < 8; ++i)
+        if (auto* enabled = findChild<QToolButton*>(QString("rawSectionEnable%1").arg(i))) {
+            const QSignalBlocker blocker(enabled);
+            enabled->setChecked(settings_.sections[i]);
+        }
     if (refresh_extra_)
         refresh_extra_();
     const std::pair<const char*, double> values[]{{"toneExposure", settings_.exposure},

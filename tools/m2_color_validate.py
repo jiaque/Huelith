@@ -41,6 +41,14 @@ def main():
             legacy = call('tone_probe', settings=dict(version=1), rgba=[.125,.25,.5,.5])
             assert legacy['rgba'] == tone({})
         test('identity_exact_premultiplied_alpha', identity)
+        def bypass():
+            all_off = dict(sections=[False]*8, exposure=3, dehaze=40, hue=[50]*8,
+                           gradingSaturation=[40]*3, sharpening=60, gamma=2)
+            assert tone(all_off) == [.125,.25,.5,.5]
+            tone(all_off, save=str(Path(directory)/'bypassed.huelith'))
+            invalid = call('tone_probe', settings=dict(version=3, sections=[True]*7), rgba=[0,0,0,1])
+            assert 'error' in invalid
+        test('section_bypass_identity_values_persist_and_validate', bypass)
         def exposure():
             result = tone(dict(exposure=1), rgba=(.5, 1, 2, .5))
             assert max(abs(a-b) for a,b in zip(result,(1,2,4,.5))) < .001, result

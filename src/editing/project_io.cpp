@@ -12,7 +12,7 @@
 namespace huelith::editing {
 namespace {
 constexpr qint64 file_budget = 1024LL * 1024 * 1024;
-constexpr quint32 schema = 6;
+constexpr quint32 schema = 7;
 void checked(QDataStream& stream) {
     if (stream.status() != QDataStream::Ok)
         throw EditError(QStringLiteral("工程截断或数据无效"));
@@ -75,6 +75,13 @@ void write_layers(QDataStream& out, const std::vector<Layer>& layers) {
         out << layer.raw_source << QJsonDocument(layer.raw_recipe).toJson(QJsonDocument::Compact);
         out << QJsonDocument(tone_json(layer.tone)).toJson(QJsonDocument::Compact);
         out << layer.background;
+        out << quint32(layer.effects.size());
+        for (const auto& effect : layer.effects) {
+            out << effect.id << effect.name << effect.enabled << effect.amount
+                << QJsonDocument(tone_json(effect.tone)).toJson(QJsonDocument::Compact)
+                << (effect.lut ? effect.lut->source.toUtf8() : QByteArray{});
+            write_image(out, effect.mask);
+        }
         write_image(out, layer.pixels);
         write_image(out, layer.mask);
         write_layers(out, layer.children);
@@ -124,6 +131,27 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
         }
         if (version >= 6)
             in >> layer.background;
+        if (version >= 7) {
+            quint32 effect_count{};
+            in >> effect_count;
+            checked(in);
+            if (effect_count > 64)
+                throw EditError(QStringLiteral("效果数量超限"));
+            for (quint32 e = 0; e < effect_count; ++e) {
+                Effect effect;
+                in >> effect.id >> effect.name >> effect.enabled >> effect.amount;
+                QJsonParseError error;
+                const auto json = QJsonDocument::fromJson(bounded_bytes(in), &error);
+                if (error.error != QJsonParseError::NoError || !json.isObject())
+                    throw EditError(QStringLiteral("效果参数无效"));
+                effect.tone = tone_from_json(json.object());
+                const auto lut = bounded_bytes(in);
+                if (!lut.isEmpty())
+                    effect.lut = parse_cube(QString::fromUtf8(lut));
+                effect.mask = read_image(in);
+                layer.effects.push_back(std::move(effect));
+            }
+        }
         layer.pixels = read_image(in);
         layer.mask = read_image(in);
         layer.children = read_layers(in, depth + 1, count, version);

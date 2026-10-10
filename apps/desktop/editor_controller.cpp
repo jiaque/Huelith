@@ -6,6 +6,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QBuffer>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QColorDialog>
@@ -1048,6 +1049,7 @@ void EditorController::configure_menus() {
     add(edit, tr("贴入选区"), "Ctrl+Alt+Shift+V", [this] { paste_pixels(false, true); });
     auto* layers = window_->menus_->addMenu(tr("图层(&L)"));
     auto* create = layers->addMenu(tr("新建"));
+    add(layers, tr("智能效果…"), {}, [this] { show_effects(); });
     for (int kind = 0; kind <= int(LayerKind::composition); ++kind)
         add(create, kind_name(static_cast<LayerKind>(kind)), {},
             [this, kind] { create_layer(kind); });
@@ -1392,7 +1394,7 @@ void EditorController::configure_menus() {
         move_actions(menu, child, names);
         return child;
     };
-    subgroup(file, tr("导出"), {tr("导出 PNG / JPEG…")});
+    subgroup(file, tr("导出"), {tr("导出 PNG / JPEG…"), tr("批量导出与队列…")});
     auto* recovery_menu = subgroup(file, tr("恢复"), {tr("打开自动恢复…")});
     move_actions(view, recovery_menu, {tr("恢复未保存文档…")});
     // Reorder without QMenu::clear(), which would delete owned actions.
@@ -1616,22 +1618,66 @@ void EditorController::configure_menus() {
         }
     });
     auto* options = window_->findChild<QToolBar*>("viewToolbar");
-    auto* range_operation_combo = new QComboBox(options);
-    range_operation_combo->addItems({tr("替换选区"), tr("相加"), tr("相减"), tr("相交")});
-    options->addWidget(range_operation_combo)->setObjectName("selectionOptions");
-    connect(range_operation_combo, &QComboBox::currentIndexChanged, this, [this](int index) {
-        if (auto* c = canvas())
-            c->range_operation = static_cast<RangeOp>(index);
-    });
+    auto* range_operations = new QWidget(options);
+    range_operations->setObjectName("selectionModeButtons");
+    auto* range_layout = new QHBoxLayout(range_operations);
+    range_layout->setContentsMargins(0, 0, 0, 0);
+    range_layout->setSpacing(2);
+    auto* range_group = new QButtonGroup(range_operations);
+    range_group->setExclusive(true);
+    const QStringList range_names{tr("新选区"), tr("添加到选区（Shift）"), tr("从选区减去（Alt）"),
+                                  tr("与选区交叉（Shift+Alt）")};
+    const std::array<QByteArray, 4> range_icons{
+        "<rect x='5' y='5' width='14' height='14' fill='#b8b8b8'/>",
+        "<path d='M3 3h12v6h6v12H9v-6H3Z' fill='#b8b8b8'/>",
+        "<path d='M3 3h12v6H9v6H3Z' fill='#b8b8b8'/><rect x='9' y='9' width='12' height='12' "
+        "fill='none' stroke='#b8b8b8'/>",
+        "<rect x='3' y='3' width='12' height='12' fill='none' stroke='#b8b8b8'/><rect x='9' y='9' "
+        "width='12' height='12' fill='none' stroke='#b8b8b8'/><rect x='9' y='9' width='6' "
+        "height='6' fill='#b8b8b8'/>"};
+    for (int index = 0; index < 4; ++index) {
+        auto* button = new QToolButton(range_operations);
+        button->setObjectName(QString("selectionMode%1").arg(index));
+        button->setToolTip(range_names[index]);
+        button->setAccessibleName(range_names[index]);
+        button->setCheckable(true);
+        button->setChecked(index == 0);
+        button->setFixedSize(28, 28);
+        button->setIconSize(QSize(20, 20));
+        button->setStyleSheet("QToolButton:checked {background:#3a4148; border:1px solid #666a70; "
+                              "padding:0;} QToolButton {padding:0;}");
+        QPixmap icon(40, 40);
+        icon.fill(Qt::transparent);
+        QPainter painter(&icon);
+        QSvgRenderer renderer(
+            QByteArray("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>") +
+            range_icons[index] + "</svg>");
+        renderer.render(&painter);
+        painter.end();
+        icon.setDevicePixelRatio(2);
+        button->setIcon(QIcon(icon));
+        range_group->addButton(button, index);
+        range_layout->addWidget(button);
+        connect(button, &QToolButton::clicked, this, [this, index] {
+            if (auto* c = canvas()) {
+                c->range_operation = static_cast<RangeOp>(index);
+                c->setFocus();
+            }
+        });
+    }
+    options->addWidget(range_operations)->setObjectName("selectionOptions");
     auto* radius = new QDoubleSpinBox(options);
-    radius->setObjectName("brushRadius");
-    radius->setRange(1, 500);
-    radius->setValue(20);
-    radius->setPrefix(tr("笔刷半径 "));
+    radius->setObjectName("brushDiameter");
+    radius->setRange(2, 1000);
+    radius->setValue(40);
+    radius->setPrefix(tr("大小 "));
+    radius->setSuffix(tr(" 像素"));
+    radius->setDecimals(0);
+    radius->setAccessibleName(tr("笔刷直径"));
     options->addWidget(radius)->setObjectName("brushOptions");
     connect(radius, &QDoubleSpinBox::valueChanged, this, [this](double value) {
         if (auto* c = canvas())
-            c->brush_radius = value;
+            c->brush_radius = value / 2;
     });
     for (const auto& entry : {std::pair{"autoSelect", tr("自动选择：图层")},
                               std::pair{"transformControls", tr("显示变换控件")},
@@ -1842,6 +1888,12 @@ void EditorController::refresh_tools() {
             action->setVisible(c && (c->transforming() || tool == CanvasTool::crop));
     }
     if (c) {
+        for (int index = 0; index < 4; ++index)
+            if (auto* button =
+                    options->findChild<QToolButton*>(QString("selectionMode%1").arg(index))) {
+                const QSignalBlocker blocker(button);
+                button->setChecked(index == int(c->range_operation));
+            }
         for (const auto& entry : {std::pair{"brushHardness", c->brush_hardness * 100},
                                   std::pair{"brushOpacity", c->brush_opacity * 100},
                                   std::pair{"brushFlow", c->brush_flow * 100},
@@ -1867,9 +1919,9 @@ void EditorController::refresh_tools() {
         }
     }
     if (c)
-        if (auto* radius = options->findChild<QDoubleSpinBox*>("brushRadius")) {
+        if (auto* radius = options->findChild<QDoubleSpinBox*>("brushDiameter")) {
             QSignalBlocker blocker(radius);
-            radius->setValue(c->brush_radius);
+            radius->setValue(c->brush_radius * 2);
         }
     if (c)
         for (const auto& entry : {std::pair{"autoSelect", c->auto_select},

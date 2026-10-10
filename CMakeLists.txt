@@ -46,6 +46,7 @@ set_target_properties(huelith_ort PROPERTIES
 add_library(huelith_editing src/editing/project.cpp src/editing/project_io.cpp src/editing/blend.cpp src/editing/photo_operations.cpp src/editing/raw_develop.cpp src/editing/raw_cache.cpp src/editing/tiff_io.cpp src/editing/tone.cpp src/editing/export_queue.cpp)
 target_include_directories(huelith_editing PUBLIC include)
 target_sources(huelith_editing PRIVATE src/editing/raw_adjustments.cpp)
+target_sources(huelith_editing PRIVATE src/editing/effects.cpp)
 target_link_libraries(huelith_editing PUBLIC huelith_build_options Qt6::Gui PRIVATE libraw::raw_r TIFF::TIFF huelith_ort)
 target_compile_definitions(huelith_editing PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 
@@ -69,6 +70,7 @@ add_library(huelith_desktop
     apps/desktop/raw_dialog.cpp
     apps/desktop/tone_panel.cpp
     apps/desktop/tone_workflow.cpp
+    apps/desktop/effects_workflow.cpp
     apps/desktop/editor_controller.cpp
     apps/desktop/editor_workflows.cpp
     apps/desktop/export_dialog.cpp

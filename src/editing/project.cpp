@@ -150,7 +150,7 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
             continue;
         if (layer.kind == LayerKind::adjustment) {
             const float gain = static_cast<float>(std::exp2(layer.exposure));
-            const auto toned = apply_tone(target, layer.tone);
+            const auto toned = apply_effects(apply_tone(target, layer.tone), layer.effects);
             for (int y = 0; y < target.height(); ++y) {
                 auto* row = reinterpret_cast<float*>(target.scanLine(y));
                 const auto* adjusted = reinterpret_cast<const float*>(toned.constScanLine(y));
@@ -166,7 +166,7 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
             continue;
         }
         if (layer.kind == LayerKind::group && !layer.isolated && !layer.clipped &&
-            layer.blend == Blend::normal && !layer.warped) {
+            layer.blend == Blend::normal && !layer.warped && layer.effects.empty()) {
             const QImage before = target;
             auto children = layer.children;
             transform_children(children, layer.transform);
@@ -190,6 +190,7 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
         QImage local = blank(target.size());
         if (layer.kind == LayerKind::group || layer.kind == LayerKind::composition) {
             render_layers(local, layer.children);
+            local = apply_effects(local, layer.effects);
             if (!layer.transform.isIdentity() || layer.warped) {
                 QImage transformed = blank(target.size());
                 QPainter painter(&transformed);
@@ -211,7 +212,10 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
                 } else
                     painter.fillRect(local.rect(), working_color(layer.fill));
             } else
-                paint_warp(painter, layer.pixels, layer);
+                paint_warp(painter, apply_effects(layer.pixels, layer.effects), layer);
+            painter.end();
+            if (layer.kind == LayerKind::fill)
+                local = apply_effects(local, layer.effects);
         }
         if (layer.exposure != 0) {
             const float gain = static_cast<float>(std::exp2(layer.exposure));
@@ -235,6 +239,7 @@ void validate_layers(const std::vector<Layer>& layers, QSet<QUuid>& ids, int dep
         throw EditError(QStringLiteral("图层嵌套超过 32 层"));
     for (const auto& layer : layers) {
         validate_tone(layer.tone);
+        validate_effects(layer.effects);
         if (layer.background &&
             (depth != 0 || &layer != &layers.front() || layer.kind != LayerKind::pixels ||
              !layer.transform.isIdentity() || layer.warped || layer.opacity != 1.F ||
@@ -320,6 +325,42 @@ QImage render(const State& state) {
     auto result = blank(state.size);
     render_layers(result, state.layers);
     return result;
+}
+State preview_state(const State& state, int maximum_edge) {
+    if (maximum_edge < 1)
+        throw EditError(QStringLiteral("预览尺寸无效"));
+    auto preview = state;
+    const double scale =
+        std::min(1., double(maximum_edge) / std::max(state.size.width(), state.size.height()));
+    if (scale == 1)
+        return preview;
+    const QTransform shrink = QTransform::fromScale(scale, scale);
+    const auto grow = shrink.inverted();
+    const auto resize = [scale](QImage& image) {
+        if (!image.isNull())
+            image = image.scaled(std::max(1, qRound(image.width() * scale)),
+                                 std::max(1, qRound(image.height() * scale)), Qt::IgnoreAspectRatio,
+                                 Qt::SmoothTransformation);
+    };
+    std::function<void(std::vector<Layer>&)> visit = [&](std::vector<Layer>& layers) {
+        for (auto& layer : layers) {
+            resize(layer.pixels);
+            resize(layer.mask);
+            layer.vector_mask = shrink.map(layer.vector_mask);
+            layer.transform = grow * layer.transform * shrink;
+            layer.mask_transform = grow * layer.mask_transform * shrink;
+            for (auto& effect : layer.effects)
+                resize(effect.mask);
+            visit(layer.children);
+        }
+    };
+    preview.size = QSize(std::max(1, qRound(state.size.width() * scale)),
+                         std::max(1, qRound(state.size.height() * scale)));
+    resize(preview.selection);
+    visit(preview.layers);
+    preview.snapshots.clear();
+    preview.saved_selections.clear();
+    return preview;
 }
 Layer* find_layer(std::vector<Layer>& layers, const QUuid& id) {
     for (auto& layer : layers) {

@@ -7,6 +7,7 @@
 #include <vector>
 namespace huelith::editing {
 struct ToneSettings {
+    std::array<bool, 8> sections{true, true, true, true, true, true, true, true};
     double exposure{};
     double contrast{};
     double highlights{};

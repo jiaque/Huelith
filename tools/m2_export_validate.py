@@ -54,6 +54,10 @@ def main():
         folder = Path(folder)
         call('init', settings=str(folder))
         call('window')
+        def menu_reachable():
+            paths = [entry['path'] for entry in call('window_chrome')['menus']]
+            assert any('导出' in path and path.endswith('批量导出与队列…') for path in paths), paths
+        test('batch_export_reachable_from_real_file_menu', menu_reachable)
 
         def scene(color='red'):
             call('window_scene', width=120, height=80,

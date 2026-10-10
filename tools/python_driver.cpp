@@ -48,6 +48,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyleOptionSlider>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTabletEvent>
@@ -205,6 +206,58 @@ QJsonObject run(const QJsonObject& o) {
             {"sha256", QString::fromLatin1(
                            QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())}};
     }
+    if (op == "effect_probe") {
+        QImage input(2, 1, QImage::Format_RGBA32FPx4_Premultiplied);
+        input.setColorSpace(working_space());
+        const auto rgba = o.value("rgba").toArray();
+        if (rgba.size() != 4)
+            throw EditError("RGBA required");
+        auto* values = reinterpret_cast<float*>(input.bits());
+        for (int i = 0; i < 8; ++i)
+            values[i] = float(rgba[i % 4].toDouble());
+        std::vector<Effect> effects;
+        for (const auto& value : o.value("effects").toArray()) {
+            const auto json = value.toObject();
+            Effect effect;
+            effect.name = json.value("name").toString("effect");
+            effect.enabled = json.value("enabled").toBool(true);
+            effect.amount = json.value("amount").toDouble(1);
+            effect.tone = tone_from_json(json.value("tone").toObject());
+            if (json.contains("lut"))
+                effect.lut = parse_cube(json.value("lut").toString());
+            if (json.contains("mask")) {
+                effect.mask = QImage(2, 1, QImage::Format_Grayscale8);
+                const auto mask = json.value("mask").toArray();
+                if (mask.size() != 2)
+                    throw EditError("Two mask values required");
+                for (int i = 0; i < 2; ++i)
+                    effect.mask.bits()[i] = uchar(mask[i].toInt());
+            }
+            effects.push_back(std::move(effect));
+        }
+        std::atomic_bool cancelled{o.value("cancelled").toBool()};
+        const auto image = apply_effects(input, effects, &cancelled);
+        QJsonArray pixels;
+        for (int i = 0; i < 8; ++i)
+            pixels.append(reinterpret_cast<const float*>(image.constBits())[i]);
+        State state;
+        state.name = "effects";
+        state.size = input.size();
+        Layer layer;
+        layer.name = "effect pixels";
+        layer.pixels = input;
+        layer.effects = effects;
+        state.layers = {layer};
+        if (render(state) != image)
+            throw EditError("Render does not apply effects");
+        if (o.contains("save")) {
+            save_project({state, 1}, o.value("save").toString());
+            const auto loaded = load_project(o.value("save").toString());
+            if (render(loaded) != image || loaded.layers[0].effects.size() != effects.size())
+                throw EditError("Effects persistence mismatch");
+        }
+        return {{"pixels", pixels}};
+    }
     if (op == "tone_probe") {
         const auto settings = tone_from_json(o.value("settings").toObject());
         QImage input(1, 1, QImage::Format_RGBA32FPx4_Premultiplied);
@@ -322,6 +375,81 @@ QJsonObject run(const QJsonObject& o) {
         d.raw_window->open();
         return {{"ok", true}};
     }
+    if (op == "raw_hsl") {
+        auto* dialog = d.raw_window.get();
+        if (!dialog)
+            throw EditError("RAW window missing");
+        auto* tabs = dialog->findChild<QTabBar*>("rawHslTabs");
+        if (!tabs)
+            throw EditError("RAW HSL tabs missing");
+        dialog->findChild<QToolButton*>("rawSection4")->setChecked(true);
+        dialog->findChild<QToolButton*>("rawSection0")->setChecked(false);
+        if (o.contains("enabled"))
+            dialog->findChild<QToolButton*>("rawSectionEnable4")
+                ->setChecked(o.value("enabled").toBool());
+        if (o.contains("tab")) {
+            const QPointF point = tabs->tabRect(o.value("tab").toInt()).center();
+            for (const auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+                QMouseEvent event(type, point, tabs->mapToGlobal(point.toPoint()), Qt::LeftButton,
+                                  type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton,
+                                  Qt::NoModifier);
+                QApplication::sendEvent(tabs, &event);
+            }
+        }
+        if (o.contains("mode"))
+            dialog->findChild<QComboBox*>("rawHslMode")->setCurrentIndex(o.value("mode").toInt());
+        if (o.contains("band"))
+            dialog->findChild<QTabBar*>("rawHslColors")->setCurrentIndex(o.value("band").toInt());
+        if (o.contains("control")) {
+            auto* spin = dialog->findChild<QDoubleSpinBox*>(o.value("control").toString());
+            if (!spin)
+                throw EditError("HSL numeric control missing");
+            spin->setValue(o.value("value").toDouble());
+        }
+        if (o.contains("slider")) {
+            auto* slider = dialog->findChild<QSlider*>(o.value("slider").toString());
+            if (!slider)
+                throw EditError("HSL slider missing");
+            if (o.contains("position")) {
+                const QPointF position(6 + (slider->width() - 12.) * o.value("position").toDouble(),
+                                       7);
+                for (const auto type :
+                     {QEvent::MouseButtonPress, QEvent::MouseMove, QEvent::MouseButtonRelease}) {
+                    QMouseEvent event(type, position, slider->mapToGlobal(position.toPoint()),
+                                      type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                                      type == QEvent::MouseButtonRelease ? Qt::NoButton
+                                                                         : Qt::LeftButton,
+                                      Qt::NoModifier);
+                    QApplication::sendEvent(slider, &event);
+                }
+            }
+            if (o.value("reset").toBool()) {
+                const QPointF position(slider->width() / 2., 7);
+                QMouseEvent event(QEvent::MouseButtonDblClick, position,
+                                  slider->mapToGlobal(position.toPoint()), Qt::LeftButton,
+                                  Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(slider, &event);
+            }
+            if (o.value("right").toBool()) {
+                QKeyEvent event(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+                QApplication::sendEvent(slider, &event);
+            }
+        }
+        QApplication::processEvents();
+        QJsonArray labels, rows;
+        for (int i = 0; i < tabs->count(); ++i)
+            labels.append(tabs->tabText(i));
+        auto* mixer = dialog->findChild<QWidget*>("rawHslMixer");
+        for (auto* spin : mixer->findChildren<QDoubleSpinBox*>())
+            if (spin->isVisible())
+                rows.append(QJsonObject{{"name", spin->objectName()}, {"value", spin->value()}});
+        if (o.contains("capture"))
+            mixer->grab().save(o.value("capture").toString());
+        return {{"tabs", labels},
+                {"current", tabs->currentIndex()},
+                {"rows", rows},
+                {"recipe", dialog->results().front().raw_recipe}};
+    }
     if (op == "raw_slider_drag") {
         auto* dialog = d.raw_window.get();
         if (!dialog)
@@ -390,8 +518,29 @@ QJsonObject run(const QJsonObject& o) {
         if (o.contains("target"))
             dialog->findChild<QComboBox*>("rawAdjustmentTarget")
                 ->setCurrentIndex(o.value("target").toInt());
+        if (o.value("click").toString() == "rawSynchronize") {
+            const auto options = o.value("sync").toObject();
+            QTimer::singleShot(0, [options] {
+                auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (!modal || modal->objectName() != "rawSyncDialog")
+                    return;
+                if (options.contains("groups")) {
+                    const auto groups = options.value("groups").toArray();
+                    for (int i = 0; i < 10; ++i)
+                        modal->findChild<QCheckBox*>(QString("rawSync%1").arg(i))
+                            ->setChecked(groups.contains(i));
+                }
+                if (options.contains("capture"))
+                    modal->grab().save(options.value("capture").toString());
+                auto* footer = modal->findChild<QDialogButtonBox*>();
+                footer
+                    ->button(options.value("cancel").toBool() ? QDialogButtonBox::Cancel
+                                                              : QDialogButtonBox::Ok)
+                    ->click();
+            });
+        }
         if (o.contains("click")) {
-            auto* button = dialog->findChild<QPushButton*>(o.value("click").toString());
+            auto* button = dialog->findChild<QAbstractButton*>(o.value("click").toString());
             if (!button)
                 throw EditError("RAW control missing");
             button->click();
@@ -462,7 +611,38 @@ QJsonObject run(const QJsonObject& o) {
         QJsonArray recipes;
         for (const auto& source : dialog->results())
             recipes.append(source.raw_recipe);
+        QJsonArray controls;
+        if (o.value("inventory").toBool())
+            for (auto* widget : dialog->findChildren<QWidget*>()) {
+                if (widget->objectName().isEmpty() || widget->objectName().startsWith("qt_"))
+                    continue;
+                QJsonObject item{{"name", widget->objectName()},
+                                 {"type", widget->metaObject()->className()},
+                                 {"visible", widget->isVisible()},
+                                 {"enabled", widget->isEnabled()},
+                                 {"height", widget->height()},
+                                 {"minimumHeight", widget->minimumSizeHint().height()}};
+                if (auto* button = qobject_cast<QAbstractButton*>(widget)) {
+                    item.insert("text", button->text());
+                    item.insert("checked", button->isChecked());
+                    item.insert("tooltip", button->toolTip());
+                }
+                if (auto* combo = qobject_cast<QComboBox*>(widget)) {
+                    QJsonArray items;
+                    for (int i = 0; i < combo->count(); ++i)
+                        items.append(combo->itemText(i));
+                    item.insert("items", items);
+                }
+                if (auto* spin = qobject_cast<QDoubleSpinBox*>(widget)) {
+                    item.insert("minimum", spin->minimum());
+                    item.insert("maximum", spin->maximum());
+                    item.insert("value", spin->value());
+                }
+                controls.append(item);
+            }
         return {{"previewFullResolution", dialog->property("previewFullResolution").toBool()},
+                {"controls", controls},
+                {"mode", dialog->findChild<QComboBox*>("rawEditMode")->currentIndex()},
                 {"previewRequested", dialog->property("previewRequested").toDouble()},
                 {"previewPresented", dialog->property("previewPresented").toDouble()},
                 {"modelChoice", dialog->findChild<QComboBox*>("rawModelChoice")->currentIndex()},
@@ -601,6 +781,8 @@ QJsonObject run(const QJsonObject& o) {
             throw EditError("control missing");
         if (auto* box = qobject_cast<QCheckBox*>(widget))
             box->setChecked(o.value("value").toBool());
+        else if (auto* button = qobject_cast<QToolButton*>(widget))
+            button->click();
         else if (auto* combo = qobject_cast<QComboBox*>(widget))
             combo->setCurrentIndex(o.value("value").toInt());
         else if (auto* spin = qobject_cast<QDoubleSpinBox*>(widget)) {
@@ -679,7 +861,17 @@ QJsonObject run(const QJsonObject& o) {
         std::function<void(const std::vector<Layer>&)> visit = [&](const auto& values) {
             for (const auto& layer : values) {
                 const auto matrix = layer.transform * parent_matrix(state, layer.id);
+                QJsonArray effects;
+                for (const auto& effect : layer.effects)
+                    effects.append(QJsonObject{{"id", effect.id.toString()},
+                                               {"name", effect.name},
+                                               {"enabled", effect.enabled},
+                                               {"amount", effect.amount},
+                                               {"tone", tone_json(effect.tone)},
+                                               {"mask", !effect.mask.isNull()},
+                                               {"lut", bool(effect.lut)}});
                 layers.append(QJsonObject{{"name", layer.name},
+                                          {"effects", effects},
                                           {"parent",
                                            [&]() {
                                                const auto p = parent_matrix(state, layer.id);
@@ -827,6 +1019,56 @@ QJsonObject run(const QJsonObject& o) {
         QApplication::processEvents();
         return {{"ok", true}};
     }
+    if (op == "window_tone_validation") {
+        QTimer timer;
+        timer.setInterval(20);
+        QElapsedTimer elapsed;
+        elapsed.start();
+        qint64 last = 0, maximum_gap = 0;
+        int edits = 0, ticks = 0;
+        bool presented = false, timed_out = false;
+        QObject::connect(&timer, &QTimer::timeout, d.window.get(), [&] {
+            const auto now = elapsed.elapsed();
+            maximum_gap = std::max(maximum_gap, now - last);
+            last = now;
+            ++ticks;
+            auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (!modal || modal->objectName() != "toneDialog")
+                return;
+            if (elapsed.elapsed() > 30000) {
+                timed_out = true;
+                timer.stop();
+                modal->reject();
+                return;
+            }
+            if (edits < 12) {
+                modal->findChild<QDoubleSpinBox*>("toneExposure")->setValue(++edits / 10.);
+                modal->setProperty("previewPresented", 0);
+                return;
+            }
+            if (modal->property("previewPresented").toInt() == 0)
+                return;
+            presented = true;
+            if (o.contains("capture"))
+                modal->grab().save(o.value("capture").toString());
+            timer.stop();
+            if (o.value("accept").toBool())
+                modal->accept();
+            else
+                modal->reject();
+        });
+        timer.start();
+        bool found = false;
+        for (auto* action : d.window->findChildren<QAction*>())
+            if (action->text() == QStringLiteral("曝光与光线…")) {
+                found = true;
+                action->trigger();
+                break;
+            }
+        timer.stop();
+        return {{"found", found}, {"presented", presented}, {"timedOut", timed_out},
+                {"edits", edits}, {"ticks", ticks},         {"maximumGapMs", maximum_gap}};
+    }
     if (op == "window_action") {
         d.window->setProperty("conflictDetected", false);
         if (o.contains("dialog")) {
@@ -850,6 +1092,8 @@ QJsonObject run(const QJsonObject& o) {
                     if (!modal)
                         return;
                     if (auto* file = qobject_cast<QFileDialog*>(modal)) {
+                        if (settings.contains("steps"))
+                            return;
                         file->selectFile(settings.value("path").toString());
                         static_cast<QDialog*>(file)->accept();
                         timer->stop();
@@ -857,6 +1101,37 @@ QJsonObject run(const QJsonObject& o) {
                         return;
                     }
                     if (*phase == 0) {
+                        *phase = 1; // Nested file dialogs must not re-enter this command sequence.
+                        for (const auto& entry : settings.value("steps").toArray()) {
+                            const auto step = entry.toObject();
+                            if (step.contains("file")) {
+                                QTimer::singleShot(0, [step] {
+                                    auto* file = qobject_cast<QFileDialog*>(
+                                        QApplication::activeModalWidget());
+                                    if (!file)
+                                        return;
+                                    file->selectFile(step.value("file").toString());
+                                    static_cast<QDialog*>(file)->accept();
+                                });
+                            }
+                            if (step.contains("row"))
+                                if (auto* list = modal->findChild<QListWidget*>("effectList"))
+                                    list->setCurrentRow(step.value("row").toInt());
+                            if (step.contains("checked"))
+                                if (auto* list = modal->findChild<QListWidget*>("effectList"))
+                                    if (list->currentItem())
+                                        list->currentItem()->setCheckState(
+                                            step.value("checked").toBool() ? Qt::Checked
+                                                                           : Qt::Unchecked);
+                            if (step.contains("click"))
+                                if (auto* button = modal->findChild<QPushButton*>(
+                                        step.value("click").toString()))
+                                    button->click();
+                            if (step.contains("control"))
+                                if (auto* decimal = modal->findChild<QDoubleSpinBox*>(
+                                        step.value("control").toString()))
+                                    decimal->setValue(step.value("value").toDouble());
+                        }
                         for (auto it = settings.begin(); it != settings.end(); ++it) {
                             if (auto* spin = modal->findChild<QSpinBox*>(it.key()))
                                 spin->setValue(it.value().toInt());
@@ -1238,7 +1513,25 @@ QJsonObject run(const QJsonObject& o) {
             }
         };
         visit(visit, d.window->findChild<QMenuBar*>()->actions(), QString{});
-        return {{"buttons", buttons}, {"menus", menus}};
+        QJsonArray options;
+        if (auto* bar = d.window->findChild<QToolBar*>("viewToolbar"))
+            for (auto* widget : bar->findChildren<QWidget*>()) {
+                if (widget->objectName().isEmpty() || widget->objectName().startsWith("qt_"))
+                    continue;
+                QJsonObject item{{"name", widget->objectName()},
+                                 {"visible", widget->isVisible()},
+                                 {"enabled", widget->isEnabled()},
+                                 {"type", widget->metaObject()->className()},
+                                 {"tooltip", widget->toolTip()}};
+                if (auto* button = qobject_cast<QToolButton*>(widget))
+                    item.insert("checked", button->isChecked());
+                if (auto* spin = qobject_cast<QDoubleSpinBox*>(widget)) {
+                    item.insert("value", spin->value());
+                    item.insert("text", spin->text());
+                }
+                options.append(item);
+            }
+        return {{"buttons", buttons}, {"menus", menus}, {"options", options}};
     }
     if (op == "window_capture") {
         QApplication::processEvents();

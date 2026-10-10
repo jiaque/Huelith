@@ -142,7 +142,7 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     toolbar->addWidget(compare_);
     connect(compare_, &QCheckBox::toggled, this, &RawDialog::display);
     toolbar->addStretch();
-    button(tr("同步调色与降噪设置"), [this] { synchronize(); })->setObjectName("rawSynchronize");
+    button(tr("同步设置…"), [this] { synchronize(); })->setObjectName("rawSynchronize");
     button(tr("更新全部预览"), [this] { compute_all(); })->setObjectName("rawComputeAll");
     button(tr("撤销"), [this] { restore_history(-1); })->setObjectName("rawUndo");
     button(tr("重做"), [this] { restore_history(1); })->setObjectName("rawRedo");
@@ -182,6 +182,7 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     panel->setObjectName("rawParamPanel");
     panel->setMinimumWidth(320);
     auto* form = new QFormLayout(panel);
+    form->setSizeConstraint(QLayout::SetMinimumSize);
     form->setContentsMargins(12, 8, 12, 8);
     histogram_ = new QLabel(panel);
     histogram_->setObjectName("rawHistogram");
@@ -200,7 +201,53 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     mask_panel->setObjectName("rawMaskPanel");
     auto* mask_form = new QFormLayout(mask_panel);
     mask_form->setContentsMargins(0, 0, 0, 0);
-    mask_form->addRow(tr("显影工具"), edit_mode_);
+    edit_mode_->hide(); // Shared state binding; tools are presented directly rather than in a menu.
+    auto* mask_tools = new QWidget(mask_panel);
+    mask_tools->setObjectName("rawMaskTools");
+    auto* mask_tools_layout = new QHBoxLayout(mask_tools);
+    mask_tools_layout->setContentsMargins(0, 0, 0, 0);
+    mask_tools_layout->setSpacing(4);
+    auto* mask_group = new QButtonGroup(mask_tools);
+    const QStringList mask_names{tr("画笔（K）"), tr("擦除"), tr("线性渐变（G）"),
+                                 tr("径向渐变（J）")};
+    const QStringList mask_paths{
+        "<path d='m8 14 9-11 4 4-11 9M8 14q-5-1-5 7 7 0 7-5Z'/>",
+        "<path d='m3 14 10-11 8 8-10 10H9Z M8 9l8 8M11 21h10'/>",
+        "<path d='M3 4h18M3 20h18M12 4v16'/><circle cx='12' cy='12' r='2'/>",
+        "<ellipse cx='12' cy='12' rx='8' ry='6'/><path d='M10 12h4M12 10v4'/>"};
+    for (int i = 0; i < 4; ++i) {
+        auto* tool = new QToolButton(mask_tools);
+        tool->setObjectName(QString("rawMaskTool%1").arg(i + 1));
+        tool->setToolTip(mask_names[i]);
+        tool->setAccessibleName(mask_names[i]);
+        tool->setCheckable(true);
+        tool->setFixedSize(36, 32);
+        tool->setIconSize(QSize(22, 22));
+        QPixmap icon(44, 44);
+        icon.fill(Qt::transparent);
+        QPainter painter(&icon);
+        QSvgRenderer renderer(
+            ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='none' "
+             "stroke='#c8cdd2' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'>" +
+             mask_paths[i] + "</g></svg>")
+                .toUtf8());
+        renderer.render(&painter);
+        painter.end();
+        icon.setDevicePixelRatio(2);
+        tool->setIcon(QIcon(icon));
+        mask_group->addButton(tool, i + 1);
+        mask_tools_layout->addWidget(tool);
+        connect(tool, &QToolButton::clicked, this,
+                [this, i] { edit_mode_->setCurrentIndex(i + 1); });
+    }
+    mask_tools_layout->addStretch();
+    mask_form->addRow(tr("蒙版工具"), mask_tools);
+    connect(edit_mode_, &QComboBox::currentIndexChanged, this, [mask_group](int index) {
+        mask_group->setExclusive(false);
+        for (auto* button : mask_group->buttons())
+            button->setChecked(mask_group->id(button) == index);
+        mask_group->setExclusive(true);
+    });
     form->addRow(mask_panel);
     mask_panel->hide();
     adjustment_ = new QComboBox(panel);
@@ -248,11 +295,11 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     });
     mask_form->addRow(local_buttons);
     local_radius_ = new QDoubleSpinBox(panel);
-    local_radius_->setObjectName("rawLocalRadius");
-    local_radius_->setRange(1, 1000);
-    local_radius_->setValue(100);
+    local_radius_->setObjectName("rawLocalDiameter");
+    local_radius_->setRange(2, 2000);
+    local_radius_->setValue(200);
     local_radius_->setSuffix(tr(" 像素"));
-    mask_form->addRow(tr("局部笔刷半径"), local_radius_);
+    mask_form->addRow(tr("大小（直径）"), local_radius_);
     local_feather_ = new QDoubleSpinBox(panel);
     local_feather_->setObjectName("rawLocalFeather");
     local_feather_->setRange(0, 100);
@@ -438,6 +485,14 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     };
     shortcut("C", [this] { findChild<QToolButton*>("rawRail1")->click(); });
     shortcut("K", [this] { findChild<QToolButton*>("rawRail2")->click(); });
+    shortcut("G", [this] {
+        findChild<QToolButton*>("rawRail2")->click();
+        findChild<QToolButton*>("rawMaskTool3")->click();
+    });
+    shortcut("J", [this] {
+        findChild<QToolButton*>("rawRail2")->click();
+        findChild<QToolButton*>("rawMaskTool4")->click();
+    });
     shortcut("H", [this] { findChild<QToolButton*>("rawRail3")->click(); });
     shortcut("P", [this] { compare_->toggle(); });
     rail->addStretch();
@@ -575,7 +630,7 @@ bool RawDialog::eventFilter(QObject* object, QEvent* event) {
                                   : mode == 4 ? "radial"
                                               : "brush"},
                          {"subtract", mode == 2},
-                         {"radius", local_radius_->value() /
+                         {"radius", local_radius_->value() / 2 /
                                         std::min(source_size_.width(), source_size_.height())},
                          {"feather", local_feather_->value() / 100},
                          {"x", x},
@@ -976,21 +1031,110 @@ void RawDialog::compute_all() {
 void RawDialog::synchronize() {
     if (job_ || commit_job_)
         return;
+    QDialog dialog(this);
+    dialog.setObjectName("rawSyncDialog");
+    dialog.setWindowTitle(tr("同步设置"));
+    dialog.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* menu = new QMenuBar(&dialog);
+    menu->addAction(tr("同步设置"))->setEnabled(false);
+    layout->addWidget(new WindowHeader(menu, &dialog));
+    layout->addWidget(
+        new QLabel(tr("将当前照片的所选设置同步到胶片条中勾选的其他照片。"), &dialog));
+    const std::array<QStringList, 8> fields{
+        QStringList{"exposure", "contrast", "highlights", "shadows", "whites", "blacks"},
+        QStringList{"temperature", "tint", "saturation", "vibrance", "monochrome"},
+        QStringList{"texture", "clarity", "dehaze", "vignette", "grain"},
+        QStringList{"curve", "channelCurves", "blackPoint", "whitePoint", "gamma"},
+        QStringList{"hue", "saturationBands", "luminanceBands"},
+        QStringList{"gradingHue", "gradingSaturation", "gradingLuminance", "gradingBalance"},
+        QStringList{"sharpening"},
+        QStringList{}};
+    const QStringList labels{tr("光线"),       tr("颜色"),     tr("效果"), tr("曲线与色阶"),
+                             tr("色彩混合器"), tr("颜色分级"), tr("锐化"), tr("AI 降噪与模型")};
+    std::array<QCheckBox*, 10> choices{};
+    for (int index = 0; index < 10; ++index) {
+        auto* check = new QCheckBox(index < 8    ? labels[index]
+                                    : index == 8 ? tr("局部蒙版与调整")
+                                                 : tr("裁剪"),
+                                    &dialog);
+        check->setObjectName(QString("rawSync%1").arg(index));
+        check->setChecked(index < 8);
+        choices[index] = check;
+        layout->addWidget(check);
+    }
+    auto* all = new QHBoxLayout;
+    for (bool selected : {true, false}) {
+        auto* button = new QPushButton(selected ? tr("全选") : tr("全不选"), &dialog);
+        button->setObjectName(selected ? "rawSyncAll" : "rawSyncNone");
+        button->setAutoDefault(false);
+        all->addWidget(button);
+        connect(button, &QPushButton::clicked, &dialog, [choices, selected] {
+            for (auto* choice : choices)
+                choice->setChecked(selected);
+        });
+    }
+    layout->addLayout(all);
+    auto* footer = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(footer);
+    connect(footer, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(footer, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    auto source_tone =
+        editing::tone_from_json(sources_[current_].raw_recipe.value("tone").toObject());
+    if (!sources_[current_].raw_recipe.contains("tone"))
+        source_tone.exposure = sources_[current_].raw_recipe.value("exposure").toDouble();
+    const auto tone = editing::tone_json(source_tone);
+    bool modified{};
     for (std::size_t i = 0; i < sources_.size(); ++i) {
         if (int(i) == current_ || !included(i))
             continue;
-        for (const auto* name :
-             {"tone", "exposure", "denoise", "directml", "modelPath", "customModel"}) {
-            if (sources_[current_].raw_recipe.contains(QLatin1String(name)))
-                sources_[i].raw_recipe.insert(
-                    QLatin1String(name), sources_[current_].raw_recipe.value(QLatin1String(name)));
-            else
-                sources_[i].raw_recipe.remove(QLatin1String(name));
+        auto target_tone = editing::tone_from_json(sources_[i].raw_recipe.value("tone").toObject());
+        if (!sources_[i].raw_recipe.contains("tone"))
+            target_tone.exposure = sources_[i].raw_recipe.value("exposure").toDouble();
+        auto target = editing::tone_json(target_tone);
+        const auto before = sources_[i].raw_recipe;
+        for (int group = 0; group < 7; ++group)
+            if (choices[group]->isChecked())
+                for (const auto& field : fields[group])
+                    target.insert(field, tone.value(field));
+        auto section_flags = target.value("sections").toArray();
+        const auto source_flags = tone.value("sections").toArray();
+        const std::array<int, 7> sections{0, 1, 6, 3, 4, 5, 7};
+        for (int group = 0; group < 7; ++group)
+            if (choices[group]->isChecked())
+                section_flags[sections[group]] = source_flags[sections[group]];
+        if (choices[3]->isChecked())
+            section_flags[2] = source_flags[2];
+        target.insert("sections", section_flags);
+        if (target != editing::tone_json(target_tone)) {
+            sources_[i].raw_recipe.insert("tone", target);
+            sources_[i].raw_recipe.insert("exposure", target.value("exposure"));
         }
-        cache_keys_[i].clear();
+        QStringList copied;
+        if (choices[7]->isChecked())
+            copied << "denoise" << "directml" << "modelPath" << "customModel";
+        if (choices[8]->isChecked())
+            copied << "locals";
+        if (choices[9]->isChecked())
+            copied << "crop";
+        for (const auto& name : copied) {
+            if (sources_[current_].raw_recipe.contains(name))
+                sources_[i].raw_recipe.insert(name, sources_[current_].raw_recipe.value(name));
+            else
+                sources_[i].raw_recipe.remove(name);
+        }
+        if (sources_[i].raw_recipe != before) {
+            if (choices[7]->isChecked())
+                cache_keys_[i].clear();
+            modified = true;
+        }
     }
-    message_->setText(tr("设置已同步；可更新全部预览后提交"));
-    record_history();
+    message_->setText(modified ? tr("所选设置已同步；未勾选的设置保持原值")
+                               : tr("没有需要同步的更改"));
+    if (modified)
+        record_history();
     update_ready();
 }
 void RawDialog::record_history() {

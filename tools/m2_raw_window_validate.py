@@ -70,6 +70,16 @@ def main():
         state = call('raw_window_state', included=True)
         assert not state['ready'], state
         call('raw_window_state', index=0)
+        original = call('raw_window_state')['recipes']
+        call('raw_window_state', click='rawSynchronize', sync=dict(groups=[0], cancel=True))
+        assert call('raw_window_state')['recipes'] == original
+        call('raw_window_state', click='rawSynchronize', sync=dict(groups=[]))
+        assert call('raw_window_state')['recipes'] == original
+        call('raw_window_state', dehaze=23)
+        call('raw_window_state', click='rawSynchronize', sync=dict(groups=[0], capture=str(output/'sync-settings.png')))
+        selective = call('raw_window_state')['recipes']
+        assert selective[1]['tone']['exposure'] == .25 and selective[1]['tone']['dehaze'] == 0
+        assert selective[0]['tone']['dehaze'] == 23
         call('raw_window_state', click='rawSynchronize')
         state = call('raw_window_state')
         assert all(recipe['tone']['exposure'] == .25 for recipe in state['recipes'])

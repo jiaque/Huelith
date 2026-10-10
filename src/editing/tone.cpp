@@ -87,7 +87,11 @@ void validate_tone(const ToneSettings& settings) {
 }
 QJsonObject tone_json(const ToneSettings& settings) {
     validate_tone(settings);
-    QJsonObject json{{"version", 2}, {"monochrome", settings.monochrome}};
+    QJsonObject json{{"version", 3}, {"monochrome", settings.monochrome}};
+    QJsonArray sections;
+    for (bool enabled : settings.sections)
+        sections.append(enabled);
+    json.insert("sections", sections);
     for (const auto& [name, member] : fields)
         json.insert(QLatin1String(name), settings.*member);
     QJsonArray points;
@@ -124,9 +128,19 @@ ToneSettings tone_from_json(const QJsonObject& json) {
     ToneSettings settings;
     if (json.isEmpty())
         return settings;
-    if (json.value("version").toInt() != 1 && json.value("version").toInt() != 2)
+    if (json.value("version").toInt() < 1 || json.value("version").toInt() > 3)
         throw EditError(QStringLiteral("未知调色配方版本"));
     const auto defaults = tone_json(settings);
+    if (json.contains("sections")) {
+        const auto sections = json.value("sections").toArray();
+        if (sections.size() != 8)
+            throw EditError(QStringLiteral("调色分组开关数量无效"));
+        for (int i = 0; i < 8; ++i) {
+            if (!sections[i].isBool())
+                throw EditError(QStringLiteral("调色分组开关必须为布尔值"));
+            settings.sections[i] = sections[i].toBool();
+        }
+    }
     if (json.contains("monochrome")) {
         if (!json.value("monochrome").isBool())
             throw EditError(QStringLiteral("黑白开关格式无效"));
@@ -194,7 +208,40 @@ ToneSettings tone_from_json(const QJsonObject& json) {
     validate_tone(settings);
     return settings;
 }
-QImage apply_tone(const QImage& source, const ToneSettings& s, const std::atomic_bool* cancelled) {
+QImage apply_tone(const QImage& source, const ToneSettings& settings,
+                  const std::atomic_bool* cancelled) {
+    validate_tone(settings);
+    auto s = settings;
+    s.sections.fill(true);
+    if (!settings.sections[0])
+        s.exposure = s.contrast = s.highlights = s.shadows = s.whites = s.blacks = 0;
+    if (!settings.sections[1]) {
+        s.temperature = s.tint = s.saturation = s.vibrance = 0;
+        s.monochrome = false;
+    }
+    if (!settings.sections[2]) {
+        s.black_point = 0;
+        s.white_point = s.gamma = 1;
+    }
+    if (!settings.sections[3]) {
+        s.curve = ToneSettings{}.curve;
+        s.channel_curves = ToneSettings{}.channel_curves;
+    }
+    if (!settings.sections[4]) {
+        s.hue.fill(0);
+        s.saturation_bands.fill(0);
+        s.luminance_bands.fill(0);
+    }
+    if (!settings.sections[5]) {
+        s.grading_hue.fill(0);
+        s.grading_saturation.fill(0);
+        s.grading_luminance.fill(0);
+        s.grading_balance = 0;
+    }
+    if (!settings.sections[6])
+        s.texture = s.clarity = s.dehaze = s.vignette = s.grain = 0;
+    if (!settings.sections[7])
+        s.sharpening = 0;
     const auto check_cancel = [cancelled] {
         if (cancelled && cancelled->load())
             throw EditError(QStringLiteral("图像处理已取消"));
