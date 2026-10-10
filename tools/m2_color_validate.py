@@ -83,6 +83,19 @@ def main():
             value = tone(dict(monochrome=True), rgba=(.125,.25,.5,.5))
             assert max(value[:3])-min(value[:3]) < .001 and value[3] == .5, value
         test('monochrome_neutral_alpha_preserved', monochrome)
+        def spatial():
+            zero = call('tone_spatial_probe', settings=dict(version=2))
+            assert zero['maximumChange'] == 0
+            for field in ('texture', 'clarity', 'dehaze', 'vignette', 'grain', 'sharpening'):
+                result = call('tone_spatial_probe', settings=dict(version=2, **{field:40}))
+                assert 'error' not in result and result['maximumChange'] > 1e-5, (field, result)
+                repeated = call('tone_spatial_probe', settings=dict(version=2, **{field:40}))
+                assert repeated['sha256'] == result['sha256']
+            tone(dict(dehaze=20, texture=15, clarity=10, vignette=-20, grain=10, sharpening=15),
+                 save=str(Path(directory)/'spatial-effects.huelith'))
+            cancelled = call('tone_spatial_probe', settings=dict(version=2, dehaze=20), cancelled=True)
+            assert '取消' in cancelled['error']
+        test('spatial_effects_real_pixels_alpha_determinism_persistence_cancel', spatial)
         def tiff():
             path = Path(directory)/'16位 AdobeRGB.tif'
             result = call('tiff_roundtrip',path=str(path))

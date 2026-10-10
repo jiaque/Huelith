@@ -30,6 +30,7 @@ QString raw_cache_key(const QByteArray& source, const RawOptions& options) {
          QString::fromLatin1(QCryptographicHash::hash(source, QCryptographicHash::Sha256).toHex())},
         {"model", QString::fromLatin1(model_hash)},
         {"denoise", options.denoise},
+        {"customModel", options.denoise && options.custom_model},
         {"directml", options.denoise && options.directml},
         {"exposure", options.exposure}};
     return QString::fromLatin1(

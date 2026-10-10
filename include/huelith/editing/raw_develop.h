@@ -7,6 +7,7 @@ namespace huelith::editing {
 struct RawOptions {
     bool denoise{};
     bool directml{true};
+    bool custom_model{}; // Explicit opt-in, constrained to the RawNIND Bayer tensor contract.
     QString model_path;
     double exposure{};
 };

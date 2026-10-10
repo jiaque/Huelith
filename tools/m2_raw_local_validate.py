@@ -80,7 +80,7 @@ def main():
             deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
                 call('pump', waitMs=30)
-                if call('raw_window_state')['ready']:
+                if call('raw_window_state')['ready'] and call('raw_window_state')['previewPresented'] > 0:
                     break
             assert call('raw_window_state')['ready']
             call('raw_window_state', click='rawAddLocal')

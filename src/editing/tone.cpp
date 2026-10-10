@@ -19,6 +19,12 @@ constexpr Field fields[]{{"exposure", &ToneSettings::exposure},
                          {"tint", &ToneSettings::tint},
                          {"saturation", &ToneSettings::saturation},
                          {"vibrance", &ToneSettings::vibrance},
+                         {"texture", &ToneSettings::texture},
+                         {"clarity", &ToneSettings::clarity},
+                         {"dehaze", &ToneSettings::dehaze},
+                         {"vignette", &ToneSettings::vignette},
+                         {"grain", &ToneSettings::grain},
+                         {"sharpening", &ToneSettings::sharpening},
                          {"blackPoint", &ToneSettings::black_point},
                          {"whitePoint", &ToneSettings::white_point},
                          {"gamma", &ToneSettings::gamma},
@@ -188,13 +194,35 @@ ToneSettings tone_from_json(const QJsonObject& json) {
     validate_tone(settings);
     return settings;
 }
-QImage apply_tone(const QImage& source, const ToneSettings& s) {
+QImage apply_tone(const QImage& source, const ToneSettings& s, const std::atomic_bool* cancelled) {
+    const auto check_cancel = [cancelled] {
+        if (cancelled && cancelled->load())
+            throw EditError(QStringLiteral("图像处理已取消"));
+    };
+    check_cancel();
     validate_tone(s);
     if (s == ToneSettings{})
         return source;
     if (source.format() != QImage::Format_RGBA32FPx4_Premultiplied ||
         source.colorSpace() != working_space())
         throw EditError(QStringLiteral("调色需要线性 Rec.2020 FP32 输入"));
+    auto without_exposure = s;
+    without_exposure.exposure = 0;
+    if (without_exposure == ToneSettings{}) {
+        auto result = source.copy();
+        const float gain = float(std::exp2(s.exposure));
+        for (int y = 0; y < result.height(); ++y) {
+            check_cancel();
+            auto* row = reinterpret_cast<float*>(result.scanLine(y));
+            for (int x = 0; x < result.width(); ++x)
+                for (int c = 0; c < 3; ++c) {
+                    row[x * 4 + c] *= gain;
+                    if (!std::isfinite(row[x * 4 + c]))
+                        throw EditError(QStringLiteral("曝光结果超出浮点范围"));
+                }
+        }
+        return result;
+    }
     // Use float linear sRGB for hue semantics; extend transfer functions outside the SDR interval.
     const QColorSpace linear_srgb(QColorSpace::Primaries::SRgb,
                                   QColorSpace::TransferFunction::Linear);
@@ -214,6 +242,7 @@ QImage apply_tone(const QImage& source, const ToneSettings& s) {
                                      (rgb[c] - luma) * s.grading_saturation[band] / 100;
     }
     for (int y = 0; y < image.height(); ++y) {
+        check_cancel();
         auto* row = reinterpret_cast<float*>(image.scanLine(y));
         for (int x = 0; x < image.width(); ++x) {
             auto* p = row + 4 * x;
@@ -299,6 +328,103 @@ QImage apply_tone(const QImage& source, const ToneSettings& s) {
                     std::abs(value) > double(std::numeric_limits<float>::max()))
                     throw EditError(QStringLiteral("调色结果超出浮点范围"));
                 p[c] = float(value);
+            }
+        }
+    }
+    // Spatial effects share the same float pipeline in preview and final output.
+    // Radius is relative to image dimensions so proxy previews preserve visual scale.
+    if (s.texture != 0 || s.clarity != 0 || s.dehaze != 0 || s.sharpening != 0 || s.vignette != 0 ||
+        s.grain != 0) {
+        const int w = image.width(), h = image.height();
+        std::vector<float> luma(std::size_t(w) * h);
+        for (int y = 0; y < h; ++y) {
+            check_cancel();
+            const auto* row = reinterpret_cast<const float*>(image.constScanLine(y));
+            for (int x = 0; x < w; ++x) {
+                const auto* p = row + x * 4;
+                luma[std::size_t(y) * w + x] =
+                    p[3] > 0 ? (p[0] * .2126F + p[1] * .7152F + p[2] * .0722F) / p[3] : 0;
+            }
+        }
+        const auto blur = [&](int radius) {
+            std::vector<float> horizontal(luma.size()), result(luma.size());
+            for (int y = 0; y < h; ++y) {
+                check_cancel();
+                double sum{};
+                for (int x = 0; x < w; ++x) {
+                    if (x == 0)
+                        for (int k = 0; k <= std::min(radius, w - 1); ++k)
+                            sum += luma[std::size_t(y) * w + k];
+                    else {
+                        if (x + radius < w)
+                            sum += luma[std::size_t(y) * w + x + radius];
+                        if (x - radius - 1 >= 0)
+                            sum -= luma[std::size_t(y) * w + x - radius - 1];
+                    }
+                    horizontal[std::size_t(y) * w + x] =
+                        float(sum / (std::min(w - 1, x + radius) - std::max(0, x - radius) + 1));
+                }
+            }
+            for (int x = 0; x < w; ++x) {
+                check_cancel();
+                double sum{};
+                for (int y = 0; y < h; ++y) {
+                    if (y == 0)
+                        for (int k = 0; k <= std::min(radius, h - 1); ++k)
+                            sum += horizontal[std::size_t(k) * w + x];
+                    else {
+                        if (y + radius < h)
+                            sum += horizontal[std::size_t(y + radius) * w + x];
+                        if (y - radius - 1 >= 0)
+                            sum -= horizontal[std::size_t(y - radius - 1) * w + x];
+                    }
+                    result[std::size_t(y) * w + x] =
+                        float(sum / (std::min(h - 1, y + radius) - std::max(0, y - radius) + 1));
+                }
+            }
+            return result;
+        };
+        const auto fine = blur(std::max(1, std::min(w, h) / 500));
+        const auto broad = blur(std::max(2, std::min(w, h) / 50));
+        // Atmospheric veil estimate from a bounded thumbnail; not Adobe's proprietary algorithm.
+        const auto sample = image.scaled(192, 192, Qt::KeepAspectRatio);
+        double air = .1;
+        for (int y = 0; y < sample.height(); ++y) {
+            const auto* p = reinterpret_cast<const float*>(sample.constScanLine(y));
+            for (int x = 0; x < sample.width(); ++x)
+                if (p[x * 4 + 3] > 0)
+                    air = std::max(air, double(std::min({p[x * 4], p[x * 4 + 1], p[x * 4 + 2]}) /
+                                               p[x * 4 + 3]));
+        }
+        for (int y = 0; y < h; ++y) {
+            check_cancel();
+            auto* row = reinterpret_cast<float*>(image.scanLine(y));
+            for (int x = 0; x < w; ++x) {
+                auto* p = row + x * 4;
+                if (p[3] <= 0)
+                    continue;
+                const auto i = std::size_t(y) * w + x;
+                const double detail = (luma[i] - fine[i]) * (s.texture + s.sharpening) / 100 +
+                                      (luma[i] - broad[i]) * s.clarity / 100;
+                const double nx = (x + .5) * 2 / w - 1, ny = (y + .5) * 2 / h - 1;
+                const double vignette =
+                    std::exp2(s.vignette / 50 * std::clamp((nx * nx + ny * ny) / 2, 0., 1.));
+                // Deterministic grain, no mutable random generator shared between renders.
+                unsigned hash = unsigned(x) * 374761393U + unsigned(y) * 668265263U;
+                hash = (hash ^ (hash >> 13)) * 1274126177U;
+                const double noise = (double(hash & 65535U) / 65535 - .5) * s.grain / 5000;
+                const double veil = std::clamp(double(broad[i]) / air, 0., 1.);
+                const double transmission = std::max(.2, 1 - s.dehaze / 125 * veil);
+                for (int c = 0; c < 3; ++c) {
+                    double value = double(p[c]) / p[3] + detail;
+                    if (s.dehaze > 0)
+                        value = (value - air) / transmission + air;
+                    else if (s.dehaze < 0)
+                        value = value * (1 + s.dehaze / 150) - air * s.dehaze / 150;
+                    p[c] = float((value * vignette + noise) * p[3]);
+                    if (!std::isfinite(p[c]))
+                        throw EditError(QStringLiteral("效果结果超出浮点范围"));
+                }
             }
         }
     }

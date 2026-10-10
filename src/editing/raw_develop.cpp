@@ -144,7 +144,8 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
         QCryptographicHash hash(QCryptographicHash::Sha256);
         hash.addData(&model);
         model_hash = hash.result().toHex();
-        if (model_hash != "da27509dab6a2915da67e988acd86cf71f9d5bbc8d1aa0ed32933578a887b901")
+        if (!options.custom_model &&
+            model_hash != "da27509dab6a2915da67e988acd86cf71f9d5bbc8d1aa0ed32933578a887b901")
             throw EditError(QStringLiteral("RAW 模型哈希与 M0 固定版本不一致"));
         Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "HuelithRaw");
         Ort::SessionOptions session_options;
@@ -159,6 +160,21 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
         }
         const auto model_path = options.model_path.toStdWString();
         Ort::Session session(env, model_path.c_str(), session_options);
+        if (session.GetInputCount() != 1 || session.GetOutputCount() != 1)
+            throw EditError(QStringLiteral("自定义模型必须是单输入/单输出的 RawNIND Bayer 模型"));
+        Ort::AllocatorWithDefaultOptions contract_allocator;
+        const auto input_name = session.GetInputNameAllocated(0, contract_allocator);
+        const auto input_type = session.GetInputTypeInfo(0);
+        const auto input_info = input_type.GetTensorTypeAndShapeInfo();
+        const auto input_shape = input_info.GetShape();
+        if (QString::fromUtf8(input_name.get()) != "input" || input_shape.size() != 4 ||
+            input_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            (input_shape[0] > 0 && input_shape[0] != 1) ||
+            (input_shape[1] > 0 && input_shape[1] != 4) ||
+            (input_shape[2] > 0 && input_shape[2] != 512) ||
+            (input_shape[3] > 0 && input_shape[3] != 512))
+            throw EditError(QStringLiteral(
+                "模型不兼容：需要 FP32 input[1,4,512,512]，输出线性相机 RGB[1,3,1024,1024]"));
         Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
         constexpr int tile = 512, halo = 128, core = 256;
         constexpr std::size_t tile_plane = std::size_t(tile) * tile;
@@ -184,7 +200,8 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
                                                               shape.data(), shape.size());
                 auto output = session.Run(Ort::RunOptions{}, inputs, &tensor, 1, outputs, 1);
                 const auto info = output[0].GetTensorTypeAndShapeInfo();
-                if (info.GetShape() != std::vector<int64_t>{1, 3, tile * 2, tile * 2})
+                if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+                    info.GetShape() != std::vector<int64_t>{1, 3, tile * 2, tile * 2})
                     throw EditError(QStringLiteral("AI RAW 输出尺寸不符合约定"));
                 const auto* values = output[0].GetTensorData<float>();
                 for (int y = 0; y < std::min(core, ph - ty) * 2; ++y) {
@@ -262,6 +279,10 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
         progress(1, 1);
     return {image,
             {{"camera", QString::fromUtf8(data.idata.model)},
+             {"iso", double(data.other.iso_speed)},
+             {"aperture", double(data.other.aperture)},
+             {"shutter", double(data.other.shutter)},
+             {"focalLength", double(data.other.focal_len)},
              {"width", width},
              {"height", height},
              {"black", black_levels},

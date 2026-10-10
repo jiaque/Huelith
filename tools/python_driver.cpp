@@ -16,6 +16,7 @@
 #include <QClipboard>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDockWidget>
@@ -46,14 +47,17 @@
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStyleOptionSlider>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTabletEvent>
+#include <QThread>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QWheelEvent>
+#include <cmath>
 #include <memory>
 #include <optional>
 
@@ -162,6 +166,44 @@ QJsonObject run(const QJsonObject& o) {
                                      {"status", int(item.status)},
                                      {"error", item.error}});
         return {{"id", qint64(id)}, {"items", items}};
+    }
+    if (op == "tone_spatial_probe") {
+        QImage source(128, 96, QImage::Format_RGBA32FPx4_Premultiplied);
+        source.setColorSpace(working_space());
+        for (int y = 0; y < source.height(); ++y) {
+            auto* row = reinterpret_cast<float*>(source.scanLine(y));
+            for (int x = 0; x < source.width(); ++x) {
+                const float alpha = x < 4 ? 0.F : .5F;
+                const float value = .2F + (x % 16 < 8 ? .04F : -.04F) + y / 200.F;
+                row[x * 4] = value * alpha;
+                row[x * 4 + 1] = value * .8F * alpha;
+                row[x * 4 + 2] = value * .6F * alpha;
+                row[x * 4 + 3] = alpha;
+            }
+        }
+        const auto settings = tone_from_json(o.value("settings").toObject());
+        std::atomic_bool cancelled{o.value("cancelled").toBool()};
+        const auto result = apply_tone(source, settings, &cancelled);
+        double maximum{};
+        for (int y = 0; y < result.height(); ++y) {
+            const auto* a = reinterpret_cast<const float*>(source.constScanLine(y));
+            const auto* b = reinterpret_cast<const float*>(result.constScanLine(y));
+            for (int x = 0; x < result.width(); ++x) {
+                if (a[x * 4 + 3] != b[x * 4 + 3])
+                    throw EditError("Effect changed alpha");
+                for (int c = 0; c < 3; ++c) {
+                    if (!std::isfinite(b[x * 4 + c]))
+                        throw EditError("Non-finite effect output");
+                    maximum = std::max(maximum, double(std::abs(a[x * 4 + c] - b[x * 4 + c])));
+                }
+            }
+        }
+        const auto bytes =
+            QByteArrayView(reinterpret_cast<const char*>(result.constBits()), result.sizeInBytes());
+        return {
+            {"maximumChange", maximum},
+            {"sha256", QString::fromLatin1(
+                           QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())}};
     }
     if (op == "tone_probe") {
         const auto settings = tone_from_json(o.value("settings").toObject());
@@ -280,6 +322,55 @@ QJsonObject run(const QJsonObject& o) {
         d.raw_window->open();
         return {{"ok", true}};
     }
+    if (op == "raw_slider_drag") {
+        auto* dialog = d.raw_window.get();
+        if (!dialog)
+            throw EditError("RAW window missing");
+        auto* slider =
+            dialog->findChild<QSlider*>(o.value("slider").toString("toneExposureSlider"));
+        if (!slider || !slider->isVisible())
+            throw EditError("RAW slider not visible");
+        QStyleOptionSlider option;
+        option.initFrom(slider);
+        option.orientation = Qt::Horizontal;
+        option.minimum = slider->minimum();
+        option.maximum = slider->maximum();
+        option.sliderPosition = slider->value();
+        option.sliderValue = slider->value();
+        const auto handle = slider->style()->subControlRect(QStyle::CC_Slider, &option,
+                                                            QStyle::SC_SliderHandle, slider);
+        const auto send = [&](QEvent::Type type, QPointF point) {
+            QMouseEvent event(type, point, slider->mapToGlobal(point.toPoint()),
+                              type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                              type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+                              Qt::NoModifier);
+            QApplication::sendEvent(slider, &event);
+        };
+        send(QEvent::MouseButtonPress, handle.center());
+        QJsonArray milliseconds, presented;
+        QTimer heartbeat;
+        int ticks{};
+        QObject::connect(&heartbeat, &QTimer::timeout, dialog, [&ticks] { ++ticks; });
+        heartbeat.start(16);
+        QPointF point;
+        for (int i = 0; i < 50; ++i) {
+            point = QPointF(slider->width() * (.35 + .3 * i / 49), handle.center().y());
+            QElapsedTimer timer;
+            timer.start();
+            send(QEvent::MouseMove, point);
+            milliseconds.append(timer.nsecsElapsed() / 1e6);
+            QEventLoop loop;
+            QTimer::singleShot(25, &loop, &QEventLoop::quit);
+            loop.exec();
+            presented.append(dialog->property("previewPresented").toDouble());
+        }
+        send(QEvent::MouseButtonRelease, point);
+        return {{"eventMs", milliseconds},
+                {"heartbeatTicks", ticks},
+                {"presented", presented},
+                {"sliderValue", slider->value()},
+                {"exposure", dialog->findChild<QDoubleSpinBox*>("rawExposure")->value()}};
+    }
     if (op == "raw_window_state") {
         auto* dialog = d.raw_window.get();
         if (!dialog)
@@ -305,6 +396,15 @@ QJsonObject run(const QJsonObject& o) {
                 throw EditError("RAW control missing");
             button->click();
         }
+        if (o.contains("section"))
+            dialog->findChild<QToolButton*>(QString("rawSection%1").arg(o.value("section").toInt()))
+                ->setChecked(true);
+        if (o.contains("dehaze"))
+            dialog->findChild<QDoubleSpinBox*>("toneDehaze")
+                ->setValue(o.value("dehaze").toDouble());
+        if (o.contains("modelChoice"))
+            dialog->findChild<QComboBox*>("rawModelChoice")
+                ->setCurrentIndex(o.value("modelChoice").toInt());
         if (o.contains("exposure"))
             dialog->findChild<QDoubleSpinBox*>("rawExposure")
                 ->setValue(o.value("exposure").toDouble());
@@ -329,8 +429,19 @@ QJsonObject run(const QJsonObject& o) {
         }
         if (o.contains("capture"))
             dialog->grab().save(o.value("capture").toString());
-        if (o.value("accept").toBool())
+        if (o.value("accept").toBool()) {
             dialog->accept();
+            if (!o.value("asyncAccept").toBool()) {
+                QElapsedTimer wait;
+                wait.start();
+                while (dialog->isVisible() &&
+                       !dialog->findChild<QPushButton*>("rawCompute")->isEnabled() &&
+                       wait.elapsed() < 120000) {
+                    QApplication::processEvents();
+                    QThread::msleep(10);
+                }
+            }
+        }
         if (o.value("reject").toBool())
             dialog->reject();
         if (o.contains("save")) {
@@ -351,7 +462,12 @@ QJsonObject run(const QJsonObject& o) {
         QJsonArray recipes;
         for (const auto& source : dialog->results())
             recipes.append(source.raw_recipe);
-        return {{"ready", dialog->findChild<QPushButton*>("rawApply")->isEnabled()},
+        return {{"previewFullResolution", dialog->property("previewFullResolution").toBool()},
+                {"previewRequested", dialog->property("previewRequested").toDouble()},
+                {"previewPresented", dialog->property("previewPresented").toDouble()},
+                {"modelChoice", dialog->findChild<QComboBox*>("rawModelChoice")->currentIndex()},
+                {"modelPath", dialog->findChild<QLineEdit*>("rawModel")->text()},
+                {"ready", dialog->findChild<QPushButton*>("rawApply")->isEnabled()},
                 {"target", dialog->findChild<QComboBox*>("rawAdjustmentTarget")->currentIndex()},
                 {"idle", dialog->findChild<QPushButton*>("rawCompute")->isEnabled()},
                 {"scale", dialog->findChild<QGraphicsView*>("rawPreview")->transform().m11()},

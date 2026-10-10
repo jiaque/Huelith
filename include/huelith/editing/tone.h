@@ -3,6 +3,7 @@
 #include <QJsonObject>
 #include <QPointF>
 #include <array>
+#include <atomic>
 #include <vector>
 namespace huelith::editing {
 struct ToneSettings {
@@ -16,6 +17,12 @@ struct ToneSettings {
     double tint{};
     double saturation{};
     double vibrance{};
+    double texture{};
+    double clarity{};
+    double dehaze{};
+    double vignette{};
+    double grain{};
+    double sharpening{};
     double black_point{};
     double white_point{1};
     double gamma{1};
@@ -36,5 +43,6 @@ struct ToneSettings {
 void validate_tone(const ToneSettings& settings);
 [[nodiscard]] QJsonObject tone_json(const ToneSettings& settings);
 [[nodiscard]] ToneSettings tone_from_json(const QJsonObject& json);
-[[nodiscard]] QImage apply_tone(const QImage& image, const ToneSettings& settings);
+[[nodiscard]] QImage apply_tone(const QImage& image, const ToneSettings& settings,
+                                const std::atomic_bool* cancelled = nullptr);
 } // namespace huelith::editing

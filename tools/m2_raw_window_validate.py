@@ -45,7 +45,7 @@ def main():
         assert cancelled['result'] == 0
         print('Cancelled active RAW session', flush=True)
         call('raw_window', **source)
-        ready = until(lambda state: state['ready'])
+        ready = until(lambda state: state['ready'] and state['previewPresented'] > 0)
         assert ready['histogramSamples'] > 0
         call('raw_window_state', exposure=.5)
         call('raw_window_state', capture=str(output/'raw-window.png'))
@@ -78,9 +78,23 @@ def main():
         call('raw_window_state', index=0, click='rawCompute')
         state = call('raw_window_state')
         assert state['idle'] and state['ready'] and '缓存' in state['status'], state
+        custom = call('raw_window_state', modelChoice=1)
+        assert custom['recipe']['customModel'] is True
+        call('raw_window_state', click='rawUndo')
+        assert call('raw_window_state')['modelChoice'] == 0
+        call('raw_window_state', click='rawRedo')
+        assert call('raw_window_state')['modelChoice'] == 1
         call('raw_window_state', denoise=True, model=str(Path(folder)/'missing.onnx'))
         state = call('raw_window_state', click='rawCompute')
         assert not state['ready'] and '缺失' in state['status'], state
+        invalid_model = Path(folder)/'invalid.onnx'
+        invalid_model.write_bytes(b'not-an-onnx-model')
+        call('raw_window_state', model=str(invalid_model))
+        call('raw_window_state', click='rawCompute')
+        state = until(lambda state: state['idle'])
+        assert not state['ready'], state
+        call('raw_window_state', modelChoice=0)
+        assert Path(call('raw_window_state')['modelPath']).is_file()
         call('raw_window_state', denoise=False)
         state = call('raw_window_state', click='rawCompute')
         assert state['ready'] and '缓存' in state['status'], state

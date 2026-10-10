@@ -13,10 +13,12 @@ class TonePanel final : public QWidget {
     }
     void set_category(int index);
     void set_settings(editing::ToneSettings settings);
+    void use_accordion();
     std::function<void()> changed;
 
   private:
     editing::ToneSettings settings_;
+    std::function<void()> refresh_extra_;
     QListWidget* categories_{};
     QStackedWidget* pages_{};
 };

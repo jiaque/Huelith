@@ -103,20 +103,24 @@ QRect raw_crop_rect(QSize size, const QJsonObject& recipe) {
         throw EditError(QStringLiteral("RAW 裁剪范围为空"));
     return rect;
 }
-QImage apply_raw_adjustments(const QImage& source, const QJsonObject& recipe, bool crop) {
+QImage apply_raw_adjustments(const QImage& source, const QJsonObject& recipe, bool crop,
+                             const std::atomic_bool* cancelled) {
     auto settings = tone_from_json(recipe.value("tone").toObject());
     if (!recipe.contains("tone"))
         settings.exposure = recipe.value("exposure").toDouble();
-    auto result = apply_tone(source, settings);
+    auto result = apply_tone(source, settings, cancelled);
     const auto locals = recipe.value("locals").toArray();
     if (locals.size() > 64)
         throw EditError(QStringLiteral("局部调整数量超过 64 个"));
     for (const auto& value : locals) {
+        if (cancelled && cancelled->load())
+            throw EditError(QStringLiteral("图像处理已取消"));
         const auto local = value.toObject();
         if (!local.value("enabled").toBool(true))
             continue;
         const auto mask = raw_local_mask(result.size(), local);
-        const auto adjusted = apply_tone(result, tone_from_json(local.value("tone").toObject()));
+        const auto adjusted =
+            apply_tone(result, tone_from_json(local.value("tone").toObject()), cancelled);
         for (int y = 0; y < result.height(); ++y) {
             auto* target = reinterpret_cast<float*>(result.scanLine(y));
             const auto* input = reinterpret_cast<const float*>(adjusted.constScanLine(y));
