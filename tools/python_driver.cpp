@@ -2,6 +2,7 @@
 // this DLL calls the same C++ targets linked into Huelith, without a test EXE.
 #include "canvas_view.h"
 #include "huelith/editing/project.h"
+#include "huelith/editing/raw_cache.h"
 #include "huelith/editing/raw_develop.h"
 #include "huelith/editing/tiff_io.h"
 #include "main_window.h"
@@ -23,6 +24,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileDialog>
+#include <QGraphicsView>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -64,6 +66,7 @@ struct Driver {
     std::optional<Snapshot> snapshot;
     std::unique_ptr<huelith::desktop::MainWindow> window;
     std::unique_ptr<huelith::desktop::RawDialog> raw_window;
+    std::unique_ptr<RawCache> raw_cache;
 };
 Driver& driver() {
     static Driver value;
@@ -135,19 +138,66 @@ QJsonObject run(const QJsonObject& o) {
         return {
             {"maximumError", maximum}, {"width", reopened.width()}, {"height", reopened.height()}};
     }
+    if (op == "raw_cache") {
+        if (o.contains("memoryBudget"))
+            d.raw_cache = std::make_unique<RawCache>(o.value("memoryBudget").toInteger(),
+                                                     o.value("diskBudget").toInteger());
+        if (!d.raw_cache)
+            throw EditError("Cache not initialized");
+        const auto key = o.value("key").toString();
+        if (o.contains("pixels")) {
+            QImage image(2, 2, QImage::Format_RGBA32FPx4_Premultiplied);
+            image.setColorSpace(working_space());
+            const auto values = o.value("pixels").toArray();
+            if (values.size() != 16)
+                throw EditError("Expected 16 float components");
+            for (int i = 0; i < 16; ++i)
+                reinterpret_cast<float*>(image.bits())[i] = float(values[i].toDouble());
+            d.raw_cache->put(key, {image, {{"identity", key}}});
+        }
+        QJsonArray pixels;
+        bool color_space{};
+        if (o.value("get").toBool()) {
+            if (const auto result = d.raw_cache->get(key)) {
+                for (int i = 0; i < 16; ++i)
+                    pixels.append(reinterpret_cast<const float*>(result->image.constBits())[i]);
+                color_space = result->image.colorSpace() == working_space();
+            }
+        }
+        return {{"contains", d.raw_cache->contains(key)},
+                {"pixels", pixels},
+                {"colorSpacePreserved", color_space},
+                {"memory", d.raw_cache->memory_bytes()},
+                {"disk", d.raw_cache->disk_bytes()}};
+    }
+    if (op == "raw_cache_key") {
+        RawOptions options;
+        options.denoise = o.value("denoise").toBool();
+        options.directml = o.value("directml").toBool(true);
+        options.model_path = o.value("model").toString();
+        options.exposure = o.value("exposure").toDouble();
+        return {{"key", raw_cache_key(o.value("source").toString().toUtf8(), options)}};
+    }
     if (op == "raw_window") {
-        Layer layer;
-        layer.kind = LayerKind::source;
-        layer.name = "RAW validation";
-        layer.linked_path = o.value("path").toString();
-        QFile source(layer.linked_path);
-        if (!source.open(QIODevice::ReadOnly))
-            throw EditError(source.errorString());
-        layer.raw_source = source.readAll();
-        layer.raw_recipe = {{"denoise", o.value("denoise").toBool()}, {"directml", true}};
+        std::vector<Layer> sources;
+        auto paths = o.value("paths").toArray();
+        if (paths.isEmpty())
+            paths.append(o.value("path"));
+        for (const auto& path : paths) {
+            Layer layer;
+            layer.kind = LayerKind::source;
+            layer.name = "RAW validation";
+            layer.linked_path = path.toString();
+            QFile source(layer.linked_path);
+            if (!source.open(QIODevice::ReadOnly))
+                throw EditError(source.errorString());
+            layer.raw_source = source.readAll();
+            layer.raw_recipe = {{"denoise", o.value("denoise").toBool()}, {"directml", true}};
+            sources.push_back(std::move(layer));
+        }
         QSettings().setValue("raw/model", o.value("model").toString());
-        d.raw_window = std::make_unique<huelith::desktop::RawDialog>(std::vector<Layer>{layer},
-                                                                     d.window.get());
+        d.raw_window =
+            std::make_unique<huelith::desktop::RawDialog>(std::move(sources), d.window.get());
         d.raw_window->open();
         return {{"ok", true}};
     }
@@ -155,6 +205,22 @@ QJsonObject run(const QJsonObject& o) {
         auto* dialog = d.raw_window.get();
         if (!dialog)
             throw EditError("RAW window missing");
+        if (o.contains("index"))
+            dialog->findChild<QListWidget*>("rawFiles")->setCurrentRow(o.value("index").toInt());
+        if (o.contains("included"))
+            dialog->findChild<QListWidget*>("rawFiles")
+                ->currentItem()
+                ->setCheckState(o.value("included").toBool() ? Qt::Checked : Qt::Unchecked);
+        if (o.contains("model"))
+            dialog->findChild<QLineEdit*>("rawModel")->setText(o.value("model").toString());
+        if (o.contains("denoise"))
+            dialog->findChild<QCheckBox*>("rawDenoise")->setChecked(o.value("denoise").toBool());
+        if (o.contains("click")) {
+            auto* button = dialog->findChild<QPushButton*>(o.value("click").toString());
+            if (!button)
+                throw EditError("RAW control missing");
+            button->click();
+        }
         if (o.contains("exposure"))
             dialog->findChild<QDoubleSpinBox*>("rawExposure")
                 ->setValue(o.value("exposure").toDouble());
@@ -173,12 +239,22 @@ QJsonObject run(const QJsonObject& o) {
             state.layers = dialog->results();
             save_project({state, 1}, o.value("save").toString());
             const auto reopened = load_project(o.value("save").toString());
-            if (reopened.layers.front().raw_source != state.layers.front().raw_source ||
-                reopened.layers.front().raw_recipe != state.layers.front().raw_recipe ||
-                reopened.layers.front().pixels != state.layers.front().pixels)
-                throw EditError("RAW persistence mismatch");
+            for (std::size_t i = 0; i < state.layers.size(); ++i)
+                if (reopened.layers[i].raw_source != state.layers[i].raw_source ||
+                    reopened.layers[i].raw_recipe != state.layers[i].raw_recipe ||
+                    reopened.layers[i].pixels != state.layers[i].pixels)
+                    throw EditError("RAW persistence mismatch");
         }
+        QJsonArray recipes;
+        for (const auto& source : dialog->results())
+            recipes.append(source.raw_recipe);
         return {{"ready", dialog->findChild<QPushButton*>("rawApply")->isEnabled()},
+                {"idle", dialog->findChild<QPushButton*>("rawCompute")->isEnabled()},
+                {"scale", dialog->findChild<QGraphicsView*>("rawPreview")->transform().m11()},
+                {"histogramSamples",
+                 dialog->findChild<QLabel*>("rawHistogram")->property("sampleCount").toInt()},
+                {"recipes", recipes},
+                {"count", int(dialog->results().size())},
                 {"visible", dialog->isVisible()},
                 {"result", dialog->result()},
                 {"status", dialog->findChild<QLabel*>("rawStatus")->text()},
@@ -225,6 +301,9 @@ QJsonObject run(const QJsonObject& o) {
             QSettings::setDefaultFormat(QSettings::IniFormat);
             QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
                                o.value("settings").toString());
+            if (!o.value("settings").toString().isEmpty())
+                QSettings().setValue("storage/recoveryDirectory",
+                                     o.value("settings").toString() + "/recovery");
             huelith::desktop::apply_dark_theme();
         }
         return {{"ok", true}, {"protocol", 2}};
@@ -448,6 +527,36 @@ QJsonObject run(const QJsonObject& o) {
         }
         return result;
     }
+    if (op == "window_open_batch") {
+        QStringList paths;
+        for (const auto& path : o.value("paths").toArray())
+            paths.append(path.toString());
+        QTimer timer;
+        timer.setInterval(40);
+        QElapsedTimer elapsed;
+        elapsed.start();
+        bool started{};
+        bool timed_out{};
+        QObject::connect(&timer, &QTimer::timeout, [&] {
+            auto* dialog =
+                dynamic_cast<huelith::desktop::RawDialog*>(QApplication::activeModalWidget());
+            if (!dialog)
+                return;
+            if (o.value("cancel").toBool() || elapsed.elapsed() > 120000) {
+                timed_out = elapsed.elapsed() > 120000;
+                dialog->reject();
+            } else if (dialog->findChild<QPushButton*>("rawApply")->isEnabled()) {
+                dialog->accept();
+            } else if (!started && dialog->findChild<QPushButton*>("rawCompute")->isEnabled()) {
+                started = true;
+                dialog->findChild<QPushButton*>("rawComputeAll")->click();
+            }
+        });
+        timer.start();
+        d.window->open_documents(paths);
+        timer.stop();
+        return {{"documents", d.window->document_count()}, {"timedOut", timed_out}};
+    }
     if (op == "window_open") {
         d.window->open_document(o.value("path").toString(), o.value("place").toBool());
         QApplication::processEvents();
@@ -528,6 +637,8 @@ QJsonObject run(const QJsonObject& o) {
                         for (auto it = settings.begin(); it != settings.end(); ++it) {
                             if (auto* spin = modal->findChild<QSpinBox*>(it.key()))
                                 spin->setValue(it.value().toInt());
+                            else if (auto* decimal = modal->findChild<QDoubleSpinBox*>(it.key()))
+                                decimal->setValue(it.value().toDouble());
                             else if (auto* combo = modal->findChild<QComboBox*>(it.key()))
                                 combo->setCurrentIndex(it.value().toInt());
                             else if (auto* check = modal->findChild<QCheckBox*>(it.key()))

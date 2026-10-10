@@ -369,8 +369,14 @@ void EditorController::bind(CanvasView* c) {
             refresh();
         });
     };
-    c->recovery_file = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) +
-                       "/recovery/" + QUuid::createUuid().toString(QUuid::Id128) + ".huelith";
+    c->recovery_file =
+        recovery_directory() + "/" + QUuid::createUuid().toString(QUuid::Id128) + ".huelith";
+}
+QString EditorController::recovery_directory() const {
+    return QSettings()
+        .value("storage/recoveryDirectory",
+               QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/recovery")
+        .toString();
 }
 void EditorController::refresh(bool rebuild_tree) {
     if (refreshing_)
@@ -632,6 +638,56 @@ bool EditorController::open(const QString& path, bool place) {
     update_recent(path);
     refresh();
     return true;
+}
+void EditorController::open_files(const QStringList& paths) {
+    std::vector<Layer> raw_sources;
+    QStringList ordinary;
+    qint64 source_bytes{};
+    for (const auto& path : paths) {
+        const auto suffix = QFileInfo(path).suffix().toLower();
+        if (!QStringList{"cr3", "cr2", "nef", "arw", "dng", "raf", "rw2", "orf"}.contains(suffix)) {
+            ordinary.append(path);
+            continue;
+        }
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly) || file.size() > 512LL * 1024 * 1024 ||
+            source_bytes + file.size() > 1024LL * 1024 * 1024)
+            throw EditError(tr("无法读取 RAW，或本组源文件超过 1 GiB，请减少文件数"));
+        source_bytes += file.size();
+        Layer layer;
+        layer.kind = LayerKind::source;
+        layer.name = QFileInfo(path).completeBaseName();
+        layer.linked_path = QFileInfo(path).absoluteFilePath();
+        layer.raw_source = file.readAll();
+        if (layer.raw_source.size() != file.size())
+            throw EditError(tr("RAW 源文件读取不完整"));
+        layer.linked_hash = QCryptographicHash::hash(layer.raw_source, QCryptographicHash::Sha256);
+        raw_sources.push_back(std::move(layer));
+    }
+    if (!raw_sources.empty()) {
+        RawDialog dialog(std::move(raw_sources), window_);
+        if (dialog.exec() == QDialog::Accepted) {
+            for (const auto& layer : dialog.results()) {
+                CanvasSpec spec;
+                spec.name = layer.name.toStdString();
+                spec.width = layer.pixels.width();
+                spec.height = layer.pixels.height();
+                if (!window_->create_document(spec))
+                    throw EditError(tr("无法创建 RAW 图片文档"));
+                canvas()->edit(tr("打开 RAW 图片"), [&](State& state) {
+                    state.layers = {layer};
+                    state.snapshots.insert(tr("导入状态"), render(state));
+                });
+                canvas()->active_layer = layer.id;
+                canvas()->prepare_inserted_layer();
+                update_recent(layer.linked_path);
+            }
+            layers_->clearSelection();
+            refresh();
+        }
+    }
+    for (const auto& path : ordinary)
+        open(path);
 }
 bool EditorController::save(CanvasView* c, bool save_as, bool asynchronous) {
     if (save_job_) {
@@ -921,8 +977,7 @@ void EditorController::configure_menus() {
             window_, tr("打开图片或工程"), {},
             tr("图片 / RAW / 工程 (*.png *.jpg *.jpeg *.tif *.tiff *.cr3 *.cr2 *.nef *.arw *.dng "
                "*.raf *.rw2 *.orf *.huelith)"));
-        for (const auto& p : paths)
-            open(p);
+        open_files(paths);
     });
     add(file, tr("置入…"), {}, [this] {
         open(QFileDialog::getOpenFileName(window_, tr("置入当前图片"), {},
@@ -938,9 +993,7 @@ void EditorController::configure_menus() {
         add(recent_, item, {}, [this, item] { open(item); });
     add(file, tr("打开自动恢复…"), {}, [this] {
         const auto path = QFileDialog::getOpenFileName(
-            window_, tr("选择恢复副本"),
-            QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/recovery",
-            tr("Huelith 工程 (*.huelith)"));
+            window_, tr("选择恢复副本"), recovery_directory(), tr("Huelith 工程 (*.huelith)"));
         if (open(path)) {
             canvas()->filename.clear();
             canvas()->project().mark_saved(0);

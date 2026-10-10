@@ -46,6 +46,22 @@ def main():
   def eyedropper():
    scene();key('I');click(30,50);assert state()['foreground']=='#ff0000';click(100,100,ALT);assert state()['background']=='#ffffff'
   test('eyedropper_foreground_alt_background',eyedropper)
+  def tone_dialog():
+   scene();before=state()['revision'];original=pixel(30,50)
+   call('window_action',text='色彩平衡…',dialog=dict(toneMonochrome=True,accept=False))
+   assert state()['revision']==before and pixel(30,50)==original
+   call('window_action',text='色彩平衡…',dialog=dict(toneMonochrome=True,accept=True))
+   changed=pixel(30,50);assert max(changed[:3])-min(changed[:3])<=1,changed
+   assert state()['revision']==before+1
+   key('Ctrl+Z');assert pixel(30,50)==original
+  test('tone_dialog_cancel_commit_single_undo',tone_dialog)
+  def grading_dialog():
+   grey=folder/'grade.png';Image.new('RGB',(240,180),(100,100,100)).save(grey)
+   call('window_scene',width=240,height=180,layers=[dict(name='grey',path=str(grey))])
+   call('window_action',text='色彩分级…',dialog=dict(toneGradingHue=0,toneGradingSaturation=100,accept=True))
+   value=pixel(100,100);assert value[0]>value[1] and value[0]>value[2],value
+   key('Ctrl+Z');assert pixel(100,100)[:3]==[100,100,100]
+  test('grading_menu_controls_affect_pixels_undo',grading_dialog)
   def clone():
    scene();call('window_action',text='绘画修复');key('S');control('photoSample',1);click(30,50,ALT);before=state()['revision'];click(90,110);assert pixel(90,110)[:3]==[255,0,0];assert state()['revision']==before+1;key('Ctrl+Z');assert pixel(90,110)[:3]==[255,255,255];key('Ctrl+Shift+Z');assert pixel(90,110)[:3]==[255,0,0]
   test('clone_alt_sample_separate_layer_one_undo',clone)

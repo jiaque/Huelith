@@ -43,7 +43,7 @@ set_target_properties(huelith_ort PROPERTIES
     IMPORTED_IMPLIB "${HUELITH_ORT_DIR}/onnxruntime.lib"
     IMPORTED_LOCATION "${HUELITH_ORT_DIR}/onnxruntime.dll"
     INTERFACE_INCLUDE_DIRECTORIES "${HUELITH_ORT_DIR}")
-add_library(huelith_editing src/editing/project.cpp src/editing/project_io.cpp src/editing/blend.cpp src/editing/photo_operations.cpp src/editing/raw_develop.cpp src/editing/tiff_io.cpp src/editing/tone.cpp)
+add_library(huelith_editing src/editing/project.cpp src/editing/project_io.cpp src/editing/blend.cpp src/editing/photo_operations.cpp src/editing/raw_develop.cpp src/editing/raw_cache.cpp src/editing/tiff_io.cpp src/editing/tone.cpp)
 target_include_directories(huelith_editing PUBLIC include)
 target_link_libraries(huelith_editing PUBLIC huelith_build_options Qt6::Gui PRIVATE libraw::raw_r TIFF::TIFF huelith_ort)
 target_compile_definitions(huelith_editing PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

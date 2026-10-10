@@ -19,6 +19,7 @@ class MainWindow final : public QMainWindow {
     void reset_workspace();
     [[nodiscard]] CanvasView* active_canvas() const;
     bool open_document(const QString& path, bool place = false);
+    void open_documents(const QStringList& paths);
 
   protected:
     void closeEvent(QCloseEvent* event) override;

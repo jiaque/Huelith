@@ -32,12 +32,14 @@ def main():
     with tempfile.TemporaryDirectory(prefix='huelith-color-') as directory:
         call('init', settings=directory)
         def tone(settings, rgba=(.125, .25, .5, .5), **extra):
-            result = call('tone_probe', settings=dict(version=1, **settings), rgba=rgba, **extra)
+            result = call('tone_probe', settings=dict(version=2, **settings), rgba=rgba, **extra)
             if 'error' in result:
                 raise RuntimeError(result['error'])
             return result['rgba']
         def identity():
             assert tone({}) == [.125, .25, .5, .5]
+            legacy = call('tone_probe', settings=dict(version=1), rgba=[.125,.25,.5,.5])
+            assert legacy['rgba'] == tone({})
         test('identity_exact_premultiplied_alpha', identity)
         def exposure():
             result = tone(dict(exposure=1), rgba=(.5, 1, 2, .5))
@@ -59,6 +61,28 @@ def main():
         def persistence():
             tone(dict(exposure=.3,curve=[[0,.02],[.5,.7],[1,.98]],hue=[10,0,0,0,0,0,0,0]), save=str(Path(directory)/'tone.huelith'))
         test('tone_recipe_and_render_roundtrip', persistence)
+        def channel_curves():
+            identity = [[0,0],[1,1]]
+            channels = [[[0,0],[.5,.7],[1,1]], identity, identity]
+            value = tone(dict(channelCurves=channels), rgba=(.18,.18,.18,1),
+                         save=str(Path(directory)/'channel-curves.huelith'))
+            assert value[0] > value[1] and value[0] > .18, value
+            invalid = call('tone_probe', settings=dict(version=2, channelCurves=[identity]*2), rgba=[0,0,0,1])
+            assert 'error' in invalid
+        test('rgb_channel_curves_independent_persist_and_validate', channel_curves)
+        def grading():
+            value = tone(dict(gradingLuminance=[100,100,100]), rgba=(.5,1,2,.5))
+            assert max(abs(a-b) for a,b in zip(value,(1,2,4,.5))) < .001, value
+            colored = tone(dict(gradingHue=[0,0,0], gradingSaturation=[60,60,60]), rgba=(.18,.18,.18,1),
+                           save=str(Path(directory)/'grading.huelith'))
+            assert colored[0] > colored[1] and colored[0] > colored[2], colored
+            invalid = call('tone_probe', settings=dict(version=2, gradingHue=[361,0,0]), rgba=[0,0,0,1])
+            assert 'error' in invalid
+        test('grading_hdr_gain_hue_alpha_persistence_validation', grading)
+        def monochrome():
+            value = tone(dict(monochrome=True), rgba=(.125,.25,.5,.5))
+            assert max(value[:3])-min(value[:3]) < .001 and value[3] == .5, value
+        test('monochrome_neutral_alpha_preserved', monochrome)
         def tiff():
             path = Path(directory)/'16位 AdobeRGB.tif'
             result = call('tiff_roundtrip',path=str(path))

@@ -20,6 +20,14 @@ struct ToneSettings {
     double white_point{1};
     double gamma{1};
     std::vector<QPointF> curve{{0, 0}, {1, 1}};
+    std::array<std::vector<QPointF>, 3> channel_curves{std::vector<QPointF>{{0, 0}, {1, 1}},
+                                                       std::vector<QPointF>{{0, 0}, {1, 1}},
+                                                       std::vector<QPointF>{{0, 0}, {1, 1}}};
+    std::array<double, 3> grading_hue{}; // Shadows, midtones, highlights; degrees.
+    std::array<double, 3> grading_saturation{};
+    std::array<double, 3> grading_luminance{};
+    double grading_balance{};
+    bool monochrome{};
     std::array<double, 8> hue{};
     std::array<double, 8> saturation_bands{};
     std::array<double, 8> luminance_bands{};

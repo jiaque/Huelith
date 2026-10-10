@@ -248,6 +248,9 @@ bool MainWindow::create_document(const CanvasSpec& spec) {
 bool MainWindow::open_document(const QString& path, bool place) {
     return editor_->open(path, place);
 }
+void MainWindow::open_documents(const QStringList& paths) {
+    editor_->open_files(paths);
+}
 
 int MainWindow::document_count() const noexcept {
     return documents_->count();

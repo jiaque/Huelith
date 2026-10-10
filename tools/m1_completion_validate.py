@@ -6,8 +6,8 @@ ROOT=Path(__file__).resolve().parents[1]
 CTRL=0x04000000;SHIFT=0x02000000;ALT=0x08000000
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--build',default='windows-release');p.add_argument('--only');p.add_argument('--platform',default='windows');args=p.parse_args()
- out=ROOT/('docs/test-evidence/M1/completion' if args.platform=='windows' else 'docs/test-evidence/M1/completion-offscreen');out.mkdir(parents=True,exist_ok=True)
+ p=argparse.ArgumentParser();p.add_argument('--build',default='windows-release');p.add_argument('--only');p.add_argument('--platform',default='windows');p.add_argument('--output',type=Path);args=p.parse_args()
+ out=args.output or ROOT/('docs/test-evidence/M1/completion' if args.platform=='windows' else 'docs/test-evidence/M1/completion-offscreen');out.mkdir(parents=True,exist_ok=True)
  qt=Path(r'D:\Program Files\Qt\6.10.3\msvc2022_64');dlls=[os.add_dll_directory(str(qt/'bin')),os.add_dll_directory(str(ROOT/'build'/args.build))]
  os.environ['QT_PLUGIN_PATH']=str(qt/'plugins');os.environ['QT_QPA_PLATFORM']=args.platform
  lib=ctypes.CDLL(str(ROOT/'build'/args.build/'huelith_python_driver.dll'));fn=lib.huelith_python_command;fn.argtypes=[ctypes.c_char_p];fn.restype=ctypes.c_char_p
@@ -165,7 +165,7 @@ def main():
   test('document_close_save_discard_cancel',close_dialogs)
   def preference():
    scene([dict(name='image',color='white')]);action('保存工作区布局');old=call('window_layout');call('window_layout',hide=True);action('恢复已存工作区');assert call('window_layout')==old
-   action('设置菜单快捷键…',dialog={'accept':True,'binding':{'name':'画笔 B','key':'Q'}});key('V');key('Q');assert state()['tool']==7;key('V');key('B');assert state()['tool']==0
+   action('设置菜单快捷键…',dialog={'accept':True,'binding':{'name':'画笔 B','key':'F6'}});key('V');key('F6');assert state()['tool']==7;key('V');key('B');assert state()['tool']==0
    action('设置菜单快捷键…',dialog={'accept':True,'binding':{'name':'画笔 B','key':'B'}})
   test('workspace_restore_tool_shortcut_apply_old_key_removed',preference)
   def source_edit():
@@ -184,9 +184,15 @@ def main():
    scene([dict(name='legacy layer',path=str(shape),x=70,y=60)]);current=folder/'schema3.huelith';call('window_filename',path=str(current));action('保存工程');deadline=time.monotonic()+8
    while not current.exists() and time.monotonic()<deadline:call('pump')
    with zipfile.ZipFile(current) as z:entries={name:z.read(name) for name in z.namelist()}
-   # Schema 2 has exactly the same fields except the schema-3 bool + nine QPointF mesh values.
+   # Strip later layer fields to construct a real schema-2 payload (one-layer fixture).
    grid=b'\0'+b''.join(struct.pack('<dd',x,y) for y in (0,.5,1) for x in (0,.5,1));payload=entries['document.bin'];assert payload.count(grid)==1
-   entries['document.bin']=struct.pack('<I',2)+payload[4:].replace(grid,b'',1);manifest=json.loads(entries['manifest.json']);manifest['schema']=2;entries['manifest.json']=json.dumps(manifest).encode();legacy=folder/'schema2.huelith'
+   version=struct.unpack_from('<I',payload)[0];start=payload.index(grid);end=start+len(grid)
+   for _ in range((2 if version>=4 else 0)+(1 if version>=5 else 0)):
+    size=struct.unpack_from('<I',payload,end)[0];end+=4
+    assert size!=0xfffffffe,'Extended QByteArray length unexpected in small fixture'
+    if size!=0xffffffff:end+=size
+   assert end<=len(payload)
+   entries['document.bin']=struct.pack('<I',2)+payload[4:start]+payload[end:];manifest=json.loads(entries['manifest.json']);manifest['schema']=2;entries['manifest.json']=json.dumps(manifest).encode();legacy=folder/'schema2.huelith'
    with zipfile.ZipFile(legacy,'w',compression=zipfile.ZIP_STORED) as z:
     for name,data in entries.items():z.writestr(name,data)
    call('window_open',path=str(legacy));assert layer('legacy layer')['tx']==70 and not layer('legacy layer')['warped'] and probe(x=120,y=110)['rgba'][3]>0

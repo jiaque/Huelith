@@ -46,15 +46,57 @@ def main():
         print('Cancelled active RAW session', flush=True)
         call('raw_window', **source)
         ready = until(lambda state: state['ready'])
+        assert ready['histogramSamples'] > 0
         call('raw_window_state', exposure=.5)
         call('raw_window_state', capture=str(output/'raw-window.png'))
         accepted = call('raw_window_state', accept=True)
         assert accepted['result'] == 1
         call('raw_window_state', save=str(Path(folder)/'raw.huelith'))
         print('RAW source, recipe and float pixels round-tripped', flush=True)
+        call('raw_window', paths=[source['path'], str(ROOT/'research/m0/samples/r10-5873.CR3')],
+             model=source['model'], denoise=False)
+        until(lambda state: state['idle'])
+        state = call('raw_window_state')
+        assert state['count'] == 2 and not state['ready']
+        call('raw_window_state', click='rawZoom100')
+        state = call('raw_window_state', exposure=.25)
+        assert state['scale'] == 1, state
+        state = call('raw_window_state', click='rawUndo')
+        assert state['recipes'][0].get('tone', {}).get('exposure', 0) == 0
+        state = call('raw_window_state', click='rawRedo')
+        assert state['recipes'][0]['tone']['exposure'] == .25 and state['scale'] == 1
+        state = call('raw_window_state', index=1, included=False)
+        assert state['ready'], state  # An unprocessed, excluded file must not block submit.
+        state = call('raw_window_state', included=True)
+        assert not state['ready'], state
+        call('raw_window_state', index=0)
+        call('raw_window_state', click='rawSynchronize')
+        state = call('raw_window_state')
+        assert all(recipe['tone']['exposure'] == .25 for recipe in state['recipes'])
+        call('raw_window_state', click='rawComputeAll')
+        until(lambda state: state['ready'])
+        call('raw_window_state', index=0, click='rawCompute')
+        state = call('raw_window_state')
+        assert state['idle'] and state['ready'] and '缓存' in state['status'], state
+        call('raw_window_state', denoise=True, model=str(Path(folder)/'missing.onnx'))
+        state = call('raw_window_state', click='rawCompute')
+        assert not state['ready'] and '缺失' in state['status'], state
+        call('raw_window_state', denoise=False)
+        state = call('raw_window_state', click='rawCompute')
+        assert state['ready'] and '缓存' in state['status'], state
+        call('raw_window_state', accept=True)
+        call('raw_window_state', save=str(Path(folder)/'multiple.huelith'))
+        print('Multi-file sync, cache reuse, zoom retention, model invalidation and atomic submit checked', flush=True)
+        paths = [source['path'], str(ROOT/'research/m0/samples/r10-5873.CR3')]
+        cancelled_batch = call('window_open_batch', paths=paths, cancel=True)
+        assert cancelled_batch['documents'] == 0 and not cancelled_batch['timedOut'], cancelled_batch
+        opened_batch = call('window_open_batch', paths=paths)
+        assert opened_batch['documents'] == 2 and not opened_batch['timedOut'], opened_batch
+        print('Main editor batch import: cancel creates no document; accept creates two documents', flush=True)
         call('shutdown')
     (output/'window.json').write_text(json.dumps(dict(cancelled=cancelled, ready=ready,
-        accepted=accepted, source_recipe_pixels_roundtrip=True), ensure_ascii=False, indent=2), encoding='utf-8')
+        accepted=accepted, source_recipe_pixels_roundtrip=True,
+        multi_file_sync_cache_zoom_invalidation_roundtrip=True), ensure_ascii=False, indent=2), encoding='utf-8')
 
 
 if __name__ == '__main__':

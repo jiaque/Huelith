@@ -208,8 +208,8 @@ void EditorController::configure_photo_tools() {
     auto* image_menu = new QMenu(tr("图像(&I)"), window_);
     window_->menus_->insertMenu(window_->menus_->actions().at(2), image_menu);
     auto* adjustments = image_menu->addMenu(tr("调整"));
-    const QStringList tone_names{tr("曝光与光线…"), tr("色彩平衡…"), tr("色阶…"), tr("曲线…"),
-                                 tr("色相/饱和度…")};
+    const QStringList tone_names{tr("曝光与光线…"), tr("色彩平衡…"),    tr("色阶…"),
+                                 tr("曲线…"),       tr("色相/饱和度…"), tr("色彩分级…")};
     for (int i = 0; i < tone_names.size(); ++i) {
         auto* action = adjustments->addAction(tone_names[i]);
         if (i == 2)

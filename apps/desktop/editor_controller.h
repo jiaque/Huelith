@@ -23,6 +23,7 @@ class EditorController final : public QObject {
     void bind(CanvasView* canvas);
     void refresh(bool rebuild_tree = true);
     bool open(const QString& path, bool place = false);
+    void open_files(const QStringList& paths);
     bool save(CanvasView* canvas, bool save_as = false, bool asynchronous = true);
     bool confirm_close(CanvasView* canvas);
 
@@ -45,6 +46,7 @@ class EditorController final : public QObject {
     void show_export();
     void show_shortcuts();
     void offer_recovery();
+    [[nodiscard]] QString recovery_directory() const;
     void build_properties();
     void update_recent(const QString& path);
     void autosave();

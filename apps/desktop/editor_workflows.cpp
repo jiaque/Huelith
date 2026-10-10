@@ -453,8 +453,7 @@ void EditorController::show_shortcuts() {
     dialog.exec();
 }
 void EditorController::offer_recovery() {
-    const QDir directory(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) +
-                         "/recovery");
+    const QDir directory(recovery_directory());
     const auto files = directory.entryInfoList({"*.huelith"}, QDir::Files, QDir::Time);
     if (files.isEmpty())
         return;
