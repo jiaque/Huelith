@@ -377,10 +377,11 @@ void MainWindow::refresh_document_state() {
                              .arg(spec.resolution_ppi)
                              .arg(canvas->mask_target ? tr("蒙版") : tr("图层内容")));
     document_status_->setText(
-        tr("%1 × %2 像素 | %3")
+        tr("%1 × %2 像素 | %3 | 视图旋转 %4°")
             .arg(spec.width)
             .arg(spec.height)
-            .arg(canvas->project().dirty() ? tr("有未保存修改") : tr("已保存")));
+            .arg(canvas->project().dirty() ? tr("有未保存修改") : tr("已保存"))
+            .arg(canvas->rotation, 0, 'f', 1));
     if (editor_)
         editor_->refresh();
 }

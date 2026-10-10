@@ -16,6 +16,7 @@ class QPushButton;
 class QTimer;
 class QGraphicsView;
 class QGraphicsScene;
+class QGraphicsPathItem;
 
 namespace huelith::desktop {
 class TonePanel;
@@ -29,6 +30,9 @@ class RawDialog final : public QDialog {
     void reject() override;
     void accept() override;
 
+  protected:
+    bool eventFilter(QObject* object, QEvent* event) override;
+
   private:
     void start();
     void finish();
@@ -40,6 +44,8 @@ class RawDialog final : public QDialog {
     [[nodiscard]] bool included(std::size_t index) const;
     void record_history();
     void restore_history(int direction);
+    void refresh_local_controls();
+    void select_adjustment();
     struct Job;
     std::unique_ptr<Job> job_;
     std::vector<editing::Layer> sources_;
@@ -62,6 +68,14 @@ class RawDialog final : public QDialog {
     QComboBox* backend_{};
     QLineEdit* model_{};
     QDoubleSpinBox* exposure_{};
+    QComboBox* edit_mode_{};
+    QComboBox* adjustment_{};
+    QDoubleSpinBox* local_radius_{};
+    QDoubleSpinBox* local_feather_{};
+    QCheckBox* overlay_{};
+    QJsonObject local_stroke_;
+    QSize source_size_;
+    QGraphicsPathItem* stroke_guide_{}; // Owned by scene_; cleared before every scene rebuild.
     TonePanel* tone_{};
     QLabel* message_{};
     QLabel* histogram_{};

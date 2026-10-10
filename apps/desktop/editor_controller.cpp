@@ -1,5 +1,6 @@
 #include "editor_controller.h"
 #include "canvas_view.h"
+#include "export_dialog.h"
 #include "main_window.h"
 #include "raw_dialog.h"
 #include <QActionGroup>
@@ -135,7 +136,9 @@ class LayerDelegate final : public QStyledItemDelegate {
             }
             painter->setPen(QColor("#dde1e5"));
             painter->drawText(box.adjusted(67, 0, -4, 0), Qt::AlignVCenter,
-                              layer->name + (layer->locked ? QStringLiteral("  🔒") : QString{}));
+                              layer->name + (layer->locked || layer->background
+                                                 ? QStringLiteral("  🔒")
+                                                 : QString{}));
         } else if (index.column() == 2 && !layer->mask.isNull()) {
             const QRect thumb(box.left() + 5, middle - 13, 32, 26);
             painter->drawImage(thumb, layer->mask);
@@ -406,7 +409,8 @@ void EditorController::refresh(bool rebuild_tree) {
         history_->addItems(c->project().history_names());
         history_->setCurrentRow(int(c->project().history_position()));
         const auto* layer = find_layer(s.layers, c->active_layer);
-        opacity_->setEnabled(layer != nullptr);
+        opacity_->setEnabled(layer && !layer->background);
+        blend_->setEnabled(layer && !layer->background);
         exposure_->setEnabled(layer && layer->kind != LayerKind::group);
         if (layer) {
             blend_->setCurrentIndex(int(layer->blend));
@@ -415,7 +419,9 @@ void EditorController::refresh(bool rebuild_tree) {
             mask_->setChecked(layer->mask_enabled);
             linked_->setChecked(layer->mask_linked);
             isolated_->setChecked(layer->isolated);
-            locked_->setChecked(layer->locked);
+            locked_->setChecked(layer->locked || layer->background);
+            locked_->setText(layer->background ? tr("背景锁定（解除后转换为普通图层）")
+                                               : tr("锁定图层"));
             clipping_->setChecked(layer->clipped);
             mask_->setEnabled(!layer->mask.isNull());
             linked_->setEnabled(!layer->mask.isNull());
@@ -492,8 +498,13 @@ void EditorController::build_properties() {
                         l->mask_linked = value;
                     if (key == 2)
                         l->isolated = value;
-                    if (key == 3)
+                    if (key == 3) {
+                        if (!value && l->background) {
+                            l->background = false;
+                            l->name = tr("图层 0");
+                        }
                         l->locked = value;
+                    }
                     if (key == 4)
                         l->clipped = value;
                 });
@@ -830,7 +841,10 @@ void EditorController::layer_action(const QString& operation) {
             return;
         }
         auto& layer = editable(c, s);
-        if (operation == tr("复制图层")) {
+        if (operation == tr("背景转换为普通图层")) {
+            layer.background = false;
+            layer.name = tr("图层 0");
+        } else if (operation == tr("复制图层")) {
             auto copy = duplicate_layer(layer);
             copy.name += tr(" 副本");
             s.layers.push_back(copy);
@@ -987,6 +1001,17 @@ void EditorController::configure_menus() {
     add(file, tr("保存工程"), "Ctrl+S", [this] { save(canvas()); });
     add(file, tr("另存工程…"), "Ctrl+Shift+S", [this] { save(canvas(), true); });
     add(file, tr("导出 PNG / JPEG…"), "Ctrl+Alt+Shift+S", [this] { show_export(); });
+    add(file, tr("批量导出与队列…"), {}, [this] {
+        if (!export_queue_)
+            export_queue_ = new ExportDialog(window_);
+        QList<CanvasView*> sources;
+        for (int i = 0; i < window_->documents_->count(); ++i)
+            if (auto* source = dynamic_cast<CanvasView*>(window_->documents_->widget(i)))
+                sources.append(source);
+        export_queue_->set_sources(sources);
+        export_queue_->show();
+        export_queue_->raise();
+    });
     recent_ = file->addMenu(tr("最近打开"));
     const auto recent = QSettings().value("recentProjects").toStringList();
     for (const auto& item : recent)
@@ -1026,9 +1051,9 @@ void EditorController::configure_menus() {
     for (int kind = 0; kind <= int(LayerKind::composition); ++kind)
         add(create, kind_name(static_cast<LayerKind>(kind)), {},
             [this, kind] { create_layer(kind); });
-    for (const auto& text : {tr("复制图层"), tr("蒙版"), tr("反相蒙版"), tr("蒙版转选区"),
-                             tr("路径转矢量蒙版"), tr("上移"), tr("下移"), tr("嵌入资源"),
-                             tr("盖印可见副本"), tr("合并可见图层"), tr("删除")})
+    for (const auto& text : {tr("复制图层"), tr("背景转换为普通图层"), tr("蒙版"), tr("反相蒙版"),
+                             tr("蒙版转选区"), tr("路径转矢量蒙版"), tr("上移"), tr("下移"),
+                             tr("嵌入资源"), tr("盖印可见副本"), tr("合并可见图层"), tr("删除")})
         add(layers, text, text == tr("复制图层") ? QString("Ctrl+J") : QString{}, [this, text] {
             if (text == tr("合并可见图层") &&
                 QMessageBox::question(
@@ -1115,7 +1140,15 @@ void EditorController::configure_menus() {
             if (ok) {
                 c->rotation = angle;
                 c->update();
+                window_->refresh_document_state();
             }
+        }
+    });
+    add(view, tr("复位视图旋转"), {}, [this] {
+        if (auto* c = canvas()) {
+            c->rotation = 0;
+            c->update();
+            window_->refresh_document_state();
         }
     });
     for (const auto& text : {tr("网格"), tr("标尺"), tr("吸附")}) {

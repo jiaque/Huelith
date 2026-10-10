@@ -191,6 +191,7 @@ def main():
     size=struct.unpack_from('<I',payload,end)[0];end+=4
     assert size!=0xfffffffe,'Extended QByteArray length unexpected in small fixture'
     if size!=0xffffffff:end+=size
+   if version>=6:end+=1 # Dedicated background flag; absent in legacy schema.
    assert end<=len(payload)
    entries['document.bin']=struct.pack('<I',2)+payload[4:start]+payload[end:];manifest=json.loads(entries['manifest.json']);manifest['schema']=2;entries['manifest.json']=json.dumps(manifest).encode();legacy=folder/'schema2.huelith'
    with zipfile.ZipFile(legacy,'w',compression=zipfile.ZIP_STORED) as z:

@@ -85,6 +85,12 @@ void EditorController::copy_pixels(bool merged, bool cut) {
             if (current->pixels.isNull())
                 throw EditError(tr("请先将此层转换为像素图层"));
             const auto world = current->transform * parent_matrix(target, current->id);
+            QImage swatch(1, 1, QImage::Format_RGBA8888);
+            auto background = c->background;
+            background.setAlpha(255);
+            swatch.fill(background);
+            const auto color = to_working(swatch);
+            const auto* channels = reinterpret_cast<const float*>(color.constBits());
             for (int y = 0; y < current->pixels.height(); ++y) {
                 auto* row = reinterpret_cast<float*>(current->pixels.scanLine(y));
                 for (int x = 0; x < current->pixels.width(); ++x) {
@@ -95,7 +101,9 @@ void EditorController::copy_pixels(bool merged, bool cut) {
                             ? target.selection.constScanLine(point.y())[point.x()] / 255.F
                             : 0.F;
                     for (int channel = 0; channel < 4; ++channel)
-                        row[x * 4 + channel] *= 1 - amount;
+                        row[x * 4 + channel] =
+                            row[x * 4 + channel] * (1 - amount) +
+                            (current->background ? channels[channel] * amount : 0.F);
                 }
             }
             current->kind = LayerKind::pixels;

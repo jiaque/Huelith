@@ -16,6 +16,7 @@ class QTimer;
 namespace huelith::desktop {
 class MainWindow;
 class CanvasView;
+class ExportDialog;
 class EditorController final : public QObject {
   public:
     explicit EditorController(MainWindow* window);
@@ -55,6 +56,7 @@ class EditorController final : public QObject {
     std::unique_ptr<SaveJob> save_job_;
     [[nodiscard]] CanvasView* canvas() const;
     MainWindow* window_;
+    ExportDialog* export_queue_{}; // Qt parent owns the modeless queue window.
     QTreeWidget* layers_{};
     QListWidget* history_{};
     QListWidget* paths_{};

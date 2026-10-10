@@ -253,7 +253,8 @@ void retouch(State& state, const QUuid& id, const QImage& coverage, const Retouc
                     value[c] *= gain;
             }
             for (int c = 0; c < 4; ++c)
-                row[x * 4 + c] = row[x * 4 + c] * (1 - k) + value[c] * k;
+                row[x * 4 + c] =
+                    row[x * 4 + c] * (1 - k * (layer.background ? value[3] : 1.F)) + value[c] * k;
         }
     }
 }
@@ -263,6 +264,16 @@ void crop_canvas(State& state, const QRect& bounds) {
         throw EditError(QStringLiteral("裁剪尺寸无效"));
     const auto delta = QTransform::fromTranslate(-bounds.x(), -bounds.y());
     for (auto& layer : state.layers) {
+        if (layer.background) {
+            QImage cropped(bounds.size(), layer.pixels.format());
+            cropped.setColorSpace(layer.pixels.colorSpace());
+            cropped.fill(Qt::white);
+            QPainter painter(&cropped);
+            painter.drawImage(-bounds.topLeft(), layer.pixels);
+            painter.end();
+            layer.pixels = cropped;
+            continue;
+        }
         layer.transform *= delta;
         layer.mask_transform *= delta;
     }

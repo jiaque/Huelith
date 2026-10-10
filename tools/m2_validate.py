@@ -1,5 +1,5 @@
 """M2 regression through the existing production C++ DLL; no test executable."""
-import argparse,ctypes,json,os,tempfile,traceback
+import argparse,ctypes,json,os,tempfile,traceback,time
 from pathlib import Path
 from PIL import Image,ImageDraw
 ROOT=Path(__file__).resolve().parents[1]
@@ -81,6 +81,39 @@ def main():
   def screen():
    scene();key('F');assert state()['screenMode']==1;key('F');assert state()['screenMode']==2;key('F');assert state()['screenMode']==0
   test('screen_modes_three_way_restore',screen)
+  def background_protection():
+   call('window_new',width=240,height=180,whiteBackground=True);key('V');before=state()['revision']
+   assert state()['backgroundLayer']
+   key('Ctrl+T');assert not state()['pending'];key('Right');assert state()['tx']==0 and state()['revision']==before
+   key('B');key('D');control('brushRadius',8);click(100,100);assert pixel(100,100)==[0,0,0,255]
+   key('E');click(100,100);assert pixel(100,100)==[255,255,255,255]
+   call('window_action',text='背景转换为普通图层');assert not state()['backgroundLayer']
+   key('V');key('Ctrl+T');assert state()['pending'];call('window_gesture',handle=4,scale=.5);key('Return');assert abs(state()['sx']-.5)<1e-6
+   key('Ctrl+Z');key('Ctrl+Z');assert state()['backgroundLayer'] and state()['sx']==1
+  test('background_blocks_transform_allows_paint_eraser_unlock_undo',background_protection)
+  def view_rotation():
+   scene();before=state();pixels=pixel(30,50)
+   call('window_view',rotation=25,zoom=.9);s=state()
+   assert s['rotation']==25 and s['revision']==before['revision'] and s['sx']==before['sx'] and s['tx']==before['tx']
+   assert pixel(30,50)==pixels
+   call('window_action',text='复位视图旋转');assert state()['rotation']==0 and state()['revision']==before['revision']
+   key('Ctrl+T');assert state()['pending'];key('Esc') # Bottom ordinary layer stays transformable.
+  test('view_rotation_preserves_pixels_revision_bottom_ordinary_layer_transformable',view_rotation)
+  def background_persistence_crop():
+   call('window_new',width=240,height=180,whiteBackground=True);key('C');drag(10,20,200,150);key('Return')
+   assert state()['backgroundLayer'] and state()['tx']==0 and state()['width']==190 and pixel(10,10)[3]==255
+   destination=folder/'background.huelith';call('window_filename',path=str(destination));call('window_action',text='保存工程')
+   deadline=time.monotonic()+8
+   while not destination.exists() and time.monotonic()<deadline:call('pump',waitMs=30)
+   assert destination.exists();call('window_open',path=str(destination));assert state()['backgroundLayer']
+   key('V');key('Ctrl+T');assert not state()['pending']
+   call('window_action',text='复制图层');assert not state()['backgroundLayer'];key('Ctrl+T');assert state()['pending'];key('Esc')
+  test('background_crop_save_reload_duplicate_becomes_regular',background_persistence_crop)
+  def mixed_background_selection():
+   call('window_scene',width=240,height=180,layers=[dict(name='background',color='white',backgroundLayer=True),dict(name='ordinary',color='red',width=50,height=50,x=30,y=30)])
+   call('window_select',index=0);call('window_select',index=1,control=True);before=state()['revision']
+   key('V');key('Ctrl+T');assert not state()['pending'];key('Right');assert state()['revision']==before
+  test('mixed_background_selection_rejects_whole_transform_atomically',mixed_background_selection)
   def capture():
    scene();key('S');call('window_capture',path=str(out/f'{args.build}-workspace.png'))
   test('native_window_capture',capture)

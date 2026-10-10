@@ -1,7 +1,9 @@
 // Local Python automation adapter. Assertions and test scenarios live in Python;
 // this DLL calls the same C++ targets linked into Huelith, without a test EXE.
 #include "canvas_view.h"
+#include "export_dialog.h"
 #include "huelith/editing/project.h"
+#include "huelith/editing/raw_adjustments.h"
 #include "huelith/editing/raw_cache.h"
 #include "huelith/editing/raw_develop.h"
 #include "huelith/editing/tiff_io.h"
@@ -67,6 +69,7 @@ struct Driver {
     std::unique_ptr<huelith::desktop::MainWindow> window;
     std::unique_ptr<huelith::desktop::RawDialog> raw_window;
     std::unique_ptr<RawCache> raw_cache;
+    std::unique_ptr<ExportQueue> export_queue;
 };
 Driver& driver() {
     static Driver value;
@@ -84,6 +87,82 @@ Layer& target(State& s, const QJsonObject& o) {
 QJsonObject run(const QJsonObject& o) {
     auto& d = driver();
     const auto op = o.value("op").toString();
+    if (op == "raw_local_probe") {
+        QImage input(100, 80, QImage::Format_RGBA32FPx4_Premultiplied);
+        input.setColorSpace(working_space());
+        for (int y = 0; y < input.height(); ++y) {
+            auto* row = reinterpret_cast<float*>(input.scanLine(y));
+            for (int x = 0; x < input.width(); ++x) {
+                row[x * 4] = .2F;
+                row[x * 4 + 1] = .2F;
+                row[x * 4 + 2] = .2F;
+                row[x * 4 + 3] = .5F;
+            }
+        }
+        const auto recipe = o.value("recipe").toObject();
+        const auto output = apply_raw_adjustments(input, recipe);
+        const auto mask =
+            raw_local_mask(input.size(), recipe.value("locals").toArray().first().toObject());
+        QJsonArray samples;
+        for (const auto& value : o.value("points").toArray()) {
+            const auto p = value.toArray();
+            const int x = p[0].toInt(), y = p[1].toInt();
+            const auto* pixel = reinterpret_cast<const float*>(output.constScanLine(y)) + x * 4;
+            samples.append(QJsonObject{{"rgba", QJsonArray{pixel[0], pixel[1], pixel[2], pixel[3]}},
+                                       {"mask", int(mask.constScanLine(y)[x])}});
+        }
+        return {{"samples", samples}, {"width", output.width()}, {"height", output.height()}};
+    }
+    if (op == "export_queue") {
+        if (!d.export_queue || o.value("reset").toBool())
+            d.export_queue = std::make_unique<ExportQueue>();
+        auto* queue = d.export_queue.get();
+        if (o.value("window").toBool()) {
+            auto* dialog = dynamic_cast<huelith::desktop::ExportDialog*>(
+                d.window->findChild<QDialog*>("exportQueueDialog"));
+            if (!dialog)
+                throw EditError("export queue window not open");
+            queue = &dialog->queue();
+            for (auto it = o.begin(); it != o.end(); ++it) {
+                if (auto* line = dialog->findChild<QLineEdit*>(it.key()))
+                    line->setText(it.value().toString());
+                if (auto* combo = dialog->findChild<QComboBox*>(it.key()))
+                    combo->setCurrentIndex(it.value().toInt());
+            }
+            if (o.contains("click"))
+                if (auto* button = dialog->findChild<QPushButton*>(o.value("click").toString()))
+                    button->click();
+            if (o.contains("capture"))
+                dialog->grab().save(o.value("capture").toString());
+        }
+        quint64 id{};
+        if (o.contains("path")) {
+            ExportOptions options;
+            options.path = o.value("path").toString();
+            options.format = o.value("format").toString("png").toLatin1();
+            options.bits = o.value("bits").toInt(8);
+            options.size = {o.value("width").toInt(), o.value("height").toInt()};
+            options.conflict = static_cast<ExportConflict>(o.value("conflict").toInt());
+            options.protected_paths = {o.value("protected").toString()};
+            id = queue->add(d.window->active_canvas()->project().snapshot(), options);
+        }
+        if (o.value("start").toBool())
+            queue->start();
+        if (o.contains("cancel"))
+            queue->cancel(quint64(o.value("cancel").toInteger()));
+        if (o.value("cancelAll").toBool())
+            queue->cancel_all();
+        if (o.value("retry").toBool())
+            queue->retry_failed();
+        QJsonArray items;
+        for (const auto& item : queue->items())
+            items.append(QJsonObject{{"id", qint64(item.id)},
+                                     {"revision", qint64(item.revision)},
+                                     {"path", item.path},
+                                     {"status", int(item.status)},
+                                     {"error", item.error}});
+        return {{"id", qint64(id)}, {"items", items}};
+    }
     if (op == "tone_probe") {
         const auto settings = tone_from_json(o.value("settings").toObject());
         QImage input(1, 1, QImage::Format_RGBA32FPx4_Premultiplied);
@@ -215,6 +294,11 @@ QJsonObject run(const QJsonObject& o) {
             dialog->findChild<QLineEdit*>("rawModel")->setText(o.value("model").toString());
         if (o.contains("denoise"))
             dialog->findChild<QCheckBox*>("rawDenoise")->setChecked(o.value("denoise").toBool());
+        if (o.contains("mode"))
+            dialog->findChild<QComboBox*>("rawEditMode")->setCurrentIndex(o.value("mode").toInt());
+        if (o.contains("target"))
+            dialog->findChild<QComboBox*>("rawAdjustmentTarget")
+                ->setCurrentIndex(o.value("target").toInt());
         if (o.contains("click")) {
             auto* button = dialog->findChild<QPushButton*>(o.value("click").toString());
             if (!button)
@@ -224,6 +308,25 @@ QJsonObject run(const QJsonObject& o) {
         if (o.contains("exposure"))
             dialog->findChild<QDoubleSpinBox*>("rawExposure")
                 ->setValue(o.value("exposure").toDouble());
+        if (o.contains("stroke")) {
+            auto* view = dialog->findChild<QGraphicsView*>("rawPreview");
+            const auto points = o.value("stroke").toArray();
+            for (int i = 0; i < points.size(); ++i) {
+                const auto point = points[i].toArray();
+                const auto size = view->sceneRect().size();
+                const QPointF position = view->mapFromScene(QPointF(
+                    point[0].toDouble() * size.width(), point[1].toDouble() * size.height()));
+                const auto type = i == 0                   ? QEvent::MouseButtonPress
+                                  : i + 1 == points.size() ? QEvent::MouseButtonRelease
+                                                           : QEvent::MouseMove;
+                QMouseEvent event(type, position, view->viewport()->mapToGlobal(position.toPoint()),
+                                  type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                                  type == QEvent::MouseButtonRelease ? Qt::NoButton
+                                                                     : Qt::LeftButton,
+                                  Qt::NoModifier);
+                QApplication::sendEvent(view->viewport(), &event);
+            }
+        }
         if (o.contains("capture"))
             dialog->grab().save(o.value("capture").toString());
         if (o.value("accept").toBool())
@@ -249,6 +352,7 @@ QJsonObject run(const QJsonObject& o) {
         for (const auto& source : dialog->results())
             recipes.append(source.raw_recipe);
         return {{"ready", dialog->findChild<QPushButton*>("rawApply")->isEnabled()},
+                {"target", dialog->findChild<QComboBox*>("rawAdjustmentTarget")->currentIndex()},
                 {"idle", dialog->findChild<QPushButton*>("rawCompute")->isEnabled()},
                 {"scale", dialog->findChild<QGraphicsView*>("rawPreview")->transform().m11()},
                 {"histogramSamples",
@@ -331,6 +435,7 @@ QJsonObject run(const QJsonObject& o) {
             layer.kind = static_cast<LayerKind>(item.value("kind").toInt());
             layer.visible = item.value("visible").toBool(true);
             layer.locked = item.value("locked").toBool();
+            layer.background = item.value("backgroundLayer").toBool();
             layer.clipped = item.value("clipped").toBool();
             layer.opacity = float(item.value("opacity").toDouble(1));
             if (item.contains("path"))
@@ -568,6 +673,8 @@ QJsonObject run(const QJsonObject& o) {
         spec.width = o.value("width").toInt(400);
         spec.height = o.value("height").toInt(300);
         spec.name = "Python GUI";
+        if (o.value("whiteBackground").toBool())
+            spec.background = huelith::CanvasBackground::white;
         const bool success = d.window->create_document(spec);
         QApplication::processEvents();
         return {{"ok", success}, {"count", d.window->document_count()}};
@@ -921,6 +1028,8 @@ QJsonObject run(const QJsonObject& o) {
         const auto origin = c->view_transform().map(QPointF());
         return {{"tool", int(c->tool())},
                 {"quickMask", c->quick_mask},
+                {"backgroundLayer", layer && layer->background},
+                {"rotation", c->rotation},
                 {"screenMode", d.window->property("screenMode").toInt()},
                 {"pending", c->transforming()},
                 {"sx", matrix.m11()},

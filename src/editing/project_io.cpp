@@ -12,7 +12,7 @@
 namespace huelith::editing {
 namespace {
 constexpr qint64 file_budget = 1024LL * 1024 * 1024;
-constexpr quint32 schema = 5;
+constexpr quint32 schema = 6;
 void checked(QDataStream& stream) {
     if (stream.status() != QDataStream::Ok)
         throw EditError(QStringLiteral("工程截断或数据无效"));
@@ -74,6 +74,7 @@ void write_layers(QDataStream& out, const std::vector<Layer>& layers) {
             out << point;
         out << layer.raw_source << QJsonDocument(layer.raw_recipe).toJson(QJsonDocument::Compact);
         out << QJsonDocument(tone_json(layer.tone)).toJson(QJsonDocument::Compact);
+        out << layer.background;
         write_image(out, layer.pixels);
         write_image(out, layer.mask);
         write_layers(out, layer.children);
@@ -121,6 +122,8 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
                 throw EditError(QStringLiteral("调色配方无效"));
             layer.tone = tone_from_json(document.object());
         }
+        if (version >= 6)
+            in >> layer.background;
         layer.pixels = read_image(in);
         layer.mask = read_image(in);
         layer.children = read_layers(in, depth + 1, count, version);

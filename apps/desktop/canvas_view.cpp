@@ -27,7 +27,10 @@ CanvasView::CanvasView(CanvasSpec spec, QWidget* parent) : QWidget(parent), spec
     state.ppi = spec_.resolution_ppi;
     if (spec_.background == CanvasBackground::white) {
         editing::Layer layer;
-        layer.kind = editing::LayerKind::fill;
+        layer.background = true;
+        QImage white(state.size, QImage::Format_RGBA8888);
+        white.fill(Qt::white);
+        layer.pixels = editing::to_working(white);
         layer.name = tr("背景");
         state.layers.push_back(layer);
         active_layer = layer.id;
@@ -220,7 +223,7 @@ bool CanvasView::begin_transform(bool selection) {
         if (transform_ids_.empty())
             return false;
         for (const auto& id : transform_ids_)
-            if (editing::layer_locked(project_->state().layers, id))
+            if (editing::layer_position_locked(project_->state().layers, id))
                 return false;
         transform_rect_ = target_rect();
         transform_frame_ = current_layer_transform();
@@ -325,7 +328,8 @@ int CanvasView::transform_hit(QPointF point) const {
     if (tool_ != CanvasTool::move || (!show_transform_controls && !transform_draft_) ||
         target_rect().isEmpty())
         return -1;
-    if (!selection_transform_ && editing::layer_locked(visible_state().layers, active_layer))
+    if (!selection_transform_ &&
+        editing::layer_position_locked(visible_state().layers, active_layer))
         return -1;
     if (warp_mode && !selection_transform_ && selected_layers.size() < 2) {
         const auto points = warp_handles();
@@ -642,7 +646,7 @@ void CanvasView::paintEvent(QPaintEvent*) {
         painter.setPen(border);
         painter.setBrush(Qt::NoBrush);
         painter.drawPolygon(QPolygonF{points[0], points[2], points[4], points[6]});
-        if (!editing::layer_locked(visible_state().layers, active_layer)) {
+        if (!editing::layer_position_locked(visible_state().layers, active_layer)) {
             painter.setBrush(QColor("#f0f4f8"));
             for (const auto& p : points)
                 painter.drawRect(QRectF(p.x() - 3.5, p.y() - 3.5, 7, 7));
@@ -1120,7 +1124,10 @@ void CanvasView::update_brush_preview() {
         layer->pixels = editing::to_working(blank);
     }
     QImage sample(1, 1, QImage::Format_RGBA8888);
-    sample.fill(foreground);
+    auto paint_color = erase && layer->background && !mask_target ? background : foreground;
+    if (layer->background)
+        paint_color.setAlpha(255);
+    sample.fill(paint_color);
     const auto color = editing::to_working(sample);
     const auto* channels = reinterpret_cast<const float*>(color.constBits());
     const auto matrix = (mask_target ? layer->mask_transform : layer->transform) *
@@ -1156,7 +1163,8 @@ void CanvasView::update_brush_preview() {
                 }
                 for (int channel = 0; channel < 4; ++channel)
                     value[channel] =
-                        value[channel] * (1 - alpha) + (erase ? 0 : source[channel] * alpha);
+                        value[channel] * (1 - alpha * (layer->background ? source[3] : 1.F)) +
+                        (erase && !layer->background ? 0 : source[channel] * alpha);
             }
         }
     if (!mask_target && layer->kind == editing::LayerKind::source) {
@@ -1355,6 +1363,9 @@ void CanvasView::keyPressEvent(QKeyEvent* event) {
         return;
     }
     if (tool_ == CanvasTool::move && event->key() >= Qt::Key_Left && event->key() <= Qt::Key_Down) {
+        for (const auto& id : selected_layers)
+            if (editing::layer_position_locked(project_->state().layers, id))
+                return;
         const double step = event->modifiers().testFlag(Qt::ShiftModifier) ? 10 : 1;
         const QPointF delta(event->key() == Qt::Key_Left    ? -step
                             : event->key() == Qt::Key_Right ? step
@@ -1363,7 +1374,7 @@ void CanvasView::keyPressEvent(QKeyEvent* event) {
                             : event->key() == Qt::Key_Down ? step
                                                            : 0);
         if (editing::find_layer(project_->state().layers, active_layer) &&
-            !editing::layer_locked(project_->state().layers, active_layer))
+            !editing::layer_position_locked(project_->state().layers, active_layer))
             edit(tr("微移图层"), [&](editing::State& state) {
                 QTransform shift;
                 shift.translate(delta.x(), delta.y());

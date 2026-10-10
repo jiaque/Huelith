@@ -1,4 +1,5 @@
 #include "raw_dialog.h"
+#include "huelith/editing/raw_adjustments.h"
 #include "tone_panel.h"
 #include "window_header.h"
 #include <QCheckBox>
@@ -13,15 +14,19 @@
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenuBar>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSettings>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QTemporaryFile>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -95,9 +100,10 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     view_->setObjectName("rawPreview");
     view_->setDragMode(QGraphicsView::ScrollHandDrag);
     view_->setBackgroundBrush(QColor("#1c2024"));
+    view_->viewport()->installEventFilter(this);
     body->addWidget(view_, 1);
     auto* panel = new QWidget(this);
-    panel->setFixedWidth(420);
+    panel->setMinimumWidth(380);
     auto* form = new QFormLayout(panel);
     form->setContentsMargins(12, 8, 12, 8);
     histogram_ = new QLabel(panel);
@@ -109,6 +115,83 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     image_info_ = new QLabel(panel);
     image_info_->setObjectName("rawImageInfo");
     form->addRow(image_info_);
+    edit_mode_ = new QComboBox(panel);
+    edit_mode_->setObjectName("rawEditMode");
+    edit_mode_->addItems(
+        {tr("平移"), tr("局部笔刷"), tr("擦除范围"), tr("线性渐变"), tr("径向渐变"), tr("裁剪")});
+    form->addRow(tr("显影工具"), edit_mode_);
+    adjustment_ = new QComboBox(panel);
+    adjustment_->setObjectName("rawAdjustmentTarget");
+    form->addRow(tr("调整目标"), adjustment_);
+    auto* local_buttons = new QHBoxLayout;
+    const auto local_button = [&](const QString& text, const char* name, const auto& action) {
+        auto* result = new QPushButton(text, panel);
+        result->setObjectName(name);
+        result->setAutoDefault(false);
+        local_buttons->addWidget(result);
+        connect(result, &QPushButton::clicked, this, action);
+    };
+    local_button(tr("新建局部"), "rawAddLocal", [this] {
+        auto& recipe = sources_[current_].raw_recipe;
+        auto locals = recipe.value("locals").toArray();
+        if (locals.size() >= 64) {
+            message_->setText(tr("当前最多支持 64 个局部调整"));
+            return;
+        }
+        locals.append(QJsonObject{{"tone", editing::tone_json({})}, {"components", QJsonArray{}}});
+        recipe.insert("locals", locals);
+        refresh_local_controls();
+        adjustment_->setCurrentIndex(int(locals.size()));
+        edit_mode_->setCurrentIndex(1);
+        overlay_->setChecked(true);
+        record_history();
+    });
+    local_button(tr("删除局部"), "rawDeleteLocal", [this] {
+        auto locals = sources_[current_].raw_recipe.value("locals").toArray();
+        const int index = adjustment_->currentIndex() - 1;
+        if (index < 0 || index >= locals.size())
+            return;
+        locals.removeAt(index);
+        sources_[current_].raw_recipe.insert("locals", locals);
+        refresh_local_controls();
+        select_adjustment();
+        record_history();
+        display();
+    });
+    local_button(tr("重置裁剪"), "rawResetCrop", [this] {
+        sources_[current_].raw_recipe.remove("crop");
+        record_history();
+        display();
+    });
+    form->addRow(local_buttons);
+    local_radius_ = new QDoubleSpinBox(panel);
+    local_radius_->setObjectName("rawLocalRadius");
+    local_radius_->setRange(1, 1000);
+    local_radius_->setValue(100);
+    local_radius_->setSuffix(tr(" 像素"));
+    form->addRow(tr("局部笔刷半径"), local_radius_);
+    local_feather_ = new QDoubleSpinBox(panel);
+    local_feather_->setObjectName("rawLocalFeather");
+    local_feather_->setRange(0, 100);
+    local_feather_->setValue(50);
+    local_feather_->setSuffix(" %");
+    form->addRow(tr("局部羽化"), local_feather_);
+    overlay_ = new QCheckBox(tr("显示当前局部范围（红色）"), panel);
+    overlay_->setObjectName("rawLocalOverlay");
+    form->addRow(overlay_);
+    connect(overlay_, &QCheckBox::toggled, this, &RawDialog::display);
+    connect(adjustment_, &QComboBox::currentIndexChanged, this, [this] {
+        if (!loading_) {
+            local_stroke_ = {};
+            select_adjustment();
+            display();
+        }
+    });
+    connect(edit_mode_, &QComboBox::currentIndexChanged, this, [this](int mode) {
+        view_->setDragMode(mode == 0 ? QGraphicsView::ScrollHandDrag : QGraphicsView::NoDrag);
+        local_stroke_ = {};
+        display();
+    });
     tone_ = new TonePanel({}, panel);
     exposure_ = tone_->findChild<QDoubleSpinBox*>("toneExposure");
     exposure_->setObjectName("rawExposure");
@@ -166,7 +249,11 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     message_->setObjectName("rawStatus");
     message_->setWordWrap(true);
     form->addRow(message_);
-    body->addWidget(panel);
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFixedWidth(420);
+    scroll->setWidget(panel);
+    body->addWidget(scroll);
     root->addLayout(body, 1);
     auto* footer = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     apply_ = footer->button(QDialogButtonBox::Ok);
@@ -187,7 +274,17 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     connect(files_, &QListWidget::itemChanged, this, [this] { update_ready(); });
     tone_->changed = [this] {
         if (!loading_) {
-            sources_[current_].raw_recipe.insert("tone", editing::tone_json(tone_->settings()));
+            auto& recipe = sources_[current_].raw_recipe;
+            const int index = adjustment_->currentIndex() - 1;
+            if (index < 0)
+                recipe.insert("tone", editing::tone_json(tone_->settings()));
+            else {
+                auto locals = recipe.value("locals").toArray();
+                auto local = locals.at(index).toObject();
+                local.insert("tone", editing::tone_json(tone_->settings()));
+                locals[index] = local;
+                recipe.insert("locals", locals);
+            }
             record_history();
             display();
         }
@@ -217,17 +314,132 @@ RawDialog::~RawDialog() {
         job_->result.wait();
     }
 }
+void RawDialog::refresh_local_controls() {
+    const QSignalBlocker blocker(adjustment_);
+    const int previous = adjustment_->currentIndex();
+    adjustment_->clear();
+    adjustment_->addItem(tr("全局调整"));
+    const auto locals = sources_[current_].raw_recipe.value("locals").toArray();
+    for (int i = 0; i < locals.size(); ++i)
+        adjustment_->addItem(tr("局部 %1").arg(i + 1));
+    adjustment_->setCurrentIndex(std::clamp(previous, 0, int(locals.size())));
+}
+void RawDialog::select_adjustment() {
+    loading_ = true;
+    const auto& recipe = sources_[current_].raw_recipe;
+    const int index = adjustment_->currentIndex() - 1;
+    const auto locals = recipe.value("locals").toArray();
+    const auto settings = index >= 0 && index < locals.size()
+                              ? locals.at(index).toObject().value("tone").toObject()
+                              : recipe.value("tone").toObject();
+    tone_->set_settings(editing::tone_from_json(settings));
+    loading_ = false;
+}
+bool RawDialog::eventFilter(QObject* object, QEvent* event) {
+    if (object != view_->viewport() || edit_mode_->currentIndex() == 0 || compare_->isChecked() ||
+        source_size_.isEmpty() || job_)
+        return QDialog::eventFilter(object, event);
+    if (event->type() != QEvent::MouseButtonPress && event->type() != QEvent::MouseMove &&
+        event->type() != QEvent::MouseButtonRelease)
+        return QDialog::eventFilter(object, event);
+    auto* mouse = static_cast<QMouseEvent*>(event);
+    if (event->type() != QEvent::MouseMove && mouse->button() != Qt::LeftButton)
+        return false;
+    const int mode = edit_mode_->currentIndex();
+    const auto point = view_->mapToScene(mouse->position().toPoint());
+    const double x = std::clamp(point.x() / source_size_.width(), 0., 1.);
+    const double y = std::clamp(point.y() / source_size_.height(), 0., 1.);
+    const QJsonObject sample{{"x", x}, {"y", y}};
+    if (event->type() == QEvent::MouseButtonPress) {
+        if (mode != 5 && adjustment_->currentIndex() <= 0) {
+            message_->setText(tr("请先新建或选择一个局部调整，再在图上建立范围"));
+            return true;
+        }
+        local_stroke_ = {{"mode", mode == 3   ? "linear"
+                                  : mode == 4 ? "radial"
+                                              : "brush"},
+                         {"subtract", mode == 2},
+                         {"radius", local_radius_->value() /
+                                        std::min(source_size_.width(), source_size_.height())},
+                         {"feather", local_feather_->value() / 100},
+                         {"x", x},
+                         {"y", y},
+                         {"endX", x},
+                         {"endY", y},
+                         {"points", QJsonArray{sample}}};
+        QPainterPath path;
+        path.moveTo(point);
+        stroke_guide_ =
+            scene_->addPath(path, QPen(QColor("#63baff"), 2 / view_->transform().m11()));
+        return true;
+    }
+    if (local_stroke_.isEmpty())
+        return false;
+    local_stroke_.insert("endX", x);
+    local_stroke_.insert("endY", y);
+    auto points = local_stroke_.value("points").toArray();
+    if (points.size() < 16384)
+        points.append(sample);
+    local_stroke_.insert("points", points);
+    if (stroke_guide_) {
+        auto path = stroke_guide_->path();
+        const QPointF start(local_stroke_.value("x").toDouble() * source_size_.width(),
+                            local_stroke_.value("y").toDouble() * source_size_.height());
+        if (mode >= 3) {
+            path = {};
+            if (mode == 3) {
+                path.moveTo(start);
+                path.lineTo(point);
+            } else if (mode == 4)
+                path.addEllipse(QRectF(start, point).normalized());
+            else
+                path.addRect(QRectF(start, point).normalized());
+        } else
+            path.lineTo(point);
+        stroke_guide_->setPath(path);
+    }
+    if (event->type() == QEvent::MouseButtonRelease) {
+        auto& recipe = sources_[current_].raw_recipe;
+        if (mode == 5) {
+            const QRectF rect(
+                QPointF(local_stroke_.value("x").toDouble(), local_stroke_.value("y").toDouble()),
+                QPointF(x, y));
+            if (std::abs(rect.width()) * source_size_.width() >= 1 &&
+                std::abs(rect.height()) * source_size_.height() >= 1)
+                recipe.insert("crop", local_stroke_);
+        } else {
+            auto locals = recipe.value("locals").toArray();
+            const int index = adjustment_->currentIndex() - 1;
+            auto local = locals.at(index).toObject();
+            auto components = local.value("components").toArray();
+            if (components.size() < 4096) {
+                components.append(local_stroke_);
+                local.insert("components", components);
+                locals[index] = local;
+                recipe.insert("locals", locals);
+            }
+        }
+        local_stroke_ = {};
+        record_history();
+        display();
+    }
+    return true;
+}
 void RawDialog::select(int index) {
     if (index < 0 || index >= int(sources_.size()) || job_)
         return;
     fit_next_ = fit_next_ || current_ != index;
     current_ = index;
+    local_stroke_ = {};
+    source_size_ = {};
     loading_ = true;
     const auto& recipe = sources_[current_].raw_recipe;
     auto settings = editing::tone_from_json(recipe.value("tone").toObject());
     if (!recipe.contains("tone"))
         settings.exposure = recipe.value("exposure").toDouble();
     tone_->set_settings(settings);
+    refresh_local_controls();
+    adjustment_->setCurrentIndex(0);
     denoise_->setChecked(recipe.value("denoise").toBool());
     backend_->setCurrentIndex(recipe.value("directml").toBool(true) ? 0 : 1);
     model_->setText(recipe.value("modelPath").toString(QSettings().value("raw/model").toString()));
@@ -331,6 +543,7 @@ void RawDialog::finish() {
 void RawDialog::display() {
     const auto transform = view_->transform();
     const auto center = view_->mapToScene(view_->viewport()->rect().center());
+    stroke_guide_ = nullptr;
     scene_->clear();
     QImage image;
     try {
@@ -342,11 +555,33 @@ void RawDialog::display() {
     }
     if (compare_->isChecked())
         image = sources_[current_].pixels;
-    else if (!image.isNull())
-        image = editing::apply_tone(image, tone_->settings());
+    else if (!image.isNull()) {
+        source_size_ = image.size();
+        image = editing::apply_raw_adjustments(image, sources_[current_].raw_recipe, false);
+    }
     if (!image.isNull()) {
         const auto visible = editing::display_image(image);
         scene_->addPixmap(QPixmap::fromImage(visible));
+        const auto locals = sources_[current_].raw_recipe.value("locals").toArray();
+        const int local_index = adjustment_->currentIndex() - 1;
+        if (!compare_->isChecked() && overlay_->isChecked() && local_index >= 0 &&
+            local_index < locals.size()) {
+            const auto mask =
+                editing::raw_local_mask(image.size(), locals.at(local_index).toObject());
+            QImage overlay(image.size(), QImage::Format_ARGB32);
+            for (int y = 0; y < mask.height(); ++y)
+                for (int x = 0; x < mask.width(); ++x)
+                    overlay.setPixel(x, y, qRgba(255, 55, 55, mask.constScanLine(y)[x] / 3));
+            scene_->addPixmap(QPixmap::fromImage(overlay));
+        }
+        if (!compare_->isChecked() && sources_[current_].raw_recipe.contains("crop")) {
+            const auto crop = editing::raw_crop_rect(image.size(), sources_[current_].raw_recipe);
+            QPainterPath shade;
+            shade.addRect(image.rect());
+            shade.addRect(crop);
+            scene_->addPath(shade, Qt::NoPen, QColor(0, 0, 0, 170));
+            scene_->addRect(crop, QPen(Qt::white, 1));
+        }
         const auto sample = visible.scaled(512, 512, Qt::KeepAspectRatio, Qt::SmoothTransformation)
                                 .convertToFormat(QImage::Format_RGB32);
         std::array<std::array<int, 256>, 3> bins{};
@@ -485,7 +720,9 @@ void RawDialog::restore_history(int direction) {
         }
     }
     const auto keep_fit = fit_next_;
+    const auto keep_target = adjustment_->currentIndex();
     select(current_);
+    adjustment_->setCurrentIndex(std::min(keep_target, adjustment_->count() - 1));
     fit_next_ = keep_fit;
     message_->setText(direction < 0 ? tr("已撤销会话修改") : tr("已重做会话修改"));
 }
@@ -497,9 +734,6 @@ void RawDialog::accept() {
         for (std::size_t i = 0; i < sources_.size(); ++i) {
             if (!included(i))
                 continue;
-            auto tone = editing::tone_from_json(sources_[i].raw_recipe.value("tone").toObject());
-            if (!sources_[i].raw_recipe.contains("tone"))
-                tone.exposure = sources_[i].raw_recipe.value("exposure").toDouble();
             const auto cached = cache_.get(cache_keys_[i]);
             if (!cached)
                 throw editing::EditError(tr("RAW 缓存已失效，请更新全部预览"));
@@ -514,7 +748,7 @@ void RawDialog::accept() {
                 throw editing::EditError(tr("RAW 模型或输入已更改，请重新更新预览"));
             }
             auto layer = sources_[i];
-            layer.pixels = editing::apply_tone(cached->image, tone);
+            layer.pixels = editing::apply_raw_adjustments(cached->image, sources_[i].raw_recipe);
             prepared.push_back(std::move(layer));
         }
     } catch (const std::exception& error) {
@@ -526,6 +760,11 @@ void RawDialog::accept() {
     QDialog::accept();
 }
 void RawDialog::reject() {
+    if (!local_stroke_.isEmpty()) {
+        local_stroke_ = {};
+        display();
+        return;
+    }
     batch_ = false;
     if (job_) {
         closing_ = true;

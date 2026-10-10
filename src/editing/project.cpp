@@ -235,6 +235,13 @@ void validate_layers(const std::vector<Layer>& layers, QSet<QUuid>& ids, int dep
         throw EditError(QStringLiteral("图层嵌套超过 32 层"));
     for (const auto& layer : layers) {
         validate_tone(layer.tone);
+        if (layer.background &&
+            (depth != 0 || &layer != &layers.front() || layer.kind != LayerKind::pixels ||
+             !layer.transform.isIdentity() || layer.warped || layer.opacity != 1.F ||
+             layer.blend != Blend::normal || layer.clipped || !layer.mask.isNull() ||
+             layer.vector_enabled || !layer.children.empty()))
+            throw EditError(
+                QStringLiteral("背景图层固定在底部；请先转换为普通图层再变换或添加透明度"));
         if (int(layer.kind) < 0 || int(layer.kind) > int(LayerKind::composition) ||
             int(layer.blend) < 0 || int(layer.blend) > 23)
             throw EditError(QStringLiteral("未知图层类型或混合模式"));
@@ -351,6 +358,10 @@ bool layer_locked(const std::vector<Layer>& layers, const QUuid& id) {
     }
     return false;
 }
+bool layer_position_locked(const std::vector<Layer>& layers, const QUuid& id) {
+    const auto* layer = find_layer(layers, id);
+    return layer_locked(layers, id) || (layer && layer->background);
+}
 void shift_layer(State& state, const QUuid& id, int direction) {
     std::function<bool(const std::vector<Layer>&, const QUuid&)> locate;
     locate = [&](const std::vector<Layer>& layers, const QUuid& parent) {
@@ -375,7 +386,7 @@ void remove_layer(State& state, const QUuid& id) {
 }
 void move_layer(State& state, const QUuid& id, const QUuid& parent, int position) {
     const auto* source = find_layer(state.layers, id);
-    if (!source || layer_locked(state.layers, id) || id == parent ||
+    if (!source || layer_position_locked(state.layers, id) || id == parent ||
         find_layer(source->children, parent))
         throw EditError(QStringLiteral("禁止循环引用或移动锁定图层"));
     if (!parent.isNull()) {
@@ -394,12 +405,14 @@ void move_layer(State& state, const QUuid& id, const QUuid& parent, int position
     Layer moving = *source;
     erase(state.layers, id);
     auto& target = parent.isNull() ? state.layers : find_layer(state.layers, parent)->children;
-    const auto index = std::clamp(position, 0, static_cast<int>(target.size()));
+    const int minimum = !target.empty() && target.front().background ? 1 : 0;
+    const auto index = std::clamp(position, minimum, static_cast<int>(target.size()));
     target.insert(target.begin() + index, std::move(moving));
 }
 Layer duplicate_layer(const Layer& source) {
     auto result = source;
     result.id = QUuid::createUuid();
+    result.background = false;
     for (auto& child : result.children)
         child = duplicate_layer(child);
     return result;
@@ -571,6 +584,10 @@ std::vector<QUuid> root_targets(const State& state, const std::vector<QUuid>& id
 }
 void transform_targets(State& state, const std::vector<QUuid>& ids, const QTransform& delta,
                        bool mask) {
+    // Validate the whole selection before mutating any member.
+    for (const auto& id : root_targets(state, ids))
+        if (layer_position_locked(state.layers, id))
+            throw EditError(QStringLiteral("选择包含背景或锁定图层；请先转换背景为普通图层"));
     for (const auto& id : root_targets(state, ids)) {
         if (layer_locked(state.layers, id))
             throw EditError(QStringLiteral("选择包含锁定图层"));

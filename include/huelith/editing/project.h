@@ -41,6 +41,7 @@ struct Layer {
     bool mask_linked{true};
     bool visible{true};
     bool locked{};
+    bool background{}; // Fixed canvas base; pixel painting remains allowed until explicitly locked.
     bool clipped{};
     bool isolated{};
     float opacity{1.0F};
@@ -81,6 +82,7 @@ void move_layer(State& state, const QUuid& id, const QUuid& parent, int position
 void remove_layer(State& state, const QUuid& id);
 void shift_layer(State& state, const QUuid& id, int direction);
 [[nodiscard]] bool layer_locked(const std::vector<Layer>& layers, const QUuid& id);
+[[nodiscard]] bool layer_position_locked(const std::vector<Layer>& layers, const QUuid& id);
 [[nodiscard]] Layer duplicate_layer(const Layer& source);
 [[nodiscard]] QImage path_range(QSize size, const QPainterPath& path);
 void combine_range(State& state, const QImage& range, RangeOp operation);
