@@ -1,7 +1,10 @@
+#include <cstring>
+#include "huelith/editing/image_storage.h"
 #include "huelith/editing/project.h"
 #include "huelith/editing/tiff_io.h"
 #include <QImageReader>
 #include <QImageWriter>
+#include <QJsonDocument>
 #include <QPainter>
 #include <QSet>
 #include <algorithm>
@@ -10,9 +13,25 @@
 
 namespace huelith::editing {
 namespace {
-constexpr qint64 max_pixels = 64'000'000;
+constexpr qint64 max_pixels = huelith::editing::maximum_image_pixels;
+void persist_state(State& state) {
+    std::function<void(std::vector<Layer>&)> visit=[&](auto& layers) {
+        for(auto& layer:layers) {
+            persist_image(layer.pixels);persist_image(layer.mask);
+            for(auto& effect:layer.effects){persist_image(effect.mask);persist_image(effect.liquify);}
+            visit(layer.children);
+        }
+    };
+    visit(state.layers);persist_image(state.selection);
+    for(auto& image:state.saved_selections)persist_image(image);
+    for(auto& image:state.snapshots)persist_image(image);
+}
+void check_cancelled(const std::atomic_bool* cancelled) {
+    if (cancelled && cancelled->load(std::memory_order_relaxed))
+        throw EditError(QStringLiteral("渲染已取消"));
+}
 QImage blank(QSize size) {
-    QImage image(size, QImage::Format_RGBA32FPx4_Premultiplied);
+    auto image = allocate_image(size, QImage::Format_RGBA32FPx4_Premultiplied);
     if (image.isNull())
         throw EditError(QStringLiteral("无法分配图像内存"));
     image.fill(Qt::transparent);
@@ -22,15 +41,14 @@ QImage blank(QSize size) {
 void check_size(QSize size) {
     if (size.isEmpty() || size.width() > 65536 || size.height() > 65536 ||
         qint64(size.width()) * size.height() > max_pixels)
-        throw EditError(QStringLiteral("图片尺寸超出当前 6400 万像素预算"));
+        throw EditError(QStringLiteral("图片尺寸超出当前 5.12 亿像素预算"));
 }
 float coverage(const Layer& layer, int x, int y) {
     float value = layer.opacity;
     QPointF position(x + .5, y + .5);
     if (layer.warped && layer.mask_linked && (!layer.mask.isNull() || layer.vector_enabled)) {
-        const auto local =
-            warp_point(layer, layer.pixels.isNull() ? layer.mask.size() : layer.pixels.size(),
-                       layer.transform.inverted().map(position), true);
+        const auto local = warp_point(layer, layer_source_size(layer, layer.mask.size()),
+                                      layer.transform.inverted().map(position), true);
         if (!local)
             return 0;
         position = layer.transform.map(*local);
@@ -54,22 +72,26 @@ float encode(float value) {
 float decode(float value) {
     return value <= .04045F ? value / 12.92F : std::pow((value + .055F) / 1.055F, 2.4F);
 }
-void composite(QImage& target, const QImage& source, const Layer& layer, const QImage& clip) {
+void composite(QImage& target, const QImage& source, const Layer& layer, const QImage& clip,
+               const std::atomic_bool* cancelled) {
+    check_cancelled(cancelled);
     const bool artistic = layer.blend != Blend::normal;
     QImage destination = artistic
-                             ? target.convertedToColorSpace(QColorSpace::SRgbLinear,
-                                                            QImage::Format_RGBA32FPx4_Premultiplied)
-                             : target;
+                             ? convert_linear_rgb(target, QColorSpace::SRgbLinear, cancelled)
+                             : std::move(target);
     const QImage input = artistic
-                             ? source.convertedToColorSpace(QColorSpace::SRgbLinear,
-                                                            QImage::Format_RGBA32FPx4_Premultiplied)
+                             ? convert_linear_rgb(source, QColorSpace::SRgbLinear, cancelled)
                              : source;
-    for (int y = 0; y < target.height(); ++y) {
+    if(destination.sizeInBytes()>=mapped_image_threshold && !destination.isDetached())
+        destination=copy_image(destination);
+    for (int y = 0; y < destination.height(); ++y) {
+        if ((y & 15) == 0)
+            check_cancelled(cancelled);
         auto* dst = reinterpret_cast<float*>(destination.scanLine(y));
         const auto* src = reinterpret_cast<const float*>(input.constScanLine(y));
         const auto* base =
             clip.isNull() ? nullptr : reinterpret_cast<const float*>(clip.constScanLine(y));
-        for (int x = 0; x < target.width(); ++x) {
+        for (int x = 0; x < destination.width(); ++x) {
             const int i = x * 4;
             const float k = coverage(layer, x, y) * (base ? base[i + 3] : 1.F);
             const float alpha = src[i + 3] * k, backdrop_alpha = dst[i + 3];
@@ -92,8 +114,7 @@ void composite(QImage& target, const QImage& source, const Layer& layer, const Q
             dst[i + 3] = alpha + backdrop_alpha * (1 - alpha);
         }
     }
-    target = artistic ? destination.convertedToColorSpace(working_space(),
-                                                          QImage::Format_RGBA32FPx4_Premultiplied)
+    target = artistic ? convert_linear_rgb(destination, working_space(), cancelled)
                       : destination;
 }
 QColor working_color(QColor color) {
@@ -138,9 +159,101 @@ void paint_warp(QPainter& painter, const QImage& image, const Layer& layer) {
             painter.restore();
         }
 }
-void render_layers(QImage& target, const std::vector<Layer>& layers) {
+QImage style_image(const QImage& content, const std::vector<float>& mask, const LayerStyle& style) {
+    auto result = blank(content.size());
+    const auto color = working_color(style.color);
+    for (int y = 0; y < content.height(); ++y) {
+        auto* row = reinterpret_cast<float*>(result.scanLine(y));
+        const auto* source = reinterpret_cast<const float*>(content.constScanLine(y));
+        for (int x = 0; x < content.width(); ++x) {
+            const float alpha = mask[std::size_t(y) * content.width() + x] *
+                                float(style.opacity * color.alphaF()) * (1 - source[x * 4 + 3]);
+            row[x * 4] = alpha * float(color.redF());
+            row[x * 4 + 1] = alpha * float(color.greenF());
+            row[x * 4 + 2] = alpha * float(color.blueF());
+            row[x * 4 + 3] = alpha;
+        }
+    }
+    return result;
+}
+void style_interior(QImage& content, const std::vector<float>& mask, const LayerStyle& style) {
+    const bool artistic = style.blend != Blend::normal;
+    QImage working = artistic
+                         ? content.convertedToColorSpace(QColorSpace::SRgbLinear,
+                                                         QImage::Format_RGBA32FPx4_Premultiplied)
+                         : content;
+    QImage swatch(1, 1, QImage::Format_RGBA8888);
+    swatch.fill(style.color);
+    swatch.setColorSpace(QColorSpace::SRgb);
+    swatch =
+        swatch.convertedToColorSpace(working.colorSpace(), QImage::Format_RGBA32FPx4_Premultiplied);
+    const auto* pixel = reinterpret_cast<const float*>(swatch.constBits());
+    if (pixel[3] == 0)
+        return;
+    Color color{pixel[0] / pixel[3], pixel[1] / pixel[3], pixel[2] / pixel[3]};
+    for (int y = 0; y < working.height(); ++y) {
+        auto* row = reinterpret_cast<float*>(working.scanLine(y));
+        for (int x = 0; x < working.width(); ++x) {
+            auto* p = row + x * 4;
+            if (p[3] <= 0)
+                continue;
+            const float k =
+                std::clamp(mask[std::size_t(y) * working.width() + x] / p[3], 0.F, 1.F) *
+                float(style.opacity) * pixel[3];
+            Color term = color;
+            if (artistic) {
+                term = artistic_term(
+                    {encode(color[0]), encode(color[1]), encode(color[2])},
+                    {encode(p[0] / p[3]), encode(p[1] / p[3]), encode(p[2] / p[3])}, style.blend);
+                for (auto& value : term)
+                    value = decode(value);
+            }
+            for (int c = 0; c < 3; ++c)
+                p[c] = std::lerp(p[c], term[std::size_t(c)] * p[3], k);
+        }
+    }
+    content = artistic ? working.convertedToColorSpace(working_space(),
+                                                       QImage::Format_RGBA32FPx4_Premultiplied)
+                       : working;
+}
+void styled_composite(QImage& target, QImage content, const Layer& layer, const QImage& clip,
+                      double scale, double global_angle, const std::atomic_bool* cancelled) {
+    const auto& styles = layer.styles;
+    const auto original = content;
+    for (const int index : {1, 3, 0}) {
+        const auto& style = styles.entries[index];
+        if (!style.enabled || (index == 0 && style.position == 1))
+            continue;
+        const auto mask =
+            style_coverage(original, static_cast<StyleKind>(index), style, global_angle, scale);
+        auto effect_layer = layer;
+        effect_layer.blend = style.blend;
+        composite(target, style_image(original, mask, style), effect_layer, clip, cancelled);
+    }
+    for (const int index : {5, 2, 4, 0}) {
+        const auto& style = styles.entries[index];
+        if (!style.enabled || (index == 0 && style.position == 0))
+            continue;
+        const auto mask =
+            style_coverage(original, static_cast<StyleKind>(index), style, global_angle, scale);
+        style_interior(content, mask, style);
+    }
+    composite(target, content, layer, clip, cancelled);
+}
+void render_layers(QImage& target, const std::vector<Layer>& layers, const RenderOptions& options) {
     QImage base;
-    for (const auto& layer : layers) {
+    for (std::size_t index = 0; index < layers.size(); ++index) {
+        check_cancelled(options.cancelled);
+        const auto& layer = layers[index];
+        bool needs_base = false;
+        for (std::size_t next = index + 1; next < layers.size(); ++next) {
+            if (layers[next].clipped) {
+                needs_base = true;
+                break;
+            }
+            if (layers[next].kind != LayerKind::adjustment)
+                break;
+        }
         if (!layer.visible) {
             if (!layer.clipped)
                 base = blank(target.size());
@@ -150,8 +263,15 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
             continue;
         if (layer.kind == LayerKind::adjustment) {
             const float gain = static_cast<float>(std::exp2(layer.exposure));
-            const auto toned = apply_effects(apply_tone(target, layer.tone), layer.effects);
+            const auto toned = apply_effects(
+                apply_tone(target, layer.tone, options.cancelled, options.pixel_scale,
+                           layer.id == options.detail_layer ? options.detail_preview : 0),
+                layer.effects, options.cancelled);
+            if(target.sizeInBytes()>=mapped_image_threshold && !target.isDetached())
+                target=copy_image(target);
             for (int y = 0; y < target.height(); ++y) {
+                if ((y & 15) == 0)
+                    check_cancelled(options.cancelled);
                 auto* row = reinterpret_cast<float*>(target.scanLine(y));
                 const auto* adjusted = reinterpret_cast<const float*>(toned.constScanLine(y));
                 const auto* clip =
@@ -166,12 +286,16 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
             continue;
         }
         if (layer.kind == LayerKind::group && !layer.isolated && !layer.clipped &&
-            layer.blend == Blend::normal && !layer.warped && layer.effects.empty()) {
+            layer.blend == Blend::normal && !layer.warped && layer.effects.empty() &&
+            !layer.styles.active()) {
             const QImage before = target;
+            if(target.sizeInBytes()>=mapped_image_threshold)target=copy_image(target);
             auto children = layer.children;
             transform_children(children, layer.transform);
-            render_layers(target, children);
+            render_layers(target, children, options);
             for (int y = 0; y < target.height(); ++y) {
+                if ((y & 15) == 0)
+                    check_cancelled(options.cancelled);
                 auto* row = reinterpret_cast<float*>(target.scanLine(y));
                 const auto* old = reinterpret_cast<const float*>(before.constScanLine(y));
                 for (int x = 0; x < target.width(); ++x)
@@ -180,17 +304,19 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
                                          coverage(layer, x, y) * (row[4 * x + c] - old[4 * x + c]);
             }
             // Clipping uses the group's intrinsic alpha, never the external backdrop.
-            base = blank(target.size());
-            render_layers(base, children);
-            QImage masked = blank(target.size());
-            composite(masked, base, layer, {});
-            base = masked;
+            if (needs_base) {
+                base = blank(target.size());
+                render_layers(base, children, options);
+                QImage masked = blank(target.size());
+                composite(masked, base, layer, {}, options.cancelled);
+                base = masked;
+            }
             continue;
         }
         QImage local = blank(target.size());
         if (layer.kind == LayerKind::group || layer.kind == LayerKind::composition) {
-            render_layers(local, layer.children);
-            local = apply_effects(local, layer.effects);
+            render_layers(local, layer.children, options);
+            local = apply_effects(local, layer.effects, options.cancelled);
             if (!layer.transform.isIdentity() || layer.warped) {
                 QImage transformed = blank(target.size());
                 QPainter painter(&transformed);
@@ -199,6 +325,29 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
                 painter.end();
                 local = transformed;
             }
+        } else if (layer.kind == LayerKind::text || layer.kind == LayerKind::shape) {
+            const auto size =
+                layer.warped ? layer_source_size(layer, target.size()) : target.size();
+            check_size(size);
+            QImage design(size, QImage::Format_RGBA64_Premultiplied);
+            design.setDotsPerMeterX(3780);
+            design.setDotsPerMeterY(3780);
+            design.setColorSpace(QColorSpace::SRgb);
+            design.fill(Qt::transparent);
+            QPainter painter(&design);
+            if (!layer.warped)
+                painter.setTransform(layer.transform);
+            paint_design(painter, layer);
+            painter.end();
+            auto rendered = to_working(std::move(design));
+            if (layer.warped) {
+                QPainter warp(&local);
+                warp.setTransform(layer.transform);
+                paint_warp(warp, rendered, layer);
+                warp.end();
+            } else
+                local = std::move(rendered);
+            local = apply_effects(local, layer.effects, options.cancelled);
         } else {
             QPainter painter(&local);
             painter.setRenderHint(QPainter::SmoothPixmapTransform);
@@ -212,25 +361,33 @@ void render_layers(QImage& target, const std::vector<Layer>& layers) {
                 } else
                     painter.fillRect(local.rect(), working_color(layer.fill));
             } else
-                paint_warp(painter, apply_effects(layer.pixels, layer.effects), layer);
+                paint_warp(painter, apply_effects(layer.pixels, layer.effects, options.cancelled),
+                           layer);
             painter.end();
             if (layer.kind == LayerKind::fill)
-                local = apply_effects(local, layer.effects);
+                local = apply_effects(local, layer.effects, options.cancelled);
         }
         if (layer.exposure != 0) {
             const float gain = static_cast<float>(std::exp2(layer.exposure));
             for (int y = 0; y < local.height(); ++y) {
+                if ((y & 15) == 0)
+                    check_cancelled(options.cancelled);
                 auto* row = reinterpret_cast<float*>(local.scanLine(y));
                 for (int x = 0; x < local.width(); ++x)
                     for (int c = 0; c < 3; ++c)
                         row[4 * x + c] *= gain;
             }
         }
-        local = apply_tone(local, layer.tone);
-        composite(target, local, layer, layer.clipped ? base : QImage{});
-        if (!layer.clipped) {
+        local = apply_tone(local, layer.tone, options.cancelled, options.pixel_scale,
+                           layer.id == options.detail_layer ? options.detail_preview : 0);
+        if (layer.styles.active())
+            styled_composite(target, local, layer, layer.clipped ? base : QImage{},
+                             options.pixel_scale, options.global_light_angle, options.cancelled);
+        else
+            composite(target, local, layer, layer.clipped ? base : QImage{}, options.cancelled);
+        if (!layer.clipped && needs_base) {
             base = blank(target.size());
-            composite(base, local, layer, {});
+            composite(base, local, layer, {}, options.cancelled);
         }
     }
 }
@@ -240,6 +397,16 @@ void validate_layers(const std::vector<Layer>& layers, QSet<QUuid>& ids, int dep
     for (const auto& layer : layers) {
         validate_tone(layer.tone);
         validate_effects(layer.effects);
+        validate_styles(layer.styles);
+        if (layer.frame &&
+            (layer.kind != LayerKind::group || layer.frame->isEmpty() ||
+             !std::isfinite(layer.frame->x()) || !std::isfinite(layer.frame->y()) ||
+             !std::isfinite(layer.frame->width()) || !std::isfinite(layer.frame->height())))
+            throw EditError(QStringLiteral("相框参数无效"));
+        if (layer.kind == LayerKind::text)
+            validate_text(layer.text);
+        if (layer.kind == LayerKind::shape)
+            validate_shape(layer.shape);
         if (layer.background &&
             (depth != 0 || &layer != &layers.front() || layer.kind != LayerKind::pixels ||
              !layer.transform.isIdentity() || layer.warped || layer.opacity != 1.F ||
@@ -247,7 +414,7 @@ void validate_layers(const std::vector<Layer>& layers, QSet<QUuid>& ids, int dep
              layer.vector_enabled || !layer.children.empty()))
             throw EditError(
                 QStringLiteral("背景图层固定在底部；请先转换为普通图层再变换或添加透明度"));
-        if (int(layer.kind) < 0 || int(layer.kind) > int(LayerKind::composition) ||
+        if (int(layer.kind) < 0 || int(layer.kind) > int(LayerKind::shape) ||
             int(layer.blend) < 0 || int(layer.blend) > 23)
             throw EditError(QStringLiteral("未知图层类型或混合模式"));
         if (layer.id.isNull() || ids.contains(layer.id) || ids.size() >= 4096)
@@ -291,12 +458,45 @@ bool erase(std::vector<Layer>& layers, const QUuid& id) {
 QColorSpace working_space() {
     return {QColorSpace::Primaries::Bt2020, QColorSpace::TransferFunction::Linear};
 }
+QImage convert_linear_rgb(const QImage& source, const QColorSpace& destination,
+                          const std::atomic_bool* cancelled) {
+    if (source.colorSpace() == destination) return source;
+    const bool to_srgb = destination == QColorSpace(QColorSpace::SRgbLinear);
+    if ((source.colorSpace() != working_space() && source.colorSpace() != QColorSpace(QColorSpace::SRgbLinear)) ||
+        (destination != working_space() && !to_srgb) || source.format() != QImage::Format_RGBA32FPx4_Premultiplied)
+        return convert_image(source, destination, QImage::Format_RGBA32FPx4_Premultiplied);
+    // D65 RGB primary matrices. Both spaces are linear; premultiplication
+    // commutes with this transform, including negative and scene-HDR samples.
+    constexpr std::array<std::array<double, 3>, 3> from2020{
+        {{1.660491002108434, -.58764113878855, -.072849863319884},
+         {-.124550474521591, 1.13289989712596, -.008349422604369},
+         {-.018150763354906, -.100578898008007, 1.118729661362913}}};
+    constexpr std::array<std::array<double, 3>, 3> to2020{
+        {{.627403895934699, .329283038377883, .043313065687418},
+         {.069097289358232, .919540395075459, .011362315566309},
+         {.01639143887515, .088013307877226, .895595253247624}}};
+    const auto& matrix = to_srgb ? from2020 : to2020;
+    auto result = copy_image(source);
+    result.setColorSpace(destination);
+    for (int y = 0; y < result.height(); ++y) {
+        if (cancelled && cancelled->load())
+            throw EditError(QStringLiteral("颜色转换已取消"));
+        auto* row = reinterpret_cast<float*>(result.scanLine(y));
+        for (int x = 0; x < result.width(); ++x) {
+            auto* p = row + x * 4;
+            const std::array<double, 3> rgb{p[0], p[1], p[2]};
+            for (int c = 0; c < 3; ++c)
+                p[c] = float(matrix[c][0] * rgb[0] + matrix[c][1] * rgb[1] + matrix[c][2] * rgb[2]);
+        }
+    }
+    return result;
+}
 QImage to_working(QImage image) {
     check_size(image.size());
     if (!image.colorSpace().isValid())
         image.setColorSpace(QColorSpace::SRgb);
     auto result =
-        image.convertedToColorSpace(working_space(), QImage::Format_RGBA32FPx4_Premultiplied);
+        convert_linear_rgb(image, working_space());
     if (result.isNull())
         throw EditError(QStringLiteral("颜色转换失败"));
     return result;
@@ -310,6 +510,9 @@ QImage import_image(const QString& path) {
         reader.format().toLower() != "jpg")
         throw EditError(QStringLiteral("支持 JPEG / PNG / TIFF；RAW 请通过显影窗口打开"));
     check_size(reader.size());
+    // The decoder's default 256 MiB guard is smaller than a valid large PNG.
+    // Dimensions are checked above; decoded pixels are migrated to scratch storage.
+    QImageReader::setAllocationLimit(8192);
     auto image = reader.read();
     if (image.isNull())
         throw EditError(reader.errorString());
@@ -318,12 +521,45 @@ QImage import_image(const QString& path) {
 QImage display_image(const QImage& image, const QColorSpace& output) {
     if (!output.isValid())
         throw EditError(QStringLiteral("显示配置文件无效"));
-    return image.convertedToColorSpace(output, QImage::Format_RGBA8888);
+    // Qt 6.10's combined FP32-premultiplied/color-space conversion can retain
+    // associated RGB values in the straight-alpha result. Unassociate first so
+    // translucent pixels have the same displayed color as their opaque peers.
+    if (image.format() == QImage::Format_RGBA32FPx4_Premultiplied)
+        return convert_image(image, output, QImage::Format_RGBA8888);
+    return convert_image(image, output, QImage::Format_RGBA8888);
 }
-QImage render(const State& state) {
+QImage render(const State& state, const RenderOptions& options) {
+    check_cancelled(options.cancelled);
     validate_state(state);
+    if (!std::isfinite(state.global_light_angle) || std::abs(state.global_light_angle) > 360)
+        throw EditError(QStringLiteral("全局光角度无效"));
     auto result = blank(state.size);
-    render_layers(result, state.layers);
+    auto rendering = options;
+    rendering.global_light_angle = state.global_light_angle;
+    const auto tile_safe=[](const Layer& layer) {
+        auto tone=layer.tone;tone.exposure=0;
+        return layer.children.empty() && layer.effects.empty() && !layer.styles.active() &&
+            !layer.gradient && !layer.warped && tone==ToneSettings{} &&
+            (layer.kind==LayerKind::pixels || layer.kind==LayerKind::source ||
+             layer.kind==LayerKind::repair || layer.kind==LayerKind::adjustment);
+    };
+    if(qint64(state.size.width())*state.size.height()>8'000'000 &&
+       std::all_of(state.layers.begin(),state.layers.end(),tile_safe)) {
+        constexpr int edge=512;
+        for(int y=0;y<state.size.height();y+=edge) for(int x=0;x<state.size.width();x+=edge) {
+            check_cancelled(options.cancelled);
+            auto layers=state.layers;
+            const auto shift=QTransform::fromTranslate(-x,-y);
+            for(auto& layer:layers) {layer.transform*=shift;layer.mask_transform*=shift;}
+            auto tile=blank({std::min(edge,state.size.width()-x),std::min(edge,state.size.height()-y)});
+            render_layers(tile,layers,rendering);
+            for(int row=0;row<tile.height();++row)
+                std::memcpy(result.scanLine(y+row)+qint64(x)*16,tile.constScanLine(row),std::size_t(tile.width())*16);
+        }
+        return result;
+    }
+    render_layers(result, state.layers, rendering);
+    check_cancelled(options.cancelled);
     return result;
 }
 State preview_state(const State& state, int maximum_edge) {
@@ -347,10 +583,16 @@ State preview_state(const State& state, int maximum_edge) {
             resize(layer.pixels);
             resize(layer.mask);
             layer.vector_mask = shrink.map(layer.vector_mask);
-            layer.transform = grow * layer.transform * shrink;
+            if (layer.frame)
+                layer.frame = shrink.mapRect(*layer.frame);
+            layer.transform = (layer.kind == LayerKind::text || layer.kind == LayerKind::shape)
+                                  ? layer.transform * shrink
+                                  : grow * layer.transform * shrink;
             layer.mask_transform = grow * layer.mask_transform * shrink;
-            for (auto& effect : layer.effects)
+            for (auto& effect : layer.effects) {
                 resize(effect.mask);
+                effect.blur_radius *= scale;
+            }
             visit(layer.children);
         }
     };
@@ -382,7 +624,14 @@ const Layer* find_layer(const std::vector<Layer>& layers, const QUuid& id) {
 }
 void validate_state(const State& state) {
     check_size(state.size);
-    if (state.name.trimmed().isEmpty() || !std::isfinite(state.ppi) || state.ppi <= 0)
+    qint64 metadata_bytes=QJsonDocument(state.metadata).toJson(QJsonDocument::Compact).size();
+    std::function<void(const std::vector<Layer>&)> count_metadata=[&](const auto& layers){
+        for(const auto& layer:layers){metadata_bytes+=QJsonDocument(layer.source_metadata).toJson(QJsonDocument::Compact).size();count_metadata(layer.children);}
+    };
+    count_metadata(state.layers);
+    if(metadata_bytes>32*1024*1024)throw EditError(QStringLiteral("工程元数据超过 32 MiB"));
+    if (state.name.trimmed().isEmpty() || !std::isfinite(state.ppi) || state.ppi <= 0 ||
+        !std::isfinite(state.global_light_angle) || std::abs(state.global_light_angle) > 360)
         throw EditError(QStringLiteral("无效文档参数"));
     if (!state.selection.isNull() && (state.selection.size() != state.size ||
                                       state.selection.format() != QImage::Format_Grayscale8))
@@ -530,18 +779,31 @@ void export_image(const State& state, const QString& path, QColor matte, int qua
 }
 Project::Project(State state) : state_(std::move(state)) {
     validate_state(state_);
+    persist_state(state_);
     history_.push_back({state_, QStringLiteral("初始状态"), revision_});
 }
 void Project::edit(const QString& name, const std::function<void(State&)>& operation) {
     State draft = state_;
     operation(draft);
     validate_state(draft);
+    persist_state(draft);
     const quint64 next = next_revision_++;
     history_.resize(position_ + 1);
     history_.push_back({draft, name, next});
     state_ = std::move(draft);
     revision_ = next;
     ++position_;
+    set_history_limit(history_limit_);
+}
+void Project::set_history_limit(std::size_t count) {
+    history_limit_ = std::clamp(count, std::size_t(2), std::size_t(1000));
+    if (history_.size() <= history_limit_)
+        return;
+    const auto first = position_ >= history_limit_ ? position_ - history_limit_ + 1 : 0;
+    const auto last = std::min(history_.size(), first + history_limit_);
+    history_.erase(history_.begin() + last, history_.end());
+    history_.erase(history_.begin(), history_.begin() + first);
+    position_ -= first;
 }
 bool Project::undo() {
     if (!can_undo())
@@ -596,6 +858,14 @@ QTransform parent_matrix(const State& state, const QUuid& id) {
     visit(state.layers, {});
     return result;
 }
+QSize layer_source_size(const Layer& layer, QSize fallback) {
+    if (layer.kind == LayerKind::text || layer.kind == LayerKind::shape) {
+        const auto bounds = design_bounds(layer);
+        return QSize(std::max(1, int(std::ceil(bounds.right()))),
+                     std::max(1, int(std::ceil(bounds.bottom()))));
+    }
+    return layer.pixels.isNull() ? fallback : layer.pixels.size();
+}
 QRectF layer_bounds(const State& state, const QUuid& id) {
     const auto* layer = find_layer(state.layers, id);
     if (!layer)
@@ -606,8 +876,10 @@ QRectF layer_bounds(const State& state, const QUuid& id) {
             bounds = bounds.united(layer_bounds(state, child.id));
         return bounds;
     }
-    const QRectF rect = layer->pixels.isNull() ? QRectF(QPointF(), QSizeF(state.size))
-                                               : QRectF(layer->pixels.rect());
+    const QRectF rect = layer->kind == LayerKind::text || layer->kind == LayerKind::shape
+                            ? design_bounds(*layer)
+                        : layer->pixels.isNull() ? QRectF(QPointF(), QSizeF(state.size))
+                                                 : QRectF(layer->pixels.rect());
     return (layer->transform * parent_matrix(state, id)).mapRect(rect);
 }
 std::vector<QUuid> root_targets(const State& state, const std::vector<QUuid>& ids) {
@@ -679,7 +951,7 @@ QUuid hit_layer(const State& state, QPointF point, double tolerance) {
         if (!layer.visible || layer.kind == LayerKind::adjustment)
             return 0;
         const auto world = layer.transform * parent;
-        const auto size = layer.pixels.isNull() ? state.size : layer.pixels.size();
+        const auto size = layer_source_size(layer, state.size);
         const auto local = warp_point(layer, size, world.inverted().map(p), true);
         if (!local)
             return 0;
@@ -706,6 +978,15 @@ QUuid hit_layer(const State& state, QPointF point, double tolerance) {
             return QRectF(QPointF(), QSizeF(state.size)).contains(*local)
                        ? alpha * float(layer.fill.alphaF())
                        : 0;
+        if (layer.kind == LayerKind::text || layer.kind == LayerKind::shape) {
+            QImage probe(1, 1, QImage::Format_ARGB32_Premultiplied);
+            probe.fill(Qt::transparent);
+            QPainter painter(&probe);
+            painter.translate(-std::floor(local->x()), -std::floor(local->y()));
+            paint_design(painter, layer);
+            painter.end();
+            return alpha * float(qAlpha(probe.pixel(0, 0))) / 255.F;
+        }
         const QPoint pixel(int(std::floor(local->x())), int(std::floor(local->y())));
         return layer.pixels.rect().contains(pixel)
                    ? alpha * reinterpret_cast<const float*>(

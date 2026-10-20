@@ -1,5 +1,6 @@
 #pragma once
 #include "huelith/editing/project.h"
+#include "huelith/editing/metadata.h"
 #include <atomic>
 #include <condition_variable>
 #include <memory>
@@ -10,6 +11,7 @@ namespace huelith::editing {
 enum class ExportStatus { queued, rendering, writing, complete, failed, cancelled, skipped };
 enum class ExportConflict { number, skip, overwrite };
 struct ExportOptions {
+    MetadataPolicy metadata;
     QString path;
     QSize size; // Empty = original dimensions.
     QByteArray format{"png"};
@@ -29,6 +31,8 @@ struct ExportItem {
     ExportStatus status{ExportStatus::queued};
     QString error;
 };
+[[nodiscard]] QImage prepare_export_image(const QImage& source, const ExportOptions& options,
+                                          double ppi);
 // One worker owns rendering/writing; GUI only exchanges value snapshots under the mutex.
 class ExportQueue final {
   public:

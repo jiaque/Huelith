@@ -68,6 +68,6 @@ CanvasSpec NewDocumentDialog::specification() const {
 void NewDocumentDialog::update_validation() {
     const bool valid = !validate(specification());
     create_->setEnabled(valid);
-    error_->setText(valid ? QString{} : tr("请输入名称；当前单张图片上限为 6400 万像素。"));
+    error_->setText(valid ? QString{} : tr("请输入名称；当前单张图片上限为 5.12 亿像素。"));
 }
 } // namespace huelith::desktop

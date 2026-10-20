@@ -1,3 +1,4 @@
+#include "huelith/editing/image_storage.h"
 #include "huelith/editing/export_queue.h"
 #include "huelith/editing/tiff_io.h"
 #include <QDir>
@@ -8,6 +9,7 @@
 #include <QSaveFile>
 #include <QTemporaryDir>
 #include <algorithm>
+#include <cmath>
 
 namespace huelith::editing {
 struct ExportQueue::Job {
@@ -17,6 +19,23 @@ struct ExportQueue::Job {
     std::atomic_bool cancelled{};
 };
 namespace {
+class ExportFile final : public QFile {
+  public:
+    ExportFile(const QString& path, const std::atomic_bool& cancelled)
+        : QFile(path), cancelled_(cancelled) {}
+
+  protected:
+    qint64 writeData(const char* data, qint64 length) override {
+        if (cancelled_.load(std::memory_order_relaxed)) {
+            setErrorString(QStringLiteral("任务已取消"));
+            return -1;
+        }
+        return QFile::writeData(data, length);
+    }
+
+  private:
+    const std::atomic_bool& cancelled_;
+};
 bool terminal(ExportStatus state) {
     return state == ExportStatus::complete || state == ExportStatus::failed ||
            state == ExportStatus::cancelled || state == ExportStatus::skipped;
@@ -40,6 +59,36 @@ void collect_sources(const std::vector<Layer>& layers, QStringList& paths) {
     }
 }
 } // namespace
+QImage prepare_export_image(const QImage& source, const ExportOptions& options, double ppi) {
+    const auto size = options.size.isEmpty() ? source.size() : options.size;
+    if (source.isNull() || !source.colorSpace().isValid() || !options.space.isValid() ||
+        size.isEmpty() || qint64(size.width()) * size.height() > huelith::editing::maximum_image_pixels ||
+        (options.bits != 8 && options.bits != 16) || !std::isfinite(ppi) || ppi <= 0 ||
+        ppi > 100000 || !options.matte.isValid() || options.matte.alpha() != 255)
+        throw EditError(QStringLiteral("输出图像、色彩空间、位深或分辨率无效"));
+    auto image =
+        convert_image(source.size() == size ? source : source.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
+                          options.space, options.bits == 16 ? QImage::Format_RGBA64 : QImage::Format_RGBA8888);
+    if (image.isNull())
+        throw EditError(QStringLiteral("输出色彩转换或像素分配失败"));
+    image.setColorSpace(options.space);
+    if (!options.alpha || options.format == "jpg") {
+        auto filled = allocate_image(image.size(), image.format());
+        filled.setColorSpace(options.space);
+        QImage swatch(1, 1, QImage::Format_RGBA8888);
+        swatch.setColorSpace(QColorSpace::SRgb);
+        swatch.fill(options.matte);
+        filled.fill(swatch.convertedToColorSpace(options.space).pixelColor(0, 0));
+        QPainter painter(&filled);
+        painter.drawImage(0, 0, image);
+        painter.end();
+        image = filled;
+    }
+    const int dpm = qRound(ppi / .0254);
+    image.setDotsPerMeterX(dpm);
+    image.setDotsPerMeterY(dpm);
+    return image;
+}
 ExportQueue::ExportQueue() : worker_([this] { run(); }) {}
 ExportQueue::~ExportQueue() {
     {
@@ -58,12 +107,13 @@ quint64 ExportQueue::add(Snapshot snapshot, ExportOptions options) {
     if (options.size.isEmpty())
         throw EditError(QStringLiteral("导出尺寸无效"));
     if (options.path.isEmpty() ||
-        qint64(options.size.width()) * options.size.height() > 64'000'000 ||
+        qint64(options.size.width()) * options.size.height() > huelith::editing::maximum_image_pixels ||
         options.size.width() > 65536 || options.size.height() > 65536 ||
         (options.format != "png" && options.format != "jpg" && options.format != "tif") ||
         (options.bits != 8 && options.bits != 16) ||
         (options.format == "jpg" && options.bits != 8) || !options.space.isValid() ||
-        options.quality < 1 || options.quality > 100)
+        options.quality < 1 || options.quality > 100 || !options.matte.isValid() ||
+        options.matte.alpha() != 255 || int(options.conflict) < 0 || int(options.conflict) > 2)
         throw EditError(QStringLiteral("导出路径、尺寸、格式或位深无效"));
     collect_sources(snapshot.state.layers, options.protected_paths);
     auto job = std::make_shared<Job>();
@@ -190,30 +240,12 @@ void ExportQueue::process(const std::shared_ptr<Job>& job) {
         const std::lock_guard guard(mutex_);
         job->item.path = target;
     }
-    auto image = render(job->snapshot.state);
+    RenderOptions render_options;
+    render_options.cancelled = &job->cancelled;
+    auto image = render(job->snapshot.state, render_options);
     check_cancel();
     // Resample in scene-linear float before encoding the requested output profile/bit depth.
-    image = image.scaled(options.size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
-                .convertedToColorSpace(options.space, options.bits == 16 ? QImage::Format_RGBA64
-                                                                         : QImage::Format_RGBA8888);
-    if (image.isNull())
-        throw EditError(QStringLiteral("输出色彩转换或像素分配失败"));
-    image.setColorSpace(options.space);
-    if (!options.alpha || options.format == "jpg") {
-        QImage filled(image.size(), image.format());
-        filled.setColorSpace(options.space);
-        QImage swatch(1, 1, QImage::Format_RGBA8888);
-        swatch.setColorSpace(QColorSpace::SRgb);
-        swatch.fill(options.matte);
-        filled.fill(swatch.convertedToColorSpace(options.space).pixelColor(0, 0));
-        QPainter painter(&filled);
-        painter.drawImage(0, 0, image);
-        painter.end();
-        image = filled;
-    }
-    const int dpm = qRound(job->snapshot.state.ppi / .0254);
-    image.setDotsPerMeterX(dpm);
-    image.setDotsPerMeterY(dpm);
+    image = prepare_export_image(image, options, job->snapshot.state.ppi);
     check_cancel();
     status(job, ExportStatus::writing);
     QTemporaryDir temporary(original.dir().filePath(".huelith-export-XXXXXX"));
@@ -223,11 +255,20 @@ void ExportQueue::process(const std::shared_ptr<Job>& job) {
     if (options.format == "tif")
         write_tiff(image, staged, options.bits, job->cancelled, job->snapshot.state.ppi);
     else {
-        QImageWriter writer(staged, options.format);
+        ExportFile output(staged, job->cancelled);
+        if (!output.open(QIODevice::WriteOnly | QIODevice::Unbuffered))
+            throw EditError(output.errorString());
+        QImageWriter writer(&output, options.format);
         writer.setQuality(options.quality);
         if (!writer.write(image))
             throw EditError(writer.errorString());
+        if (!output.flush())
+            throw EditError(output.errorString());
+        output.close();
     }
+    check_cancel();
+    write_photo_metadata(staged,job->snapshot.state.metadata,options.metadata,image.size(),
+                         options.space==QColorSpace(QColorSpace::SRgb),&job->cancelled);
     check_cancel();
     if (options.conflict == ExportConflict::overwrite) {
         // QSaveFile commits atomically; it never removes the existing file first.

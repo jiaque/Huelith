@@ -1,6 +1,10 @@
+#include <QSvgRenderer>
 #include "editor_controller.h"
+#include "huelith/editing/metadata.h"
+#include "canvas_preferences.h"
 #include "canvas_view.h"
 #include "export_dialog.h"
+#include "huelith/editing/layout_template.h"
 #include "main_window.h"
 #include "raw_dialog.h"
 #include <QActionGroup>
@@ -37,6 +41,7 @@
 #include <QPainter>
 #include <QPointer>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -57,6 +62,7 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <tuple>
 
 namespace huelith::desktop {
 using namespace editing;
@@ -65,6 +71,15 @@ struct EditorController::SaveJob {
     QString path;
     quint64 revision;
     std::future<void> result;
+};
+struct EditorController::RecoveryJob {
+    struct Entry {
+        QPointer<CanvasView> canvas;
+        QString path;
+        quint64 revision{};
+    };
+    std::vector<Entry> entries;
+    std::future<QStringList> result;
 };
 EditorController::~EditorController() = default;
 
@@ -78,10 +93,10 @@ Layer& editable(CanvasView* canvas, State& state) {
     return *layer;
 }
 QString kind_name(LayerKind kind) {
-    const QStringList names{QStringLiteral("像素"),     QStringLiteral("源图片"),
-                            QStringLiteral("绘画修复"), QStringLiteral("调整"),
-                            QStringLiteral("填充"),     QStringLiteral("组"),
-                            QStringLiteral("嵌套合成")};
+    const QStringList names{
+        QStringLiteral("像素"),     QStringLiteral("源图片"), QStringLiteral("绘画修复"),
+        QStringLiteral("调整"),     QStringLiteral("填充"),   QStringLiteral("组"),
+        QStringLiteral("嵌套合成"), QStringLiteral("文字"),   QStringLiteral("形状")};
     return names.at(int(kind));
 }
 class LayerTree final : public QTreeWidget {
@@ -117,7 +132,9 @@ class LayerDelegate final : public QStyledItemDelegate {
         const auto box = option.rect;
         const int middle = box.center().y();
         if (index.column() == 0) {
-            painter->setPen(QPen(QColor("#cdd1d6"), 1.3));
+            const QRect cell(box.left(),box.top(),22,box.height());
+            painter->fillRect(cell,QColor("#202529"));painter->setPen(QColor("#454d54"));painter->drawRect(cell.adjusted(0,1,-1,-2));
+            painter->setPen(QPen(QColor("#e4e8ec"), 1.5));
             painter->setBrush(Qt::NoBrush);
             if (layer->visible) {
                 painter->drawEllipse(QRectF(box.left() + 3, middle - 4, 14, 8));
@@ -126,6 +143,11 @@ class LayerDelegate final : public QStyledItemDelegate {
             }
             const QRect thumb(box.left() + 24, middle - 13, 34, 26);
             painter->fillRect(thumb, QColor("#555b60"));
+            if (layer->kind == LayerKind::text || layer->kind == LayerKind::shape) {
+                painter->setPen(Qt::white);
+                painter->drawText(thumb, Qt::AlignCenter,
+                                  layer->kind == LayerKind::text ? "T" : "◇");
+            }
             if (!layer->pixels.isNull())
                 painter->drawImage(thumb,
                                    display_image(layer->pixels.scaled(34, 26, Qt::KeepAspectRatio,
@@ -218,6 +240,12 @@ EditorController::EditorController(MainWindow* window) : QObject(window), window
                 const auto* layer = canvas() ? find_layer(canvas()->project().state().layers,
                                                           item->data(0, Qt::UserRole).toUuid())
                                              : nullptr;
+                if (layer && point.x() < bounds.left() + 62 && layer->kind == LayerKind::text) {
+                    canvas()->active_layer = layer->id;
+                    canvas()->set_tool(CanvasTool::text);
+                    canvas()->begin_text({}, false, true);
+                    return;
+                }
                 if (layer && point.x() < bounds.left() + 62 &&
                     (layer->kind == LayerKind::source || layer->kind == LayerKind::composition)) {
                     for (auto* action : window_->findChildren<QAction*>())
@@ -259,19 +287,16 @@ EditorController::EditorController(MainWindow* window) : QObject(window), window
     tabs->addTab(history_, tr("历史"));
     layout->addWidget(tabs);
     auto* buttons = new QToolBar(panel);
-    for (const auto& operation :
-         {QStringLiteral("新建"), QStringLiteral("组"), QStringLiteral("蒙版"),
-          QStringLiteral("调整"), QStringLiteral("删除")}) {
-        const QString symbol = operation == tr("新建")   ? QStringLiteral("＋")
-                               : operation == tr("组")   ? QStringLiteral("▱")
-                               : operation == tr("蒙版") ? QStringLiteral("▣")
-                               : operation == tr("调整") ? QStringLiteral("◐")
-                                                         : QStringLiteral("⌫");
-        auto* action = buttons->addAction(symbol);
-        action->setToolTip(operation);
-        connect(action, &QAction::triggered, this,
-                [this, operation] { guarded([&] { layer_action(operation); }); });
-    }
+    buttons->setIconSize(QSize(20,20));buttons->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    const auto icon=[](const QByteArray& paths){QPixmap pix(40,40);pix.fill(Qt::transparent);QPainter p(&pix);QSvgRenderer svg(QByteArray("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='none' stroke='#d6dce2' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'>")+paths+"</g></svg>");svg.render(&p);p.end();pix.setDevicePixelRatio(2);return QIcon(pix);};
+    auto* style_action=buttons->addAction("fx");style_action->setToolTip(tr("图层样式"));connect(style_action,&QAction::triggered,this,[this]{show_layer_styles();});
+    const std::vector<std::pair<QString,QByteArray>> entries{
+        {tr("蒙版"),"<rect x='3' y='5' width='18' height='14' rx='1'/><circle cx='12' cy='12' r='4'/>"},
+        {tr("调整"),"<circle cx='12' cy='12' r='8'/><path d='M12 4A8 8 0 0 0 12 20Z' fill='#d6dce2'/>"},
+        {tr("组"),"<path d='M3 7V5h6l2 3h10v12H3Z'/>"},
+        {tr("新建"),"<rect x='4' y='4' width='16' height='16' rx='1'/><path d='M8 12h8m-4-4v8'/>"},
+        {tr("删除"),"<path d='M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7'/>"}};
+    for(const auto& [operation,paths]:entries){auto* action=buttons->addAction(icon(paths),operation);action->setObjectName("layerFooter_"+operation);action->setToolTip(operation);connect(action,&QAction::triggered,this,[this,operation]{guarded([&]{layer_action(operation);});});}
     layout->addWidget(buttons);
     dock->setWidget(panel);
     connect(layers_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int column) {
@@ -336,13 +361,18 @@ EditorController::EditorController(MainWindow* window) : QObject(window), window
             if (window_->isVisible())
                 guarded([&] { offer_recovery(); });
         });
-    auto* timer = new QTimer(this);
-    timer->setInterval(60000);
-    connect(timer, &QTimer::timeout, this, [this] { autosave(); });
-    timer->start();
+    recovery_timer_ = new QTimer(this);
+    recovery_timer_->setObjectName("autoRecoveryTimer");
+    connect(recovery_timer_, &QTimer::timeout, this, [this] { autosave(); });
+    apply_file_preferences();
     auto* save_timer = new QTimer(this);
     save_timer->setInterval(50);
-    connect(save_timer, &QTimer::timeout, this, [this] { guarded([&] { finish_save(false); }); });
+    connect(save_timer, &QTimer::timeout, this, [this] {
+        guarded([&] {
+            finish_save(false);
+            finish_recovery(false);
+        });
+    });
     save_timer->start();
 }
 CanvasView* EditorController::canvas() const {
@@ -429,9 +459,12 @@ void EditorController::refresh(bool rebuild_tree) {
             isolated_->setVisible(layer->kind == LayerKind::group ||
                                   layer->kind == LayerKind::composition);
         }
-        const int index = window_->documents_->indexOf(c);
-        if (index >= 0)
-            window_->documents_->setTabText(index, s.name + (c->project().dirty() ? " *" : ""));
+        const int index = window_->canvas_index(c);
+        if (index >= 0) {
+            const auto title=s.name + (c->project().dirty() ? " *" : "");
+            window_->documents_->setTabText(index,title);
+            if(c->window()!=window_)c->window()->setWindowTitle(title);
+        }
     }
     refreshing_ = false;
     refresh_tools();
@@ -441,6 +474,11 @@ void EditorController::build_properties() {
     auto* panel = new QWidget(dock);
     auto* layout = new QVBoxLayout(panel);
     layout->addWidget(window_->properties_);
+    auto* font_warning = new QLabel(panel);
+    font_warning->setObjectName("missingFontWarning");
+    font_warning->setWordWrap(true);
+    font_warning->setStyleSheet("color:#efbc70;");
+    layout->addWidget(font_warning);
     auto* form = new QFormLayout();
     auto* layer_form = new QFormLayout(layer_controls_);
     layer_form->setContentsMargins(4, 4, 4, 4);
@@ -570,9 +608,12 @@ void EditorController::build_properties() {
 void EditorController::update_recent(const QString& path) {
     QSettings settings;
     auto list = settings.value("recentProjects").toStringList();
-    list.removeAll(path);
-    list.prepend(path);
-    while (list.size() > 12)
+    if (!path.isEmpty()) {
+        list.removeAll(path);
+        list.prepend(path);
+    }
+    const int limit = read_canvas_preferences().recent_files;
+    while (list.size() > limit)
         list.removeLast();
     settings.setValue("recentProjects", list);
     recent_->clear();
@@ -582,6 +623,7 @@ void EditorController::update_recent(const QString& path) {
     }
 }
 bool EditorController::open(const QString& path, bool place) {
+    const QPointer<CanvasView> placement_target(canvas());
     if (path.isEmpty())
         return false;
     if (QFileInfo(path).suffix().compare("huelith", Qt::CaseInsensitive) == 0) {
@@ -610,12 +652,12 @@ bool EditorController::open(const QString& path, bool place) {
         layer.name = QFileInfo(path).completeBaseName();
         layer.kind = LayerKind::source;
         layer.linked_path = QFileInfo(path).absoluteFilePath();
+        layer.source_metadata = read_photo_metadata(path);
         QFile file(path);
         if (file.open(QIODevice::ReadOnly))
             layer.linked_hash =
                 QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256);
-        const auto suffix = QFileInfo(path).suffix().toLower();
-        if (QStringList{"cr3", "cr2", "nef", "arw", "dng", "raf", "rw2", "orf"}.contains(suffix)) {
+        if (is_raw_file(path)) {
             if (!file.isOpen() || file.size() > 512LL * 1024 * 1024 || !file.seek(0))
                 throw EditError(tr("无法读取 RAW 源文件"));
             layer.raw_source = file.readAll();
@@ -626,10 +668,10 @@ bool EditorController::open(const QString& path, bool place) {
         } else {
             layer.pixels = import_image(path);
         }
-        if (place && canvas()) {
-            layer.transform.translate((canvas()->spec().width - layer.pixels.width()) / 2.,
-                                      (canvas()->spec().height - layer.pixels.height()) / 2.);
-            canvas()->stage_layer(layer);
+        if (place && placement_target) {
+            layer.transform.translate((placement_target->spec().width - layer.pixels.width()) / 2.,
+                                      (placement_target->spec().height - layer.pixels.height()) / 2.);
+            placement_target->stage_layer(layer);
         } else {
             CanvasSpec spec;
             spec.name = layer.name.toStdString();
@@ -639,6 +681,7 @@ bool EditorController::open(const QString& path, bool place) {
                 return false;
             canvas()->edit(tr("打开图片"), [&](State& s) {
                 s.layers = {layer};
+                s.metadata = layer.source_metadata;
                 s.snapshots.insert(tr("导入状态"), render(s));
             });
             canvas()->active_layer = layer.id;
@@ -656,8 +699,7 @@ void EditorController::open_files(const QStringList& paths) {
     QStringList ordinary;
     qint64 source_bytes{};
     for (const auto& path : paths) {
-        const auto suffix = QFileInfo(path).suffix().toLower();
-        if (!QStringList{"cr3", "cr2", "nef", "arw", "dng", "raf", "rw2", "orf"}.contains(suffix)) {
+        if (!is_raw_file(path)) {
             ordinary.append(path);
             continue;
         }
@@ -671,6 +713,7 @@ void EditorController::open_files(const QStringList& paths) {
         layer.name = QFileInfo(path).completeBaseName();
         layer.linked_path = QFileInfo(path).absoluteFilePath();
         layer.raw_source = file.readAll();
+        layer.source_metadata = read_photo_metadata(path);
         if (layer.raw_source.size() != file.size())
             throw EditError(tr("RAW 源文件读取不完整"));
         layer.linked_hash = QCryptographicHash::hash(layer.raw_source, QCryptographicHash::Sha256);
@@ -688,6 +731,7 @@ void EditorController::open_files(const QStringList& paths) {
                     throw EditError(tr("无法创建 RAW 图片文档"));
                 canvas()->edit(tr("打开 RAW 图片"), [&](State& state) {
                     state.layers = {layer};
+                    state.metadata = layer.source_metadata;
                     state.snapshots.insert(tr("导入状态"), render(state));
                 });
                 canvas()->active_layer = layer.id;
@@ -702,6 +746,8 @@ void EditorController::open_files(const QStringList& paths) {
         open(path);
 }
 bool EditorController::save(CanvasView* c, bool save_as, bool asynchronous) {
+    if (c)
+        c->finish_text(true);
     if (save_job_) {
         if (asynchronous)
             throw EditError(tr("已有工程正在保存，请稍候"));
@@ -751,6 +797,9 @@ void EditorController::finish_save(bool wait) {
     window_->statusBar()->showMessage(tr("工程快照已保存"), 3000);
 }
 bool EditorController::confirm_close(CanvasView* c) {
+    if (c)
+        c->finish_text(true);
+    finish_recovery(true);
     if (save_job_) {
         bool finished = true;
         guarded([&] {
@@ -784,18 +833,69 @@ bool EditorController::confirm_close(CanvasView* c) {
     return answer == QMessageBox::Discard;
 }
 void EditorController::autosave() {
+    if (recovery_job_ || !read_canvas_preferences().auto_recovery)
+        return;
+    auto job = std::make_unique<RecoveryJob>();
+    std::vector<std::pair<Snapshot, QString>> snapshots;
     for (int i = 0; i < window_->documents_->count(); ++i) {
-        auto* c = dynamic_cast<CanvasView*>(window_->documents_->widget(i));
+        auto* c = window_->canvas_at(i);
         if (!c || !c->project().dirty())
             continue;
-        try {
-            QDir().mkpath(QFileInfo(c->recovery_file).absolutePath());
-            save_project(c->project().snapshot(), c->recovery_file);
-        } catch (const std::exception& e) {
-            window_->statusBar()->showMessage(
-                tr("自动恢复写入失败：%1").arg(QString::fromUtf8(e.what())));
+        if (c->property("recoveredRevision").toULongLong() == c->project().revision() &&
+            QFileInfo::exists(c->recovery_file))
+            continue;
+        const auto snapshot = c->project().snapshot();
+        job->entries.push_back({c, c->recovery_file, snapshot.revision});
+        snapshots.emplace_back(snapshot, c->recovery_file);
+    }
+    if (snapshots.empty())
+        return;
+    job->result = std::async(std::launch::async, [snapshots = std::move(snapshots)] {
+        QStringList errors;
+        for (const auto& [snapshot, path] : snapshots) {
+            try {
+                if (!QDir().mkpath(QFileInfo(path).absolutePath()))
+                    throw EditError(QStringLiteral("无法创建恢复目录"));
+                save_project(snapshot, path);
+                errors.append(QString{});
+            } catch (const std::exception& error) {
+                errors.append(QString::fromUtf8(error.what()));
+            }
+        }
+        return errors;
+    });
+    recovery_job_ = std::move(job);
+    window_->setProperty("recoveryBusy", true);
+}
+void EditorController::finish_recovery(bool wait) {
+    if (!recovery_job_ || (!wait && recovery_job_->result.wait_for(std::chrono::seconds(0)) !=
+                                        std::future_status::ready))
+        return;
+    auto job = std::move(recovery_job_);
+    const auto errors = job->result.get();
+    window_->setProperty("recoveryBusy", false);
+    for (std::size_t i = 0; i < job->entries.size(); ++i) {
+        const auto& entry = job->entries[i];
+        if (!errors[qsizetype(i)].isEmpty()) {
+            window_->statusBar()->showMessage(tr("自动恢复写入失败：%1").arg(errors[qsizetype(i)]));
+        } else if (!entry.canvas || !entry.canvas->project().dirty()) {
+            QFile::remove(entry.path);
+        } else {
+            entry.canvas->setProperty("recoveredRevision", QVariant::fromValue(entry.revision));
         }
     }
+}
+void EditorController::apply_file_preferences() {
+    const auto preferences = read_canvas_preferences();
+    if (recovery_timer_) {
+        recovery_timer_->setInterval(preferences.recovery_minutes * 60000);
+        if (preferences.auto_recovery)
+            recovery_timer_->start();
+        else
+            recovery_timer_->stop();
+    }
+    if (recent_)
+        update_recent({});
 }
 void EditorController::create_layer(int kind) {
     auto* c = canvas();
@@ -990,8 +1090,8 @@ void EditorController::configure_menus() {
     add(file, tr("打开…"), "Ctrl+O", [this] {
         const auto paths = QFileDialog::getOpenFileNames(
             window_, tr("打开图片或工程"), {},
-            tr("图片 / RAW / 工程 (*.png *.jpg *.jpeg *.tif *.tiff *.cr3 *.cr2 *.nef *.arw *.dng "
-               "*.raf *.rw2 *.orf *.huelith)"));
+            tr("图片 / RAW / 工程 (*.png *.jpg *.jpeg *.tif *.tiff *.cr3 *.cr2 *.crw *.nef *.nrw *.arw *.sr2 *.srf *.dng "
+               "*.raf *.rw2 *.orf *.pef *.raw *.rwl *.srw *.3fr *.fff *.iiq *.huelith);;所有文件 (*)"));
         open_files(paths);
     });
     add(file, tr("置入…"), {}, [this] {
@@ -1007,13 +1107,14 @@ void EditorController::configure_menus() {
             export_queue_ = new ExportDialog(window_);
         QList<CanvasView*> sources;
         for (int i = 0; i < window_->documents_->count(); ++i)
-            if (auto* source = dynamic_cast<CanvasView*>(window_->documents_->widget(i)))
+            if (auto* source = window_->canvas_at(i))
                 sources.append(source);
         export_queue_->set_sources(sources);
         export_queue_->show();
         export_queue_->raise();
     });
     recent_ = file->addMenu(tr("最近打开"));
+    recent_->setObjectName("recentFilesMenu");
     const auto recent = QSettings().value("recentProjects").toStringList();
     for (const auto& item : recent)
         add(recent_, item, {}, [this, item] { open(item); });
@@ -1050,6 +1151,7 @@ void EditorController::configure_menus() {
     auto* layers = window_->menus_->addMenu(tr("图层(&L)"));
     auto* create = layers->addMenu(tr("新建"));
     add(layers, tr("智能效果…"), {}, [this] { show_effects(); });
+    add(layers, tr("图层样式…"), {}, [this] { show_layer_styles(); });
     for (int kind = 0; kind <= int(LayerKind::composition); ++kind)
         add(create, kind_name(static_cast<LayerKind>(kind)), {},
             [this, kind] { create_layer(kind); });
@@ -1123,6 +1225,12 @@ void EditorController::configure_menus() {
         });
     });
     auto* selection = window_->menus_->addMenu(tr("选择(&S)"));
+    add(selection, tr("选择并遮住…"), "Ctrl+Alt+R", [this] { show_selection_refine(); });
+    for (const auto& [name, target] :
+         {std::pair{tr("主体"), 4}, {tr("背景"), 5}, {tr("对象…"), 6},
+          {tr("天空"), 0}, {tr("草地"), 1}, {tr("植被"), 2}, {tr("人物…"), 3}})
+        add(selection, name, {}, [this, target] { semantic_selection(target); });
+    selection->addSeparator();
     for (const auto& text :
          {tr("全选"), tr("取消选区"), tr("反选"), tr("羽化"), tr("扩张"), tr("收缩"), tr("平滑"),
           tr("保存选区"), tr("载入选区"), tr("保存路径"), tr("路径转选区"), tr("亮度范围"),
@@ -1171,6 +1279,47 @@ void EditorController::configure_menus() {
                            });
         action->setCheckable(true);
         action->setChecked(text != tr("网格"));
+    }
+    auto* snap_menu = view->addMenu(tr("吸附到"));
+    snap_menu->setObjectName("snapToMenu");
+    for (const auto& [label, key] : {std::pair{tr("参考线"), "guides"},
+                                     {tr("网格"), "grid"}, {tr("图层"), "layers"},
+                                     {tr("文档边界"), "document"}}) {
+        auto* action = snap_menu->addAction(label);
+        action->setObjectName(QString("snapTo_%1").arg(key));
+        action->setProperty("shortcutKey", action->objectName());
+        action->setProperty("shortcutLabel", tr("视图 / 吸附到 / %1").arg(label));
+        action->setCheckable(true);
+        const QString setting = QString("snapping/%1").arg(key);
+        connect(snap_menu, &QMenu::aboutToShow, action, [action, setting] {
+            action->setChecked(QSettings().value(setting, true).toBool());
+        });
+        connect(action, &QAction::triggered, this, [this, setting, action](bool) {
+            QSettings settings;
+            bool enabled = !settings.value(setting, true).toBool();
+            if (auto* c = canvas(); c && !c->snap) {
+                for (const auto* name : {"guides", "grid", "layers", "document"})
+                    settings.setValue(QString("snapping/%1").arg(name), false);
+                c->snap = true;
+                enabled = true;
+            }
+            settings.setValue(setting, enabled);
+            action->setChecked(enabled);
+            settings.sync();
+        });
+    }
+    snap_menu->addSeparator();
+    for (const auto& [label, enabled] : {std::pair{tr("全部"), true}, {tr("无"), false}}) {
+        auto* action = snap_menu->addAction(label);
+        action->setProperty("shortcutKey", enabled ? "snapTo_all" : "snapTo_none");
+        action->setProperty("shortcutLabel", tr("视图 / 吸附到 / %1").arg(label));
+        connect(action, &QAction::triggered, this, [this, enabled] {
+            QSettings settings;
+            for (const auto* name : {"guides", "grid", "layers", "document"})
+                settings.setValue(QString("snapping/%1").arg(name), enabled);
+            if (enabled && canvas()) canvas()->snap = true;
+            settings.sync();
+        });
     }
     for (const auto& label : {tr("显示参考线"), tr("锁定参考线")}) {
         auto* action =
@@ -1441,6 +1590,10 @@ void EditorController::configure_menus() {
     auto* workspace_menu = window_menu->addMenu(tr("工作区"));
     move_actions(view, workspace_menu, {tr("保存工作区布局"), tr("恢复已存工作区")});
     move_actions(window_menu, workspace_menu, {tr("重置工作区")});
+    add_workspace_actions(workspace_menu, window_);
+    auto* brush_settings_action = window_menu->addAction(tr("画笔设置…"));
+    brush_settings_action->setShortcut(QKeySequence("F5"));
+    connect(brush_settings_action, &QAction::triggered, this, &EditorController::show_brush_settings);
     const auto top = window_->menus_->actions();
     for (auto* action : top)
         window_->menus_->removeAction(action);
@@ -1449,7 +1602,7 @@ void EditorController::configure_menus() {
     window_->menus_->addAction(top.at(2));
     for (auto* action : window_->findChildren<QAction*>()) {
         action->setProperty("defaultShortcut", action->shortcut().toString());
-        const auto value = QSettings().value("shortcuts/" + action->text());
+        const auto value = QSettings().value("shortcuts/" + (action->property("shortcutKey").isValid() ? action->property("shortcutKey").toString() : action->text()));
         if (value.isValid())
             action->setShortcut(QKeySequence(value.toString()));
     }
@@ -1541,10 +1694,11 @@ void EditorController::configure_menus() {
         action->setShortcutContext(Qt::WidgetShortcut);
         action->setShortcut(QKeySequence(keys[i]));
         action->setProperty("defaultShortcut", keys[i]);
-        const auto saved = QSettings().value("shortcuts/" + action->text());
+        const auto saved = QSettings().value("shortcuts/" + (action->property("shortcutKey").isValid() ? action->property("shortcutKey").toString() : action->text()));
         if (saved.isValid())
             action->setShortcut(QKeySequence(saved.toString()));
         action->setData(i);
+        action->setProperty("canvasTool", i);
         group->addAction(action);
         action->setToolTip(labels[i]);
         connect(action, &QAction::triggered, this, [this, i] {
@@ -1636,6 +1790,19 @@ void EditorController::configure_menus() {
         });
     }
     auto* zoom_value = new QDoubleSpinBox(options);
+    for (const auto& [name, key, label] :
+         {std::tuple{"zoomScrubby", "navigation/scrubbyZoom", tr("拖动缩放")},
+          std::tuple{"zoomAllWindows", "navigation/zoomAll", tr("缩放所有文档")}}) {
+        auto* check = new QCheckBox(label, options);
+        check->setObjectName(QLatin1String(name));
+        check->setChecked(QSettings().value(QLatin1String(key), false).toBool());
+        options->addWidget(check)->setObjectName("zoomOptions" + QString::fromLatin1(name));
+        connect(check, &QCheckBox::toggled, this, [this, key](bool enabled) {
+            QSettings().setValue(QLatin1String(key), enabled);
+            if (auto* c = canvas())
+                c->setFocus();
+        });
+    }
     zoom_value->setObjectName("zoomPercent");
     zoom_value->setRange(.1, 3200);
     zoom_value->setDecimals(1);
@@ -1657,33 +1824,18 @@ void EditorController::configure_menus() {
         if (!menu_action->text().startsWith(tr("编辑")))
             continue;
         auto* preferences = menu_action->menu()->addMenu(tr("首选项"));
-        auto* navigation = preferences->addAction(tr("工具与画面操控…"));
-        connect(navigation, &QAction::triggered, this, [this] {
-            QDialog dialog(window_);
-            dialog.setObjectName("navigationPreferences");
-            dialog.setWindowTitle(tr("首选项 · 工具与画面操控"));
-            QFormLayout form(&dialog);
-            QCheckBox wheel(tr("使用滚轮缩放")), center(tr("将缩放点击位置置于中心"));
-            wheel.setObjectName("wheelZoomPreference");
-            center.setObjectName("centerZoomPreference");
-            wheel.setChecked(QSettings().value("navigation/wheelZoom", false).toBool());
-            center.setChecked(QSettings().value("navigation/centerClicked", false).toBool());
-            form.addRow(&wheel);
-            form.addRow(&center);
-            form.addRow(
-                new QLabel(tr("关闭滚轮缩放时：滚轮平移，Alt+滚轮缩放。\n开启时：滚轮缩放，Alt+"
-                              "滚轮平移。\n空格拖动平移；Ctrl+0适合窗口，Ctrl+1显示100%。"),
-                           &dialog));
-            QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-            form.addRow(&buttons);
-            connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-            connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-            if (dialog.exec() == QDialog::Accepted) {
-                QSettings settings;
-                settings.setValue("navigation/wheelZoom", wheel.isChecked());
-                settings.setValue("navigation/centerClicked", center.isChecked());
-            }
-        });
+        const QStringList names{tr("工具与画面操控…"), tr("光标…"),         tr("单位与标尺…"),
+                                tr("参考线与网格…"),   tr("透明度与画布…"), tr("历史记录…"),
+                                tr("文件处理…"), tr("界面与工作区…"), tr("RAW与性能…")};
+        for (int index = 0; index < names.size(); ++index) {
+            auto* action = preferences->addAction(names[index]);
+            if (index == 0)
+                action->setShortcut(QKeySequence("Ctrl+K"));
+            connect(action, &QAction::triggered, this, [this, index] {
+                if (show_canvas_preferences(window_, index))
+                    apply_file_preferences();
+            });
+        }
         break;
     }
     auto* range_operations = new QWidget(options);
@@ -1747,6 +1899,11 @@ void EditorController::configure_menus() {
         if (auto* c = canvas())
             c->brush_radius = value / 2;
     });
+    auto* brush_settings_button = new QToolButton(options);
+    brush_settings_button->setObjectName("brushSettingsButton");
+    brush_settings_button->setText(tr("画笔设置…"));
+    options->addWidget(brush_settings_button)->setObjectName("brushSettingsOptions");
+    connect(brush_settings_button, &QToolButton::clicked, this, &EditorController::show_brush_settings);
     for (const auto& entry : {std::pair{"autoSelect", tr("自动选择：图层")},
                               std::pair{"transformControls", tr("显示变换控件")},
                               std::pair{"keepAspect", tr("保持比例")}}) {
@@ -1770,7 +1927,9 @@ void EditorController::configure_menus() {
     apply->setObjectName("transformApply");
     connect(apply, &QAction::triggered, this, [this] {
         if (auto* c = canvas()) {
-            if (c->cropping())
+            if (c->editing_text())
+                c->finish_text(true);
+            else if (c->cropping())
                 c->commit_crop();
             else
                 c->commit_transform();
@@ -1780,6 +1939,7 @@ void EditorController::configure_menus() {
     cancel->setObjectName("transformCancel");
     connect(cancel, &QAction::triggered, this, [this] {
         if (auto* c = canvas()) {
+            c->finish_text(false);
             c->cancel_crop();
             c->cancel_transform();
         }
@@ -1895,9 +2055,23 @@ void EditorController::configure_menus() {
         }
     });
     configure_photo_tools();
+    configure_design_tools();
+    configure_template_tools();
+    configure_enhancement_tools();
+    // Photo/RAW commands are registered after the original menu construction.
+    // Restore their bindings too, while retaining the actual factory defaults.
+    for (auto* action : window_->findChildren<QAction*>()) {
+        if (!action->property("defaultShortcut").isValid()) {
+            action->setProperty("defaultShortcut", action->shortcut().toString());
+            const auto saved = QSettings().value("shortcuts/" + (action->property("shortcutKey").isValid() ? action->property("shortcutKey").toString() : action->text()));
+            if (saved.isValid())
+                action->setShortcut(QKeySequence(saved.toString()));
+        }
+    }
     refresh_tools();
 }
 void EditorController::refresh_tools() {
+    refresh_design_tools();
     auto* c = canvas();
     const auto tool = c ? c->tool() : CanvasTool::move;
     if (auto* quick = window_->findChild<QAction*>("quickMaskAction")) {
@@ -1931,18 +2105,34 @@ void EditorController::refresh_tools() {
         const auto name = action->objectName();
         if (name.startsWith("move_"))
             action->setVisible(c && tool == CanvasTool::move);
+        if (name.startsWith("text_"))
+            action->setVisible(c && tool == CanvasTool::text);
+        if (name.startsWith("shape_"))
+            action->setVisible(c && tool == CanvasTool::shape);
+        if (name.startsWith("pen_"))
+            action->setVisible(c && tool == CanvasTool::pen);
         if (name.startsWith("zoomOptions"))
             action->setVisible(c && (tool == CanvasTool::zoom || tool == CanvasTool::hand));
         if (name == "selectionOptions")
             action->setVisible(c && (tool == CanvasTool::rectangle || tool == CanvasTool::ellipse ||
                                      tool == CanvasTool::lasso || tool == CanvasTool::polygon ||
-                                     tool == CanvasTool::wand || tool == CanvasTool::color_range));
+                                     tool == CanvasTool::wand || tool == CanvasTool::color_range ||
+                                     tool == CanvasTool::object_selection));
+        if(name=="objectOptions")action->setVisible(c && tool==CanvasTool::object_selection);
+        if(name=="cropOptions")action->setVisible(c && tool==CanvasTool::crop);
         if (name.startsWith("brush"))
             action->setVisible(c && c->painting_tool());
+        if(c && c->retouch_tool() && name=="brushColor")action->setVisible(false);
+        if(c && tool>=CanvasTool::blur && tool<=CanvasTool::sponge && (name=="brushOpacity" || name=="brushFlow"))action->setVisible(false);
         if (name == "photo_sample")
-            action->setVisible(c && c->retouch_tool());
+            action->setVisible(c && (c->retouch_tool() || tool==CanvasTool::patch));
+        if(name=="photoToneOptions")action->setVisible(c && (tool==CanvasTool::dodge || tool==CanvasTool::burn));
+        if(name=="photoSpongeOptions")action->setVisible(c && tool==CanvasTool::sponge);
+        if(name=="photoStrengthOption")action->setVisible(c && tool>=CanvasTool::blur && tool<=CanvasTool::sponge);
+        if(name=="patchOptions")action->setVisible(c && tool==CanvasTool::patch);
         if (name == "photo_aligned")
             action->setVisible(c && (tool == CanvasTool::clone || tool == CanvasTool::heal));
+        if (name == "cloneSourceOption") action->setVisible(c && tool == CanvasTool::clone);
         if (name == "photo_allLayers")
             action->setVisible(c && tool == CanvasTool::bucket);
         if (name.startsWith("range"))
@@ -1955,13 +2145,42 @@ void EditorController::refresh_tools() {
             (name == "brushOpacity" || name == "rangeTolerance" || name == "rangeContiguous"))
             action->setVisible(c != nullptr);
         if (name == "transformApply" || name == "transformCancel")
-            action->setVisible(c && (c->transforming() || tool == CanvasTool::crop));
+            action->setVisible(
+                c && (c->transforming() || tool == CanvasTool::crop || c->editing_text()));
     }
     if (c) {
+        if(auto* angle=options->findChild<QDoubleSpinBox*>("cropAngle")){const QSignalBlocker block(angle);angle->setValue(c->crop_angle);}
+        if(auto* straighten=options->findChild<QToolButton*>("cropStraighten")){const QSignalBlocker block(straighten);straighten->setChecked(c->crop_straighten);}
+        if(auto* remove=options->findChild<QCheckBox*>("cropDeletePixels")){const QSignalBlocker block(remove);remove->setChecked(c->crop_delete_pixels);}
+        for (const auto& [name, value] : {std::pair{"cloneScaleX", c->photo_brush.source_scale_x*100},
+             std::pair{"cloneScaleY", c->photo_brush.source_scale_y*100}, std::pair{"cloneRotation", c->photo_brush.source_rotation},
+             std::pair{"cloneOverlayOpacity", c->clone_overlay_opacity*100}})
+            if(auto* spin=window_->findChild<QDoubleSpinBox*>(name)){const QSignalBlocker block(spin);spin->setValue(value);}
+        for(const auto& [name,value] : {std::pair{"cloneFlipX",c->photo_brush.source_flip_x},std::pair{"cloneFlipY",c->photo_brush.source_flip_y},std::pair{"cloneOverlay",c->clone_overlay}})
+            if(auto* check=window_->findChild<QCheckBox*>(name)){const QSignalBlocker block(check);check->setChecked(value);}
+        if(auto* range=options->findChild<QComboBox*>("photoToneRange")){const QSignalBlocker blocker(range);range->setCurrentIndex(c->photo_brush.tone_range);}
+        if(auto* protect=options->findChild<QCheckBox*>("photoProtectTones")){const QSignalBlocker blocker(protect);protect->setChecked(c->photo_brush.protect_tones);}
+        if(auto* strength=options->findChild<QDoubleSpinBox*>("photoStrength")){const QSignalBlocker blocker(strength);strength->setValue(c->retouch_strength*100);strength->setPrefix(tool==CanvasTool::sponge?tr("流量 "):tool==CanvasTool::dodge || tool==CanvasTool::burn?tr("曝光度 "):tr("强度 "));}
+        if(auto* mode=options->findChild<QComboBox*>("photoSpongeMode")){const QSignalBlocker blocker(mode);mode->setCurrentIndex(c->photo_brush.sponge_saturate?1:0);}
+        if(auto* vibrance=options->findChild<QCheckBox*>("photoSpongeVibrance")){const QSignalBlocker blocker(vibrance);vibrance->setChecked(c->photo_brush.sponge_vibrance);}
         if (auto* value = options->findChild<QDoubleSpinBox*>("zoomPercent")) {
             const QSignalBlocker blocker(value);
             value->setValue(c->zoom() * 100);
         }
+        if(auto* mode=options->findChild<QComboBox*>("objectMode")){
+            const QSignalBlocker blocker(mode);mode->setCurrentIndex(c->object_mode);
+        }
+        for(const auto& [name,value]:{std::pair{"objectAllLayers",c->object_all_layers},
+                                      std::pair{"objectShowAll",c->object_show_all}})
+            if(auto* check=options->findChild<QCheckBox*>(name)){
+                const QSignalBlocker blocker(check);check->setChecked(value);
+            }
+        for (const auto& [name, key] : {std::pair{"zoomScrubby", "navigation/scrubbyZoom"},
+                                        std::pair{"zoomAllWindows", "navigation/zoomAll"}})
+            if (auto* check = options->findChild<QCheckBox*>(QLatin1String(name))) {
+                const QSignalBlocker blocker(check);
+                check->setChecked(QSettings().value(QLatin1String(key), false).toBool());
+            }
         for (int mode = 0; mode < 2; ++mode)
             if (auto* button =
                     options->findChild<QToolButton*>(mode ? "zoomOutMode" : "zoomInMode")) {
@@ -1975,6 +2194,7 @@ void EditorController::refresh_tools() {
                 button->setChecked(index == int(c->range_operation));
             }
         for (const auto& entry : {std::pair{"brushHardness", c->brush_hardness * 100},
+                                  std::pair{"patchAdaptation",c->patch_color_adaptation*100},
                                   std::pair{"brushOpacity", c->brush_opacity * 100},
                                   std::pair{"brushFlow", c->brush_flow * 100},
                                   std::pair{"rangeTolerance", double(c->color_tolerance)},
@@ -1997,6 +2217,8 @@ void EditorController::refresh_tools() {
             QSignalBlocker blocker(scope);
             scope->setCurrentIndex(int(c->photo_brush.sample));
         }
+        for(const auto& entry:{std::pair{"patchSource",!c->patch_destination},std::pair{"patchDestination",c->patch_destination}})
+            if(auto* button=options->findChild<QRadioButton*>(entry.first)){const QSignalBlocker blocker(button);button->setChecked(entry.second);}
     }
     if (c)
         if (auto* radius = options->findChild<QDoubleSpinBox*>("brushDiameter")) {
@@ -2013,6 +2235,11 @@ void EditorController::refresh_tools() {
             }
 }
 bool EditorController::eventFilter(QObject* object, QEvent* event) {
+    if(object==layers_->viewport() && event->type()==QEvent::MouseButtonRelease){visibility_drag_=false;visibility_touched_.clear();}
+    if(object==layers_->viewport() && event->type()==QEvent::MouseMove && visibility_drag_ && canvas()){
+        auto* mouse=static_cast<QMouseEvent*>(event);if(!mouse->buttons().testFlag(Qt::LeftButton)){visibility_drag_=false;return false;}
+        auto* item=layers_->itemAt(mouse->position().toPoint());if(item){const auto bounds=layers_->visualItemRect(item);const auto x=mouse->position().x()-bounds.left();const auto id=item->data(0,Qt::UserRole).toUuid();if(x>=0 && x<22 && !visibility_touched_.contains(id)){visibility_touched_.insert(id);guarded([&]{canvas()->edit(tr("拖动切换图层显示"),[&](State& state){if(auto* l=find_layer(state.layers,id))l->visible=visibility_value_;});});}}return true;
+    }
     if (object == layers_->viewport() && event->type() == QEvent::MouseButtonPress && canvas()) {
         auto* mouse = static_cast<QMouseEvent*>(event);
         layer_click_modifiers_ = mouse->modifiers();
@@ -2022,14 +2249,23 @@ bool EditorController::eventFilter(QObject* object, QEvent* event) {
             const auto bounds = layers_->visualItemRect(item);
             const auto id = item->data(0, Qt::UserRole).toUuid();
             const double x = mouse->position().x() - bounds.left();
-            if (x >= 0 && x < 20) {
-                guarded([&] {
-                    canvas()->edit(tr("图层可见性"), [&](State& state) {
-                        auto* layer = find_layer(state.layers, id);
-                        layer->visible = !layer->visible;
-                    });
-                });
-                return true;
+            if (x >= 0 && x < 22 && mouse->button()==Qt::LeftButton) {
+                if(visibility_canvas_!=canvas()){visibility_saved_.clear();visibility_solo_=QUuid{};visibility_canvas_=canvas();}
+                const bool solo=mouse->modifiers().testFlag(Qt::AltModifier);
+                guarded([&]{canvas()->edit(tr("图层可见性"),[&](State& state){
+                    auto* layer=find_layer(state.layers,id);
+                    if(solo){
+                        std::function<void(std::vector<Layer>&)> visit;
+                        if(visibility_solo_==id && !visibility_saved_.isEmpty()){
+                            visit=[&](auto& list){for(auto& l:list){if(visibility_saved_.contains(l.id))l.visible=visibility_saved_.value(l.id);visit(l.children);}};visit(state.layers);visibility_saved_.clear();visibility_solo_=QUuid{};
+                        }else{
+                            if(visibility_saved_.isEmpty()){visit=[&](auto& list){for(auto& l:list){visibility_saved_[l.id]=l.visible;visit(l.children);}};visit(state.layers);}
+                            std::function<bool(const std::vector<Layer>&)> contains=[&](const auto& list){for(const auto& l:list)if(l.id==id || contains(l.children))return true;return false;};
+                            std::function<void(std::vector<Layer>&,bool)> isolate=[&](auto& list,bool inside){for(auto& l:list){const bool selected=l.id==id;l.visible=inside || selected || contains(l.children);isolate(l.children,inside || selected);}};isolate(state.layers,false);visibility_solo_=id;
+                        }
+                    }else{visibility_saved_.clear();visibility_solo_=QUuid{};visibility_value_=!layer->visible;layer->visible=visibility_value_;}
+                });});
+                visibility_drag_=!solo;visibility_touched_={id};return true;
             }
             if (x >= 24 && x < 62 && mouse->modifiers().testFlag(Qt::ControlModifier)) {
                 guarded([&] {

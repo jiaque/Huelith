@@ -11,6 +11,7 @@
 
 namespace huelith::desktop {
 WindowHeader::WindowHeader(QMenuBar* menus, QWidget* host) : QWidget(host) {
+    host->setWindowIcon(application_icon());
     setObjectName("windowHeader");
     setFixedHeight(36);
     auto* layout = new QHBoxLayout(this);

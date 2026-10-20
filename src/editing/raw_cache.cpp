@@ -25,11 +25,14 @@ QString raw_cache_key(const QByteArray& source, const RawOptions& options) {
         model_hash = hash.result().toHex();
     }
     const QJsonObject identity{
-        {"pipeline", "raw-linear-rec2020-v2"},
+        {"pipeline", "raw-linear-rec2020-v4-denoise-reference"},
         {"source",
          QString::fromLatin1(QCryptographicHash::hash(source, QCryptographicHash::Sha256).toHex())},
         {"model", QString::fromLatin1(model_hash)},
         {"denoise", options.denoise},
+        {"demosaic", options.denoise        ? "model"
+                     : options.high_quality ? "malvar-2004"
+                                            : "bilinear"},
         {"customModel", options.denoise && options.custom_model},
         {"directml", options.denoise && options.directml},
         {"exposure", options.exposure}};
@@ -42,6 +45,21 @@ bool RawCache::contains(const QString& key) const {
     return !key.isEmpty() && std::any_of(entries_.begin(), entries_.end(),
                                          [&](const Entry& entry) { return entry.key == key; });
 }
+std::function<RawResult()> RawCache::read_task(const QString& key) const {
+    const auto found=std::find_if(entries_.begin(),entries_.end(),[&](const Entry& entry){return entry.key==key;});
+    if(found==entries_.end())throw EditError(QStringLiteral("RAW缓存已失效，请更新全部预览"));
+    return [entry=*found]{
+        auto result=entry.result;
+        if(!result.image.isNull())return result;
+        QFile file(entry.path);
+        QImage image(entry.size,entry.format),reference=entry.has_reference?QImage(entry.size,entry.format):QImage{};
+        if(image.isNull()||!file.open(QIODevice::ReadOnly)||file.size()!=entry.bytes||file.read(reinterpret_cast<char*>(image.bits()),image.sizeInBytes())!=image.sizeInBytes()||
+           (entry.has_reference && (reference.isNull()||file.read(reinterpret_cast<char*>(reference.bits()),reference.sizeInBytes())!=reference.sizeInBytes())))
+            throw EditError(QStringLiteral("RAW临时缓存读取失败，请更新预览"));
+        image.setColorSpace(entry.color_space);reference.setColorSpace(entry.color_space);
+        result.image=std::move(image);result.reference=std::move(reference);return result;
+    };
+}
 std::optional<RawResult> RawCache::get(const QString& key) {
     const auto found = std::find_if(entries_.begin(), entries_.end(),
                                     [&](const Entry& entry) { return entry.key == key; });
@@ -52,11 +70,18 @@ std::optional<RawResult> RawCache::get(const QString& key) {
     if (entry.result.image.isNull()) {
         QFile file(entry.path);
         QImage image(entry.size, entry.format);
+        QImage reference = entry.has_reference ? QImage(entry.size, entry.format) : QImage{};
         if (image.isNull() || !file.open(QIODevice::ReadOnly) || file.size() != entry.bytes ||
-            file.read(reinterpret_cast<char*>(image.bits()), image.sizeInBytes()) != entry.bytes)
+            file.read(reinterpret_cast<char*>(image.bits()), image.sizeInBytes()) !=
+                image.sizeInBytes() ||
+            (entry.has_reference &&
+             (reference.isNull() || file.read(reinterpret_cast<char*>(reference.bits()),
+                                              reference.sizeInBytes()) != reference.sizeInBytes())))
             throw EditError(QStringLiteral("RAW 临时缓存读取失败，请重新计算"));
         image.setColorSpace(entry.color_space);
+        reference.setColorSpace(entry.color_space);
         entry.result.image = std::move(image);
+        entry.result.reference = std::move(reference);
         memory_bytes_ += entry.bytes;
     }
     const auto result = entry.result;
@@ -65,13 +90,21 @@ std::optional<RawResult> RawCache::get(const QString& key) {
 }
 void RawCache::put(const QString& key, const RawResult& result) {
     const auto& image = result.image;
-    const auto bytes = image.sizeInBytes();
+    const auto& reference = result.reference;
+    if (!reference.isNull() &&
+        (reference.size() != image.size() || reference.format() != image.format() ||
+         reference.colorSpace() != image.colorSpace()))
+        throw EditError(QStringLiteral("RAW 缓存对照尺寸或色彩空间不一致"));
+    const auto bytes = image.sizeInBytes() + reference.sizeInBytes();
     if (key.isEmpty() || image.isNull() || bytes > disk_budget_)
         throw EditError(QStringLiteral("RAW 结果超出会话缓存预算"));
     const auto path = directory_.filePath(QUuid::createUuid().toString(QUuid::WithoutBraces));
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly) ||
-        file.write(reinterpret_cast<const char*>(image.constBits()), bytes) != bytes ||
+        file.write(reinterpret_cast<const char*>(image.constBits()), image.sizeInBytes()) !=
+            image.sizeInBytes() ||
+        (!reference.isNull() && file.write(reinterpret_cast<const char*>(reference.constBits()),
+                                           reference.sizeInBytes()) != reference.sizeInBytes()) ||
         !file.commit())
         throw EditError(QStringLiteral("RAW 缓存写入失败，请检查磁盘空间"));
     for (auto it = entries_.begin(); it != entries_.end();) {
@@ -91,8 +124,8 @@ void RawCache::put(const QString& key, const RawResult& result) {
         QFile::remove(old.path);
         entries_.pop_back();
     }
-    entries_.push_front(
-        {key, path, result, image.size(), image.format(), image.colorSpace(), bytes});
+    entries_.push_front({key, path, result, image.size(), image.format(), image.colorSpace(), bytes,
+                         !reference.isNull()});
     memory_bytes_ += bytes;
     disk_bytes_ += bytes;
     trim_memory();
@@ -102,12 +135,38 @@ void RawCache::trim_memory() {
          ++it) {
         if (!it->result.image.isNull()) {
             it->result.image = {};
+            it->result.reference = {};
             memory_bytes_ -= it->bytes;
         }
     }
 }
 qint64 RawCache::memory_bytes() const noexcept {
     return memory_bytes_;
+}
+void RawCache::configure(qint64 memory_budget, qint64 disk_budget) {
+    if (memory_budget < 0 || disk_budget < 1)
+        throw EditError(QStringLiteral("RAW缓存预算无效"));
+    memory_budget_ = memory_budget;
+    disk_budget_ = disk_budget;
+    while (!entries_.empty() && disk_bytes_ > disk_budget_) {
+        const auto& entry = entries_.back();
+        if (QFile::exists(entry.path) && !QFile::remove(entry.path))
+            throw EditError(QStringLiteral("无法清除RAW缓存文件"));
+        memory_bytes_ -= entry.result.image.isNull() ? 0 : entry.bytes;
+        disk_bytes_ -= entry.bytes;
+        entries_.pop_back();
+    }
+    trim_memory();
+}
+void RawCache::clear() {
+    while (!entries_.empty()) {
+        const auto& entry = entries_.back();
+        if (QFile::exists(entry.path) && !QFile::remove(entry.path))
+            throw EditError(QStringLiteral("无法清除RAW缓存文件"));
+        memory_bytes_ -= entry.result.image.isNull() ? 0 : entry.bytes;
+        disk_bytes_ -= entry.bytes;
+        entries_.pop_back();
+    }
 }
 qint64 RawCache::disk_bytes() const noexcept {
     return disk_bytes_;

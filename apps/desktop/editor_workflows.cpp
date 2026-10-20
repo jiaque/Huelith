@@ -1,5 +1,7 @@
+#include "huelith/editing/image_storage.h"
 #include "canvas_view.h"
 #include "editor_controller.h"
+#include "huelith/editing/export_queue.h"
 #include "huelith/editing/tiff_io.h"
 #include "main_window.h"
 #include <QAction>
@@ -20,12 +22,14 @@
 #include <QImageWriter>
 #include <QKeySequenceEdit>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
 #include <QMimeData>
 #include <QPainter>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QTemporaryDir>
 #include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -91,6 +95,8 @@ void EditorController::copy_pixels(bool merged, bool cut) {
             swatch.fill(background);
             const auto color = to_working(swatch);
             const auto* channels = reinterpret_cast<const float*>(color.constBits());
+            if(current->pixels.sizeInBytes()>=mapped_image_threshold)
+                current->pixels=copy_image(current->pixels);
             for (int y = 0; y < current->pixels.height(); ++y) {
                 auto* row = reinterpret_cast<float*>(current->pixels.scanLine(y));
                 for (int x = 0; x < current->pixels.width(); ++x) {
@@ -247,7 +253,7 @@ void EditorController::show_export() {
     form->addRow(tr("格式"), format);
     auto* profile = new QComboBox(&dialog);
     profile->setObjectName("exportProfile");
-    profile->addItems({"sRGB", "Adobe RGB", "Display P3"});
+    profile->addItems({"sRGB", "Adobe RGB", "Display P3", "ProPhoto RGB"});
     form->addRow(tr("色彩空间"), profile);
     auto* depth = new QComboBox(&dialog);
     depth->setObjectName("exportDepth");
@@ -288,6 +294,11 @@ void EditorController::show_export() {
     transparency->setObjectName("exportAlpha");
     transparency->setChecked(true);
     form->addRow(transparency);
+    QCheckBox* metadata[5]{};auto* metadata_row=new QHBoxLayout;
+    const QStringList metadata_names{tr("EXIF"),tr("IPTC"),tr("XMP"),tr("版权/作者"),tr("GPS")};
+    for(int i=0;i<5;++i){metadata[i]=new QCheckBox(metadata_names[i],&dialog);metadata[i]->setObjectName(QString("exportMetadata%1").arg(i));
+        metadata[i]->setChecked(QSettings().value(QString("exportQueue/metadata%1").arg(i),i!=4).toBool());metadata_row->addWidget(metadata[i]);}
+    form->addRow(tr("保留元数据"),metadata_row);
     QColor matte = Qt::white;
     auto* background = new QPushButton(tr("背景填充色…"), &dialog);
     form->addRow(background);
@@ -298,41 +309,46 @@ void EditorController::show_export() {
         new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
     form->addRow(buttons);
     QImage converted;
+    const auto output_options = [&] {
+        editing::ExportOptions options;
+        options.metadata={metadata[0]->isChecked(),metadata[1]->isChecked(),metadata[2]->isChecked(),metadata[3]->isChecked(),metadata[4]->isChecked()};
+        options.size = {width->value(), height->value()};
+        options.format = format->currentIndex() == 1   ? "jpg"
+                         : format->currentIndex() == 2 ? "tif"
+                                                       : "png";
+        options.bits = format->currentIndex() != 1 && depth->currentIndex() == 1 ? 16 : 8;
+        options.alpha = transparency->isChecked();
+        options.matte = matte;
+        const std::array<QColorSpace::NamedColorSpace, 4> spaces{
+            QColorSpace::SRgb, QColorSpace::AdobeRgb, QColorSpace::DisplayP3,
+            QColorSpace::ProPhotoRgb};
+        options.space = QColorSpace(spaces[profile->currentIndex()]);
+        return options;
+    };
     const auto update = [&] {
         const bool jpeg = format->currentIndex() == 1;
         depth->setEnabled(!jpeg);
         quality->setEnabled(jpeg);
         transparency->setEnabled(!jpeg);
-        if (qint64(width->value()) * height->value() > 64000000) {
-            error->setText(tr("输出超过6400万像素预算"));
+        if (qint64(width->value()) * height->value() > huelith::editing::maximum_image_pixels) {
+            error->setText(tr("输出超过5.12亿像素预算"));
             buttons->button(QDialogButtonBox::Save)->setEnabled(false);
             return;
         }
         buttons->button(QDialogButtonBox::Save)->setEnabled(true);
         error->clear();
-        const QColorSpace space(profile->currentIndex() == 1   ? QColorSpace::AdobeRgb
-                                : profile->currentIndex() == 2 ? QColorSpace::DisplayP3
-                                                               : QColorSpace::SRgb);
-        converted = display_image(original, space)
-                        .scaled(width->value(), height->value(), Qt::IgnoreAspectRatio,
-                                Qt::SmoothTransformation);
-        if (jpeg || !transparency->isChecked()) {
-            QImage filled(converted.size(), QImage::Format_RGB32);
-            filled.setColorSpace(space);
-            filled.fill(matte);
-            QPainter painter(&filled);
-            painter.drawImage(0, 0, converted);
-            painter.end();
-            converted = filled;
-        }
-        auto sample = converted.scaled(540, 500, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        auto options = output_options();
+        options.size = options.size.scaled(540, 500, Qt::KeepAspectRatio).expandedTo(QSize(1, 1));
+        auto sample = prepare_export_image(original, options, c->project().state().ppi);
         if (jpeg) {
             QByteArray bytes;
             QBuffer buffer(&bytes);
             buffer.open(QIODevice::WriteOnly);
             sample.save(&buffer, "JPEG", quality->value());
             sample = QImage::fromData(bytes, "JPEG");
+            sample.setColorSpace(options.space);
         }
+        sample = sample.convertedToColorSpace(QColorSpace::SRgb, QImage::Format_RGBA8888);
         preview->setPixmap(QPixmap::fromImage(sample));
     };
     for (auto* box : {format, profile, depth})
@@ -364,35 +380,22 @@ void EditorController::show_export() {
                                       : "PNG (*.png)");
     if (path.isEmpty())
         return;
-    if (!jpeg && depth->currentIndex() == 1) {
-        const QColorSpace space(profile->currentIndex() == 1   ? QColorSpace::AdobeRgb
-                                : profile->currentIndex() == 2 ? QColorSpace::DisplayP3
-                                                               : QColorSpace::SRgb);
-        converted = original.convertedToColorSpace(space, QImage::Format_RGBA64)
-                        .scaled(width->value(), height->value(), Qt::IgnoreAspectRatio,
-                                Qt::SmoothTransformation);
-        if (!transparency->isChecked()) {
-            QImage filled(converted.size(), QImage::Format_RGBA64);
-            filled.setColorSpace(space);
-            filled.fill(matte);
-            QPainter painter(&filled);
-            painter.drawImage(0, 0, converted);
-            painter.end();
-            converted = filled;
-        }
-    }
+    converted = prepare_export_image(original, output_options(), c->project().state().ppi);
+    QTemporaryDir staging(QFileInfo(path).dir().filePath(".huelith-export-XXXXXX"));
+    if(!staging.isValid())throw EditError(tr("无法建立导出临时目录"));
+    const auto staged=staging.filePath("output."+output_options().format);
     if (format->currentIndex() == 2) {
-        write_tiff(converted, path, depth->currentIndex() == 1 ? 16 : 8, std::atomic_bool{false},
+        write_tiff(converted, staged, depth->currentIndex() == 1 ? 16 : 8, std::atomic_bool{false},
                    c->project().state().ppi);
-        return;
+    }else{
+        QImageWriter writer(staged,jpeg?"jpg":"png");writer.setQuality(quality->value());
+        if(!writer.write(converted))throw EditError(writer.errorString());
     }
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        throw EditError(file.errorString());
-    QImageWriter writer(&file, jpeg ? "jpg" : "png");
-    writer.setQuality(quality->value());
-    if (!writer.write(converted))
-        throw EditError(writer.errorString());
+    const auto options=output_options();
+    write_photo_metadata(staged,c->project().state().metadata,options.metadata,converted.size(),options.space==QColorSpace(QColorSpace::SRgb));
+    QFile input(staged);QSaveFile file(path);file.setDirectWriteFallback(false);
+    if(!input.open(QIODevice::ReadOnly)||!file.open(QIODevice::WriteOnly))throw EditError(tr("无法写入导出文件"));
+    while(!input.atEnd()){const auto bytes=input.read(1024*1024);if(bytes.isEmpty()||file.write(bytes)!=bytes.size())throw EditError(tr("图片写入不完整"));}
     if (!file.commit())
         throw EditError(file.errorString());
 }
@@ -404,25 +407,44 @@ void EditorController::show_shortcuts() {
     auto* layout = new QVBoxLayout(&dialog);
     auto* table = new QTableWidget(&dialog);
     table->setObjectName("shortcutTable");
+    auto* search = new QLineEdit(&dialog);
+    search->setObjectName("shortcutSearch");
+    search->setPlaceholderText(tr("查找命令或快捷键"));
+    search->setClearButtonEnabled(true);
+    layout->addWidget(search);
     table->setColumnCount(2);
     table->setHorizontalHeaderLabels({tr("命令"), tr("快捷键")});
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     layout->addWidget(table);
     QList<QAction*> actions;
     QSet<QString> names;
-    for (auto* action : window_->findChildren<QAction*>())
+    for (auto* action : window_->findChildren<QAction*>()) {
+        const QString identity = action->property("shortcutKey").isValid()
+                                     ? action->property("shortcutKey").toString()
+                                     : action->text();
         if (!action->isSeparator() && !action->menu() && !action->text().isEmpty() &&
-            !names.contains(action->text())) {
-            names.insert(action->text());
+            !names.contains(identity)) {
+            names.insert(identity);
             actions.push_back(action);
         }
+    }
     table->setRowCount(int(actions.size()));
     for (int i = 0; i < actions.size(); ++i) {
-        auto* title = new QTableWidgetItem(actions[i]->text());
+        auto* title = new QTableWidgetItem(actions[i]->property("shortcutLabel").isValid()
+                                               ? actions[i]->property("shortcutLabel").toString()
+                                               : actions[i]->text());
         title->setFlags(title->flags() & ~Qt::ItemIsEditable);
         table->setItem(i, 0, title);
         table->setCellWidget(i, 1, new QKeySequenceEdit(actions[i]->shortcut(), table));
     }
+    connect(search, &QLineEdit::textChanged, &dialog, [table](const QString& text) {
+        for (int i = 0; i < table->rowCount(); ++i) {
+            const auto key =
+                static_cast<QKeySequenceEdit*>(table->cellWidget(i, 1))->keySequence().toString();
+            table->setRowHidden(i, !table->item(i, 0)->text().contains(text, Qt::CaseInsensitive) &&
+                                       !key.contains(text, Qt::CaseInsensitive));
+        }
+    });
     auto* error = new QLabel(&dialog);
     error->setObjectName("shortcutError");
     layout->addWidget(error);
@@ -454,7 +476,11 @@ void EditorController::show_shortcuts() {
         for (int i = 0; i < actions.size(); ++i) {
             const auto key = static_cast<QKeySequenceEdit*>(table->cellWidget(i, 1))->keySequence();
             actions[i]->setShortcut(key);
-            QSettings().setValue("shortcuts/" + actions[i]->text(), key.toString());
+            QSettings().setValue("shortcuts/" +
+                                     (actions[i]->property("shortcutKey").isValid()
+                                          ? actions[i]->property("shortcutKey").toString()
+                                          : actions[i]->text()),
+                                 key.toString());
         }
         dialog.accept();
     });

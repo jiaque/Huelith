@@ -1,9 +1,12 @@
 #include "canvas_view.h"
 #include "editor_controller.h"
+#include "huelith/editing/liquify.h"
 #include "main_window.h"
 #include "tone_panel.h"
 #include "window_header.h"
 #include <QCheckBox>
+#include <QComboBox>
+#include <QDir>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -13,13 +16,17 @@
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenuBar>
 #include <QPointer>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSignalBlocker>
+#include <QSlider>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <cmath>
@@ -30,16 +37,17 @@ namespace huelith::desktop {
 namespace {
 class EffectsDialog final : public QDialog {
   public:
-    EffectsDialog(editing::State state, QUuid layer_id, QWidget* parent)
+    EffectsDialog(editing::State state, QUuid layer_id, QWidget* parent, bool add_blur)
         : QDialog(parent), source_(std::move(state)), layer_id_(layer_id),
           effects_(editing::find_layer(source_.layers, layer_id)->effects) {
+        if(add_blur){check_capacity();editing::Effect effect;effect.name=tr("高斯模糊");effect.blur_radius=5;effects_.push_back(effect);}
         setObjectName("effectsDialog");
-        setWindowTitle(tr("智能效果"));
+        setWindowTitle(add_blur?tr("高斯模糊"):tr("智能效果"));
         setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
         resize(1180, 780);
         auto* root = new QVBoxLayout(this);
         auto* title = new QMenuBar;
-        title->addAction(tr("智能效果"))->setEnabled(false);
+        title->addAction(windowTitle())->setEnabled(false);
         root->addWidget(new WindowHeader(title, this));
         auto* body = new QHBoxLayout;
         auto* left = new QVBoxLayout;
@@ -64,6 +72,7 @@ class EffectsDialog final : public QDialog {
             rebuild(int(effects_.size()) - 1);
             schedule();
         });
+        button(tr("添加高斯模糊"),"effectAddBlur",[this]{check_capacity();editing::Effect effect;effect.name=tr("高斯模糊");effect.blur_radius=5;effects_.push_back(effect);rebuild(int(effects_.size())-1);schedule();});
         button(tr("加载 3D LUT…"), "effectLut", [this] {
             check_capacity();
             const auto path =
@@ -103,7 +112,66 @@ class EffectsDialog final : public QDialog {
         button(tr("下移"), "effectDown", [this] { move(1); });
         button(tr("保存效果预设…"), "effectSavePreset", [this] { save_preset(); });
         button(tr("加载效果预设…"), "effectLoadPreset", [this] { load_preset(); });
-        body->addLayout(left);
+        library_ = new QComboBox(this);
+        library_->setObjectName("effectLibrary");
+        library_->setMaximumWidth(230);
+        left->addWidget(new QLabel(tr("我的效果与 LUT 预设"), this));
+        left->addWidget(library_);
+        library_name_ = new QLineEdit(this);
+        library_name_->setObjectName("effectLibraryName");
+        library_name_->setMaxLength(120);
+        library_name_->setPlaceholderText(tr("预设名称"));
+        left->addWidget(library_name_);
+        auto* search = new QLineEdit(this);
+        search->setObjectName("effectLibrarySearch");
+        search->setPlaceholderText(tr("搜索预设"));
+        left->addWidget(search);
+        connect(search, &QLineEdit::textChanged, this, [this](const QString& text) {
+            library_filter_ = text;
+            refresh_library();
+        });
+        button(tr("保存到预设库"), "effectLibrarySave", [this, search] {
+            if (current() < 0) throw editing::EditError(tr("请先选择一个效果"));
+            const auto name = library_name_->text().trimmed();
+            if (name.isEmpty()) throw editing::EditError(tr("请输入预设名称"));
+            auto json = preset_json(effects_[current()]);
+            json.insert("name", name);
+            const auto path = library_directory() + '/' + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".hfx";
+            write_preset(path, json);
+            library_filter_.clear();
+            search->clear();
+            refresh_library(path);
+        });
+        button(tr("应用预设"), "effectLibraryApply", [this] {
+            check_capacity();
+            if (library_->currentIndex() < 0) return;
+            append_preset(read_preset(library_->currentData().toString()));
+        });
+        button(tr("重命名预设"), "effectLibraryRename", [this] {
+            if (library_->currentIndex() < 0) return;
+            const auto name = library_name_->text().trimmed();
+            if (name.isEmpty()) throw editing::EditError(tr("请输入预设名称"));
+            const auto path = library_->currentData().toString();
+            auto json = read_preset(path);
+            json.insert("name", name);
+            write_preset(path, json);
+            refresh_library(path);
+        });
+        button(tr("删除预设"), "effectLibraryDelete", [this] {
+            if (library_->currentIndex() < 0) return;
+            if (!QFile::remove(library_->currentData().toString()))
+                throw editing::EditError(tr("无法删除预设"));
+            refresh_library();
+        });
+        refresh_library();
+        auto* left_widget = new QWidget(this);
+        left_widget->setLayout(left);
+        auto* left_scroll = new QScrollArea(this);
+        left_scroll->setWidgetResizable(true);
+        left_scroll->setFixedWidth(260);
+        left_scroll->setWidget(left_widget);
+        if (add_blur) left_scroll->hide();
+        body->addWidget(left_scroll);
         auto* center = new QVBoxLayout;
         image_ = new QLabel(this);
         image_->setMinimumSize(400, 350);
@@ -121,6 +189,11 @@ class EffectsDialog final : public QDialog {
         amount_->setSuffix(" %");
         right->addWidget(new QLabel(tr("效果强度"), this));
         right->addWidget(amount_);
+        right->addWidget(new QLabel(tr("高斯模糊 · 半径（像素）"),this));
+        blur_=new QDoubleSpinBox(this);blur_->setObjectName("effectBlurRadius");blur_->setRange(0,1000);blur_->setDecimals(1);blur_->setSingleStep(.1);blur_->setKeyboardTracking(false);right->addWidget(blur_);
+        auto* blur_slider=new QSlider(Qt::Horizontal,this);blur_slider->setObjectName("effectBlurSlider");blur_slider->setRange(0,1000);right->addWidget(blur_slider);
+        connect(blur_slider,&QSlider::valueChanged,this,[this](int value){blur_->setValue(value/10.);});
+        connect(blur_,&QDoubleSpinBox::valueChanged,this,[this,blur_slider](double value){const QSignalBlocker block(blur_slider);blur_slider->setValue(qRound(value*10));if(!loading_ && current()>=0){effects_[current()].blur_radius=value;schedule();}});
         auto* range = new QHBoxLayout;
         for (const auto& [label, name, action] :
              {std::tuple{tr("使用选区"), "effectSelection", 0},
@@ -140,6 +213,7 @@ class EffectsDialog final : public QDialog {
         scroll->setWidgetResizable(true);
         scroll->setFixedWidth(360);
         scroll->setWidget(panel_);
+        if(add_blur){scroll->hide();for(int i=0;i<left->count();++i)if(auto* widget=left->itemAt(i)->widget())widget->hide();}
         right->addWidget(scroll, 1);
         body->addLayout(right);
         root->addLayout(body, 1);
@@ -179,7 +253,8 @@ class EffectsDialog final : public QDialog {
         connect(preview_, &QCheckBox::toggled, this, [this] { schedule(); });
         timer_.setInterval(20);
         connect(&timer_, &QTimer::timeout, this, [this] { poll(); });
-        rebuild(effects_.empty() ? -1 : 0);
+        rebuild(effects_.empty() ? -1 : add_blur?int(effects_.size())-1:0);
+        if(add_blur && !source_.selection.isNull())set_range(0);
         schedule();
     }
     const std::vector<editing::Effect>& effects() const {
@@ -232,9 +307,11 @@ class EffectsDialog final : public QDialog {
         loading_ = true;
         panel_->setEnabled(current() >= 0);
         amount_->setEnabled(current() >= 0);
+        blur_->setEnabled(current()>=0);
         if (current() >= 0) {
             panel_->set_settings(effects_[current()].tone);
             amount_->setValue(effects_[current()].amount * 100);
+            blur_->setValue(effects_[current()].blur_radius);
         }
         loading_ = false;
     }
@@ -281,30 +358,45 @@ class EffectsDialog final : public QDialog {
         }
         schedule();
     }
-    void save_preset() {
-        if (current() < 0)
-            return;
-        const auto path =
-            QFileDialog::getSaveFileName(this, tr("保存效果预设"), {}, "Huelith Effect (*.hfx)");
-        if (path.isEmpty())
-            return;
-        const auto& effect = effects_[current()];
-        const QJsonObject json{{"version", 1},
-                               {"name", effect.name},
-                               {"amount", effect.amount},
-                               {"tone", editing::tone_json(effect.tone)},
-                               {"lut", effect.lut ? effect.lut->source : QString{}}};
+    static QString library_directory() {
+        const QSettings settings;
+        const auto root = settings.format() == QSettings::IniFormat
+                              ? QFileInfo(settings.fileName()).absolutePath()
+                              : QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        return root + "/effect-presets";
+    }
+    void refresh_library(const QString& selected = {}) {
+        const auto previous = selected.isEmpty() ? library_->currentData().toString() : selected;
+        library_->clear();
+        const QDir directory(library_directory());
+        for (const auto& file : directory.entryInfoList({"*.hfx"}, QDir::Files, QDir::Name)) {
+            try {
+                const auto json = read_preset(file.absoluteFilePath());
+                const auto name = json.value("name").toString();
+                if (name.contains(library_filter_, Qt::CaseInsensitive))
+                    library_->addItem(name, file.absoluteFilePath());
+            } catch (const std::exception&) {
+                // A damaged resource must not prevent opening the editor.
+            }
+        }
+        const int index = library_->findData(previous);
+        if (index >= 0) library_->setCurrentIndex(index);
+    }
+    static QJsonObject preset_json(const editing::Effect& effect) {
+        return {{"version", 3}, {"blurRadius", effect.blur_radius},
+                {"liquify", editing::liquify_json(effect.liquify)}, {"name", effect.name},
+                {"amount", effect.amount}, {"tone", editing::tone_json(effect.tone)},
+                {"lut", effect.lut ? effect.lut->source : QString{}}};
+    }
+    static void write_preset(const QString& path, const QJsonObject& json) {
+        if (!QDir().mkpath(QFileInfo(path).absolutePath()))
+            throw editing::EditError(tr("无法创建预设目录"));
         QSaveFile file(path);
         const auto bytes = QJsonDocument(json).toJson();
         if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
             throw editing::EditError(tr("预设写入失败"));
     }
-    void load_preset() {
-        check_capacity();
-        const auto path =
-            QFileDialog::getOpenFileName(this, tr("加载效果预设"), {}, "Huelith Effect (*.hfx)");
-        if (path.isEmpty())
-            return;
+    static QJsonObject read_preset(const QString& path) {
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly) || file.size() > 20 * 1024 * 1024)
             throw editing::EditError(tr("无法读取预设"));
@@ -312,13 +404,36 @@ class EffectsDialog final : public QDialog {
         const auto document = QJsonDocument::fromJson(file.readAll(), &error);
         const auto json = document.object();
         if (error.error != QJsonParseError::NoError || !document.isObject() ||
-            json.value("version").toInt() != 1 || !json.value("tone").isObject() ||
-            !json.value("amount").isDouble())
+            (json.value("version").toInt() < 1 || json.value("version").toInt() > 3) ||
+            !json.value("tone").isObject() || !json.value("amount").isDouble())
             throw editing::EditError(tr("预设格式无效"));
+        return json;
+    }
+    void save_preset() {
+        if (current() < 0)
+            return;
+        const auto path =
+            QFileDialog::getSaveFileName(this, tr("保存效果预设"), {}, "Huelith Effect (*.hfx)");
+        if (path.isEmpty())
+            return;
+        write_preset(path, preset_json(effects_[current()]));
+    }
+    void load_preset() {
+        check_capacity();
+        const auto path =
+            QFileDialog::getOpenFileName(this, tr("加载效果预设"), {}, "Huelith Effect (*.hfx)");
+        if (path.isEmpty())
+            return;
+        append_preset(read_preset(path));
+    }
+    void append_preset(const QJsonObject& json) {
         editing::Effect effect;
         effect.name = json.value("name").toString(tr("预设"));
         effect.amount = json.value("amount").toDouble(1);
+        effect.blur_radius=json.value("blurRadius").toDouble();
         effect.tone = editing::tone_from_json(json.value("tone").toObject());
+        if (json.value("version").toInt() >= 2)
+            effect.liquify = editing::liquify_from_json(json.value("liquify").toObject());
         const auto lut = json.value("lut").toString();
         if (!lut.isEmpty())
             effect.lut = editing::parse_cube(lut);
@@ -337,6 +452,7 @@ class EffectsDialog final : public QDialog {
                 return;
             try {
                 const auto result = worker_.get();
+                panel_->set_curve_histogram(result);
                 image_->setPixmap(QPixmap::fromImage(
                     result.scaled(image_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation)));
                 status_->setText(tr("预览已更新；原始图像保留，确认后可继续编辑效果"));
@@ -364,17 +480,23 @@ class EffectsDialog final : public QDialog {
             editing::find_layer(draft.layers, layer_id_)->effects = effects_;
         status_->setText(tr("正在更新预览…"));
         worker_ = std::async(std::launch::async, [draft = std::move(draft)] {
-            return editing::display_image(editing::render(editing::preview_state(draft)));
+            const auto proxy = editing::preview_state(draft);
+            return editing::display_image(
+                editing::render(proxy, {double(proxy.size.width()) / draft.size.width()}));
         });
     }
     editing::State source_;
     QUuid layer_id_;
     std::vector<editing::Effect> effects_;
     QListWidget* list_{};
+    QComboBox* library_{};
+    QLineEdit* library_name_{};
+    QString library_filter_;
     QLabel* image_{};
     QLabel* status_{};
     TonePanel* panel_{};
     QDoubleSpinBox* amount_{};
+    QDoubleSpinBox* blur_{};
     QCheckBox* preview_{};
     QTimer timer_;
     std::future<QImage> worker_;
@@ -383,7 +505,7 @@ class EffectsDialog final : public QDialog {
     int closing_{-1};
 };
 } // namespace
-void EditorController::show_effects() {
+void EditorController::show_effects(bool add_blur) {
     auto* c = canvas();
     if (!c)
         return;
@@ -394,7 +516,7 @@ void EditorController::show_effects() {
         throw editing::EditError(tr("请选择未锁定的图层"));
     const auto revision = c->project().revision();
     QPointer<CanvasView> original(c);
-    EffectsDialog dialog(base, id, window_);
+    EffectsDialog dialog(base, id, window_, add_blur);
     if (dialog.exec() != QDialog::Accepted)
         return;
     if (!original || original->project().revision() != revision)

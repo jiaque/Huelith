@@ -74,7 +74,7 @@ def main():
         enabled = call('raw_hsl', enabled=True)
         assert enabled['recipe']['tone']['sections'][4] is True and enabled['recipe']['tone']['hue'][2] == 20
         # Inventory the entire RAW panel, not only the currently visible mixer.
-        for section in range(8):
+        for section in range(9):
             call('raw_window_state', section=section)
         for _ in range(3):
             call('pump',waitMs=30)
@@ -83,7 +83,8 @@ def main():
             if widget['name'].startswith('rawSectionBody') and widget['visible']:
                 assert widget['height'] >= widget['minimumHeight'], widget
         (out/'raw-controls.json').write_text(json.dumps(inventory['controls'], ensure_ascii=False, indent=2), encoding='utf-8')
-        assert len([c for c in inventory['controls'] if c['name'].startswith('rawSectionEnable')]) == 8
+        assert len([c for c in inventory['controls'] if c['name'].startswith('rawSectionEnable')]) == 9
+        assert any(c['name'] == 'toneCalibrationRedHue' for c in inventory['controls'])
         call('raw_window_state', click='rawRail2')
         call('raw_window_state', click='rawAddLocal')
         for mode in range(1,5):

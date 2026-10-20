@@ -5,6 +5,8 @@
   "dependencies": [
     "gtest",
     "libraw",
-    "tiff"
+    "lensfun",
+    "tiff",
+    { "name": "opencv4", "default-features": false, "features": ["calib3d", "intrinsics"] }
   ]
 }

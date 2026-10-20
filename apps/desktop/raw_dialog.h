@@ -1,10 +1,14 @@
 #pragma once
+#include "huelith/editing/healing.h"
 #include "huelith/editing/raw_cache.h"
 #include "huelith/editing/raw_develop.h"
 #include <QDialog>
 #include <future>
 #include <memory>
 
+class QMenuBar;
+class QBoxLayout;
+class QTreeWidget;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -17,21 +21,32 @@ class QTimer;
 class QGraphicsView;
 class QGraphicsScene;
 class QGraphicsPathItem;
+class QMouseEvent;
+class QToolButton;
+class QGraphicsPixmapItem;
 
 namespace huelith::desktop {
+QListWidget* create_raw_filmstrip(QWidget* parent);
 class TonePanel;
+class RawOpticsPanel;
+class RawGeometryPanel;
+class RawWhiteBalancePanel;
 class RawDialog final : public QDialog {
   public:
     explicit RawDialog(std::vector<editing::Layer> sources, QWidget* parent);
     ~RawDialog() override;
+    int exec() override;
     [[nodiscard]] const std::vector<editing::Layer>& results() const {
         return sources_;
     }
     void reject() override;
     void accept() override;
+    void begin_output(int mode);
+    void apply_performance_preferences(bool clear_cache = false);
 
   protected:
     bool eventFilter(QObject* object, QEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
 
   private:
     void start();
@@ -40,15 +55,107 @@ class RawDialog final : public QDialog {
     void finish_preview();
     void present_preview(const QImage& visible, const QImage& histogram_sample);
     void finish_commit();
+    int commit_mode_{}; // Open source layers, save images, or finish to sidecar settings.
     void select(int index);
     void synchronize();
+    QWidget* setup_filmstrip(QWidget* parent);
+    void refresh_filmstrip();
+    void rate_selected(int rating, int clicked = -1);
+    void reject_selected();
+    void apply_multiselect_delta();
+    QComboBox* film_filter_{};
+    QLabel* film_count_{};
+    QJsonObject displayed_recipe_;
+    QWidget* setup_profiles(QWidget* parent);
+    void refresh_profiles();
+    void browse_profiles(bool open);
+    void choose_profile(QJsonObject profile);
+    void auto_tone();
+    QComboBox* profile_choice_{};
+    QComboBox* profile_filter_{};
+    QWidget* profile_browser_{};
+    QListWidget* profile_list_{};
+    QDoubleSpinBox* profile_amount_{};
+    struct ProfileWork;
+    std::shared_ptr<ProfileWork> profile_work_;
+    void finish_profiles();
+    void setup_settings_menu(QMenuBar* menu);
+    void manage_settings(int mode = 0);
+    void apply_recipe_settings(const QJsonObject& preset);
     void update_ready();
     void compute_all();
     [[nodiscard]] bool included(std::size_t index) const;
     void record_history();
     void restore_history(int direction);
     void refresh_local_controls();
+    QWidget* setup_mask_components(QWidget* parent);
+    void refresh_mask_components();
+    void update_mask_component(const QJsonObject& component);
+    void mask_component_overlays();
+    bool mask_component_event(QMouseEvent* event);
+    void sample_mask_range(QPointF scene_point, bool append);
+    void remove_mask_sample(int index);
+    QTreeWidget* mask_tree_{};
+    int mask_component_{-1};
+    bool mask_controls_loading_{}, mask_sampling_{}, mask_dragging_{};
+    bool mask_tree_event_{};
+    bool mask_range_drawing_{}, mask_range_append_{};
+    int mask_handle_{};
+    QPointF mask_drag_start_;
+    QJsonObject mask_before_;
+    QGraphicsPathItem* mask_guide_{};
     void select_adjustment();
+    void semantic_local(int target);
+    void refine_local_mask();
+    void setup_white_balance();
+    void refresh_white_balance();
+    void sample_white_balance(QPointF point, bool automatic);
+    QWidget* setup_healing(QWidget* parent);
+    bool healing_event(QMouseEvent* event);
+    void healing_overlays();
+    void refresh_healing();
+    void update_healing();
+    void delete_healing();
+    void resample_healing();
+    QImage healing_visualization(const QImage& image) const;
+    void setup_inspection(QWidget* parent);
+    void refresh_inspection();
+    void color_readout(QPointF scene_point);
+    QWidget* setup_crop(QWidget* parent);
+    bool crop_event(QMouseEvent* event);
+    void crop_overlays();
+    void apply_crop_ratio();
+    QComboBox* crop_ratio_{};
+    QCheckBox* crop_lock_{};
+    QToolButton* crop_straighten_{};
+    QDoubleSpinBox* crop_width_{};
+    QDoubleSpinBox* crop_height_{};
+    QDoubleSpinBox* crop_angle_{};
+    bool crop_dragging_{};
+    int crop_handle_{-1};
+    QPointF crop_start_;
+    double crop_rotation_start_{},crop_rotation_delta_{};
+    QTransform crop_preview_transform_;
+    QRectF crop_before_, crop_draft_;
+    QToolButton* shadow_clipping_{};
+    QToolButton* highlight_clipping_{};
+    QLabel* color_readout_{};
+    bool lab_readout_{};
+    QImage displayed_preview_;
+    QImage inspection_source_;
+    QGraphicsPixmapItem* preview_item_{};
+    QComboBox* healing_type_{};
+    QDoubleSpinBox* healing_size_{};
+    QDoubleSpinBox* healing_feather_{};
+    QDoubleSpinBox* healing_opacity_{};
+    QListWidget* healing_list_{};
+    editing::HealingStroke healing_stroke_;
+    bool healing_drawing_{}, healing_drag_source_{};
+    bool healing_drag_size_{}, healing_delete_area_{}, healing_new_source_{};
+    QPointF healing_start_;
+    int healing_alternative_{};
+    QCheckBox* healing_visualize_{};
+    QDoubleSpinBox* healing_threshold_{};
     struct Job;
     struct PreviewJob;
     struct CommitJob;
@@ -62,6 +169,9 @@ class RawDialog final : public QDialog {
     QTimer* commit_timer_{};
     QImage preview_source_;
     QImage proxy_source_;
+    QImage preview_reference_;
+    QImage proxy_reference_;
+    QImage point_sample_preview_;
     QString preview_key_;
     quint64 preview_revision_{};
     bool preview_pending_{};
@@ -78,12 +188,21 @@ class RawDialog final : public QDialog {
     int current_{};
     bool closing_{};
     bool loading_{};
+    bool ui_ready_{};
     QTimer* timer_{};
     QListWidget* files_{};
     QGraphicsView* view_{};
     QGraphicsScene* scene_{};
     QCheckBox* denoise_{};
+    QDoubleSpinBox* denoise_amount_{};
+    QPushButton* denoise_compare_{};
     QCheckBox* compare_{};
+    QComboBox* compare_layout_{};
+    QBoxLayout* comparison_views_{};
+    QGraphicsView* before_view_{};
+    QGraphicsScene* before_scene_{};
+    QImage before_preview_;
+    std::vector<QJsonObject> before_recipes_;
     QComboBox* backend_{};
     QLineEdit* model_{};
     QDoubleSpinBox* exposure_{};
@@ -96,6 +215,11 @@ class RawDialog final : public QDialog {
     QSize source_size_;
     QGraphicsPathItem* stroke_guide_{}; // Owned by scene_; cleared before every scene rebuild.
     TonePanel* tone_{};
+    RawOpticsPanel* optics_{};
+    RawGeometryPanel* geometry_{};
+    RawWhiteBalancePanel* white_balance_{};
+    bool parameter_gesture_{};
+    QPointF target_start_;
     QLabel* message_{};
     QLabel* histogram_{};
     QLabel* image_info_{};

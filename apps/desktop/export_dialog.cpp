@@ -1,12 +1,17 @@
+#include "huelith/editing/image_storage.h"
 #include "export_dialog.h"
 #include "canvas_view.h"
 #include "window_header.h"
+#include <QCheckBox>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHeaderView>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -14,6 +19,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTimer>
@@ -93,12 +99,36 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
     form->addRow(tr("格式预设"), format_);
     profile_ = new QComboBox(this);
     profile_->setObjectName("exportQueueProfile");
-    profile_->addItems({"sRGB", "Adobe RGB", "Display P3"});
+    profile_->addItems({"sRGB", "Adobe RGB", "Display P3", "ProPhoto RGB"});
     form->addRow(tr("输出色彩空间 / 嵌入 ICC"), profile_);
     quality_ = new QSpinBox(this);
+    quality_->setObjectName("exportQueueQuality");
     quality_->setRange(1, 100);
     quality_->setValue(95);
-    form->addRow(tr("JPEG 质量（透明处填白）"), quality_);
+    form->addRow(tr("JPEG 质量"), quality_);
+    alpha_ = new QCheckBox(tr("保留透明度"), this);
+    alpha_->setObjectName("exportQueueAlpha");
+    alpha_->setChecked(true);
+    form->addRow(alpha_);
+    matte_ = new QPushButton(tr("背景填充色：#ffffff"), this);
+    matte_->setObjectName("exportQueueMatte");
+    matte_->setProperty("matte", QColor(Qt::white));
+    form->addRow(matte_);
+    connect(matte_, &QPushButton::clicked, this, [this] {
+        const auto color = QColorDialog::getColor(matte_->property("matte").value<QColor>(), this,
+                                                  tr("输出背景色"));
+        if (color.isValid()) {
+            matte_->setProperty("matte", color);
+            matte_->setText(tr("背景填充色：%1").arg(color.name()));
+        }
+    });
+    auto* metadata_row=new QHBoxLayout;
+    const QStringList names{tr("EXIF"),tr("IPTC"),tr("XMP"),tr("版权/作者"),tr("GPS 位置")};
+    for(int i=0;i<5;++i){metadata_[i]=new QCheckBox(names[i],this);
+        metadata_[i]->setObjectName(QString("exportMetadata%1").arg(i));
+        metadata_[i]->setChecked(QSettings().value(QString("exportQueue/metadata%1").arg(i),i!=4).toBool());
+        metadata_row->addWidget(metadata_[i]);}
+    form->addRow(tr("保留元数据"),metadata_row);
     conflict_ = new QComboBox(this);
     conflict_->setObjectName("exportQueueConflict");
     conflict_->addItems(
@@ -119,6 +149,7 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
     message_ = new QLabel(this);
     message_->setWordWrap(true);
     layout->addWidget(message_);
+    setup_presets(form);
     auto* buttons = new QHBoxLayout;
     const auto button = [&](const QString& text, const char* name,
                             const std::function<void()>& action) {
@@ -157,13 +188,32 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
     connect(timer, &QTimer::timeout, this, [this] { refresh(); });
     timer->start(150);
     update_example();
+    const auto previous =
+        QJsonDocument::fromJson(QSettings().value("exportQueue/lastSettings").toByteArray())
+            .object();
+    if (!previous.isEmpty())
+        try {
+            apply_output_preset(previous);
+        } catch (const std::exception& error) {
+            message_->setText(QString::fromUtf8(error.what()));
+        }
 }
 void ExportDialog::set_sources(const QList<CanvasView*>& sources) {
+    snapshots_.clear();
     sources_.clear();
     files_->clear();
     for (auto* canvas : sources) {
         sources_.append(canvas);
         auto* item = new QListWidgetItem(canvas->project().state().name, files_);
+        item->setCheckState(Qt::Checked);
+    }
+}
+void ExportDialog::set_snapshots(std::vector<editing::Snapshot> snapshots) {
+    sources_.clear();
+    snapshots_=std::move(snapshots);
+    files_->clear();
+    for(const auto& snapshot:snapshots_){
+        auto* item=new QListWidgetItem(snapshot.state.name,files_);
         item->setCheckState(Qt::Checked);
     }
 }
@@ -177,6 +227,8 @@ void ExportDialog::update_example() {
             QDir(directory_->text())
                 .filePath(output_name(naming_->text(), tr("照片"), size, 1) + extension));
         quality_->setEnabled(format_->currentIndex() == 2);
+        alpha_->setEnabled(format_->currentIndex() != 2);
+        matte_->setEnabled(format_->currentIndex() == 2 || !alpha_->isChecked());
     } catch (const std::exception& error) {
         example_->setText(QString::fromUtf8(error.what()));
     }
@@ -203,33 +255,40 @@ void ExportDialog::enqueue() {
                 collect(canvas->project().state().layers);
             }
         int index = 0;
-        for (qsizetype i = 0; i < sources_.size(); ++i) {
-            auto* canvas = sources_[i].data();
-            if (!canvas || files_->item(int(i))->checkState() != Qt::Checked)
+        for(const auto& snapshot:snapshots_)collect(snapshot.state.layers);
+        const auto count=snapshots_.empty()?std::size_t(sources_.size()):snapshots_.size();
+        for (std::size_t i = 0; i < count; ++i) {
+            auto* canvas = snapshots_.empty()?sources_[qsizetype(i)].data():nullptr;
+            if ((snapshots_.empty() && !canvas) || files_->item(int(i))->checkState() != Qt::Checked)
                 continue;
-            if (canvas->transforming())
+            if (canvas && canvas->transforming())
                 throw editing::EditError(tr("请先确认或取消当前变换，再提交导出快照"));
-            const auto snapshot = canvas->project().snapshot();
+            const auto snapshot = canvas?canvas->project().snapshot():snapshots_[i];
             ++index;
             for (const auto length : sizes) {
                 editing::ExportOptions options;
+                options.metadata={metadata_[0]->isChecked(),metadata_[1]->isChecked(),metadata_[2]->isChecked(),metadata_[3]->isChecked(),metadata_[4]->isChecked()};
+                for(int m=0;m<5;++m)QSettings().setValue(QString("exportQueue/metadata%1").arg(m),metadata_[m]->isChecked());
                 options.format = format_->currentIndex() == 2   ? "jpg"
                                  : format_->currentIndex() >= 3 ? "tif"
                                                                 : "png";
                 options.bits =
                     format_->currentIndex() == 1 || format_->currentIndex() == 4 ? 16 : 8;
                 options.quality = quality_->value();
-                options.space = QColorSpace(profile_->currentIndex() == 1   ? QColorSpace::AdobeRgb
-                                            : profile_->currentIndex() == 2 ? QColorSpace::DisplayP3
-                                                                            : QColorSpace::SRgb);
+                const std::array<QColorSpace::NamedColorSpace, 4> spaces{
+                    QColorSpace::SRgb, QColorSpace::AdobeRgb, QColorSpace::DisplayP3,
+                    QColorSpace::ProPhotoRgb};
+                options.space = QColorSpace(spaces[profile_->currentIndex()]);
+                options.alpha = alpha_->isChecked();
+                options.matte = matte_->property("matte").value<QColor>();
                 options.conflict = static_cast<editing::ExportConflict>(conflict_->currentIndex());
                 options.protected_paths = protected_paths;
                 options.size =
                     length == 0 ? snapshot.state.size
                                 : snapshot.state.size.scaled(length, length, Qt::KeepAspectRatio);
                 options.size = options.size.expandedTo(QSize(1, 1));
-                if (qint64(options.size.width()) * options.size.height() > 64'000'000)
-                    throw editing::EditError(tr("输出超过 6400 万像素预算"));
+                if (qint64(options.size.width()) * options.size.height() > huelith::editing::maximum_image_pixels)
+                    throw editing::EditError(tr("输出超过 5.12 亿像素预算"));
                 options.path =
                     QDir(directory_->text())
                         .filePath(output_name(naming_->text(), snapshot.state.name, length, index) +
@@ -244,6 +303,8 @@ void ExportDialog::enqueue() {
         QSettings().setValue("exportQueue/directory", directory_->text());
         QSettings().setValue("exportQueue/sizes", sizes_->text());
         QSettings().setValue("exportQueue/naming", naming_->text());
+        QSettings().setValue("exportQueue/lastSettings",
+                             QJsonDocument(output_preset()).toJson(QJsonDocument::Compact));
         queue_.start();
         message_->setText(tr("已提交 %1 个导出快照；返回编辑后任务继续，后续修改不影响本次输出。")
                               .arg(prepared.size()));
@@ -251,6 +312,166 @@ void ExportDialog::enqueue() {
     } catch (const std::exception& error) {
         message_->setText(QString::fromUtf8(error.what()));
     }
+}
+QJsonObject ExportDialog::output_preset() const {
+    return {{"version", 1},
+            {"metadata",QJsonArray{metadata_[0]->isChecked(),metadata_[1]->isChecked(),metadata_[2]->isChecked(),metadata_[3]->isChecked(),metadata_[4]->isChecked()}},
+            {"sizes", sizes_->text()},
+            {"naming", naming_->text()},
+            {"format", format_->currentIndex()},
+            {"profile", profile_->currentIndex()},
+            {"quality", quality_->value()},
+            {"conflict", conflict_->currentIndex()},
+            {"alpha", alpha_->isChecked()},
+            {"matte", matte_->property("matte").value<QColor>().name()}};
+}
+void ExportDialog::apply_output_preset(const QJsonObject& preset) {
+    parse_sizes(preset.value("sizes").toString());
+    output_name(preset.value("naming").toString(), "sample", 2048, 1);
+    const QColor color(preset.value("matte").toString());
+    if (preset.value("version").toInt() != 1 || !color.isValid() || color.alpha() != 255 ||
+        !preset.value("alpha").isBool())
+        throw editing::EditError(tr("导出预设无效"));
+    for (const auto& bound : {std::pair{"format", 4}, std::pair{"profile", 3},
+                              std::pair{"conflict", 2}, std::pair{"quality", 100}}) {
+        const auto value = preset.value(bound.first);
+        const int number = value.toInt(-1);
+        if (!value.isDouble() || number < 0 || number > bound.second ||
+            value.toDouble() != number || (QString(bound.first) == "quality" && number == 0))
+            throw editing::EditError(tr("导出预设参数无效"));
+    }
+    sizes_->setText(preset.value("sizes").toString());
+    const auto metadata=preset.value("metadata").toArray();
+    if(!metadata.isEmpty()&&metadata.size()!=5)throw editing::EditError(tr("元数据预设无效"));
+    for(int i=0;i<5;++i)metadata_[i]->setChecked(metadata.isEmpty()?i!=4:metadata[i].toBool());
+    naming_->setText(preset.value("naming").toString());
+    format_->setCurrentIndex(preset.value("format").toInt());
+    profile_->setCurrentIndex(preset.value("profile").toInt());
+    quality_->setValue(preset.value("quality").toInt());
+    conflict_->setCurrentIndex(preset.value("conflict").toInt());
+    alpha_->setChecked(preset.value("alpha").toBool());
+    matte_->setProperty("matte", color);
+    matte_->setText(tr("背景填充色：%1").arg(color.name()));
+    update_example();
+}
+void ExportDialog::setup_presets(QFormLayout* form) {
+    auto* list = new QComboBox(this);
+    list->setObjectName("exportQueuePreset");
+    auto* name = new QLineEdit(this);
+    name->setObjectName("exportQueuePresetName");
+    name->setMaxLength(120);
+    name->setPlaceholderText(tr("输入预设名称"));
+    auto* row = new QHBoxLayout;
+    auto* save = new QPushButton(tr("保存/更新"), this);
+    save->setObjectName("exportQueuePresetSave");
+    auto* remove = new QPushButton(tr("删除预设"), this);
+    remove->setObjectName("exportQueuePresetDelete");
+    row->addWidget(save);
+    row->addWidget(remove);
+    form->insertRow(0, tr("导出预设"), list);
+    form->insertRow(1, name);
+    form->insertRow(2, row);
+    const auto refresh = [this, list] {
+        const QSignalBlocker blocker(list);
+        list->clear();
+        list->addItem(tr("自定设置"));
+        auto base = output_preset();
+        base.insert("naming", "{name}_{size}_{index}");
+        base.insert("conflict", 0);
+        base.insert("quality", 95);
+        base.insert("matte", "#ffffff");
+        const auto add = [&](QString title, int format, int profile, QString sizes, bool alpha) {
+            auto item = base;
+            item.insert("format", format);
+            item.insert("profile", profile);
+            item.insert("sizes", sizes);
+            item.insert("alpha", alpha);
+            list->addItem(title, QVariant::fromValue(item));
+            list->setItemData(list->count() - 1, true, Qt::UserRole + 1);
+        };
+        add(tr("网络 JPEG · 2048 · sRGB"), 2, 0, "2048", false);
+        add(tr("透明 PNG · 原图 · sRGB"), 0, 0, "原图", true);
+        add(tr("高精度 TIFF · 原图 · ProPhoto RGB"), 4, 3, "原图", true);
+        for (const auto& value :
+             QJsonDocument::fromJson(QSettings().value("exportQueue/presets").toByteArray())
+                 .array()) {
+            const auto preset = value.toObject();
+            list->addItem(preset.value("name").toString(), QVariant::fromValue(preset));
+        }
+    };
+    refresh();
+    connect(list, &QComboBox::currentIndexChanged, this, [this, list, name, remove](int index) {
+        remove->setEnabled(index > 0 && !list->itemData(index, Qt::UserRole + 1).toBool());
+        if (index <= 0)
+            return;
+        try {
+            apply_output_preset(list->itemData(index).value<QJsonObject>());
+            name->setText(list->currentText());
+            message_->setText(tr("已应用导出预设"));
+        } catch (const std::exception& error) {
+            message_->setText(QString::fromUtf8(error.what()));
+        }
+    });
+    remove->setEnabled(false);
+    connect(save, &QPushButton::clicked, this, [this, list, name, refresh] {
+        try {
+            const auto title = name->text().trimmed();
+            if (title.isEmpty())
+                throw editing::EditError(tr("请输入预设名称"));
+            auto preset = output_preset();
+            apply_output_preset(preset);
+            preset.insert("name", title);
+            auto items =
+                QJsonDocument::fromJson(QSettings().value("exportQueue/presets").toByteArray())
+                    .array();
+            int index = -1;
+            for (int i = 0; i < items.size(); ++i)
+                if (items[i].toObject().value("name").toString().compare(
+                        title, Qt::CaseInsensitive) == 0) {
+                    index = i;
+                    break;
+                }
+            if (index >= 0)
+                items[index] = preset;
+            else {
+                if (items.size() >= 64)
+                    throw editing::EditError(tr("最多保存64个导出预设"));
+                items.append(preset);
+            }
+            QSettings settings;
+            settings.setValue("exportQueue/presets",
+                              QJsonDocument(items).toJson(QJsonDocument::Compact));
+            settings.sync();
+            if (settings.status() != QSettings::NoError)
+                throw editing::EditError(tr("无法写入导出预设"));
+            refresh();
+            list->setCurrentIndex(list->count() - items.size() +
+                                  (index >= 0 ? index : items.size() - 1));
+            message_->setText(tr("已保存导出预设"));
+        } catch (const std::exception& error) {
+            message_->setText(QString::fromUtf8(error.what()));
+        }
+    });
+    connect(remove, &QPushButton::clicked, this, [this, list, refresh, name] {
+        const int index = list->currentIndex();
+        if (index <= 0 || list->itemData(index, Qt::UserRole + 1).toBool())
+            return;
+        const auto title = list->currentText();
+        auto items =
+            QJsonDocument::fromJson(QSettings().value("exportQueue/presets").toByteArray()).array();
+        for (int i = int(items.size()) - 1; i >= 0; --i)
+            if (items[i].toObject().value("name").toString() == title)
+                items.removeAt(i);
+        QSettings settings;
+        settings.setValue("exportQueue/presets",
+                          QJsonDocument(items).toJson(QJsonDocument::Compact));
+        settings.sync();
+        refresh();
+        name->clear();
+        message_->setText(settings.status() == QSettings::NoError ? tr("已删除导出预设")
+                                                                  : tr("无法写入导出预设"));
+    });
+    connect(alpha_, &QCheckBox::toggled, this, [this] { update_example(); });
 }
 void ExportDialog::refresh() {
     const auto items = queue_.items();

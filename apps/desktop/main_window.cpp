@@ -1,5 +1,6 @@
 #include "main_window.h"
 #include "application_icon.h"
+#include "canvas_preferences.h"
 #include "canvas_view.h"
 #include "editor_controller.h"
 #include "new_document_dialog.h"
@@ -8,6 +9,10 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDockWidget>
+#include <QDialog>
+#include <QPointer>
+#include <QKeyEvent>
+#include <QSignalBlocker>
 #include <QFile>
 #include <QLabel>
 #include <QLibraryInfo>
@@ -16,6 +21,7 @@
 #include <QPalette>
 #include <QProxyStyle>
 #include <QPushButton>
+#include <QSettings>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyleFactory>
@@ -69,7 +75,7 @@ void apply_dark_theme() {
     palette.setColor(QPalette::Disabled, QPalette::Text, QColor(125, 125, 125));
     palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(125, 125, 125));
     QApplication::setPalette(palette);
-    qApp->setStyleSheet(QStringLiteral(R"(
+    auto stylesheet = QStringLiteral(R"(
         QWidget { color: #e2e5e8; font-family: 'Microsoft YaHei UI'; font-size: 13px; }
         QMainWindow, QDialog { background: #252a2e; }
         QWidget#windowHeader { background: #252a2e; border-bottom: 1px solid #383e44; }
@@ -102,7 +108,15 @@ void apply_dark_theme() {
         QStatusBar::item { border: none; }
         QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #202428; border: 1px solid #464d54; border-radius: 3px; padding: 5px; }
         QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border: 1px solid #2684ff; }
-    )"));
+    )");
+    const int font_index = read_canvas_preferences().interface_font;
+    const int sizes[]{10, 11, 13, 15};
+    stylesheet.replace("font-size: 13px", QString("font-size: %1px").arg(sizes[font_index]));
+    QFont interface_font("Microsoft YaHei UI");
+    interface_font.setPixelSize(sizes[font_index]);
+    QApplication::setFont(interface_font);
+    qApp->setStyleSheet(stylesheet);
+    qApp->setProperty("interfaceFontSize", font_index);
 }
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -142,14 +156,23 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(pages_);
     document_status_ = new QLabel(this);
     statusBar()->addWidget(document_status_, 1);
-    statusBar()->addPermanentWidget(new QLabel(tr("M2 · 开发中"), this));
+    statusBar()->addPermanentWidget(new QLabel(tr("M3 · 人像精修验收版"), this));
     menus_ = new QMenuBar(this);
     build_menus();
     build_panels();
     editor_ = new EditorController(this);
     setMenuWidget(new WindowHeader(menus_, this));
     default_layout_ = saveState(1);
-    connect(documents_, &QTabWidget::currentChanged, this, [this] { refresh_document_state(); });
+    if (read_canvas_preferences().restore_workspace) {
+        const auto layout = QSettings().value("workspace/lastLayout").toByteArray();
+        if (!layout.isEmpty() && !restoreState(layout, 1))
+            restoreState(default_layout_, 1);
+    }
+    apply_workspace_preferences();
+    connect(documents_, &QTabWidget::currentChanged, this, [this] {
+        refresh_document_state();
+        if(auto* c=active_canvas();c && c->window()!=this) {c->window()->show();c->window()->raise();}
+    });
     connect(documents_, &QTabWidget::tabCloseRequested, this,
             [this](int index) { request_close_document(index); });
     refresh_document_state();
@@ -192,6 +215,9 @@ void MainWindow::build_menus() {
 
 void MainWindow::build_panels() {
     auto* window_menu = menus_->addMenu(tr("窗口(&W)"));
+    auto* arrange = window_menu->addMenu(tr("排列"));
+    connect(arrange->addAction(tr("在窗口中浮动当前文档")), &QAction::triggered, this, &MainWindow::float_document);
+    connect(arrange->addAction(tr("将所有文档合并到标签栏")), &QAction::triggered, this, &MainWindow::dock_documents);
     auto* properties_dock = new QDockWidget(tr("属性"), this);
     properties_dock->setObjectName("propertiesDock");
     properties_dock->setMinimumWidth(280);
@@ -257,7 +283,69 @@ int MainWindow::document_count() const noexcept {
 }
 
 CanvasView* MainWindow::active_canvas() const {
-    return dynamic_cast<CanvasView*>(documents_->currentWidget());
+    return canvas_at(documents_->currentIndex());
+}
+
+CanvasView* MainWindow::canvas_at(int index) const {
+    auto* page = documents_->widget(index);
+    if (auto* canvas = dynamic_cast<CanvasView*>(page)) return canvas;
+    return page ? dynamic_cast<CanvasView*>(page->property("documentCanvas").value<QObject*>()) : nullptr;
+}
+int MainWindow::canvas_index(const CanvasView* canvas) const {
+    for (int i=0;i<documents_->count();++i) if (canvas_at(i)==canvas) return i;
+    return -1;
+}
+void MainWindow::float_document() {
+    auto* canvas=active_canvas(); if(!canvas)return;
+    if(canvas->window()!=this) {canvas->window()->show();canvas->window()->raise();return;}
+    canvas->finish_text(true);canvas->commit_transform();
+    const int index=canvas_index(canvas);const auto title=documents_->tabText(index);
+    const QSignalBlocker block(documents_);
+    documents_->removeTab(index);
+    auto* placeholder=new QWidget(documents_);
+    placeholder->setProperty("documentCanvas",QVariant::fromValue(static_cast<QObject*>(canvas)));
+    auto* layout=new QVBoxLayout(placeholder);layout->addStretch();
+    auto* return_button=new QPushButton(tr("文档已浮动 · 返回标签栏"),placeholder);
+    layout->addWidget(return_button,0,Qt::AlignCenter);layout->addStretch();
+    connect(return_button,&QPushButton::clicked,this,&MainWindow::dock_documents);
+    documents_->insertTab(index,placeholder,title);documents_->setCurrentIndex(index);
+    auto* floating=new QDialog(this,Qt::Window);
+    floating->setObjectName("floatingDocument");floating->setWindowTitle(title);
+    floating->setProperty("documentCanvas",QVariant::fromValue(static_cast<QObject*>(canvas)));
+    // A non-modal document window shares the original project and controller.
+    auto* content=new QVBoxLayout(floating);content->setContentsMargins(0,0,0,0);content->addWidget(canvas);
+    floating->resize(900,650);floating->setMinimumSize(320,240);
+    for(auto* action:findChildren<QAction*>()) if(!action->shortcuts().isEmpty()) floating->addAction(action);
+    floating->installEventFilter(this);floating->show();canvas->setFocus();refresh_document_state();
+}
+void MainWindow::dock_documents() {
+    const int active=documents_->currentIndex();
+    const QSignalBlocker block(documents_);
+    for(int i=0;i<documents_->count();++i) {
+        auto* canvas=canvas_at(i);auto* placeholder=documents_->widget(i);
+        if(!canvas || canvas==placeholder)continue;
+        const auto title=documents_->tabText(i);auto* floating=canvas->window();
+        floating->removeEventFilter(this);documents_->removeTab(i);
+        canvas->setParent(documents_);documents_->insertTab(i,canvas,title);
+        placeholder->deleteLater();floating->hide();floating->deleteLater();
+    }
+    documents_->setCurrentIndex(active);refresh_document_state();if(auto* c=active_canvas())c->setFocus();
+}
+bool MainWindow::eventFilter(QObject* watched,QEvent* event) {
+    if(watched->objectName()=="floatingDocument") {
+        auto* canvas=dynamic_cast<CanvasView*>(watched->property("documentCanvas").value<QObject*>());
+        const int index=canvas_index(canvas);
+        if(event->type()==QEvent::WindowActivate && index>=0) {
+            documents_->setCurrentIndex(index);refresh_document_state();
+        } else if(event->type()==QEvent::Close) {
+            static_cast<QCloseEvent*>(event)->ignore();
+            request_close_document(index);return true;
+        } else if(event->type()==QEvent::KeyPress && static_cast<QKeyEvent*>(event)->key()==Qt::Key_Escape) {
+            // Escape belongs to the canvas gesture, never QDialog::reject().
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(watched,event);
 }
 
 void MainWindow::change_zoom(double multiplier) {
@@ -283,12 +371,20 @@ bool MainWindow::confirm_discard() {
 void MainWindow::request_close_document(int index) {
     if (index < 0 || index >= documents_->count() ||
         (editor_ &&
-         !editor_->confirm_close(dynamic_cast<CanvasView*>(documents_->widget(index))))) {
+         !editor_->confirm_close(canvas_at(index)))) {
         return;
     }
     auto* page = documents_->widget(index);
-    if (auto* canvas = dynamic_cast<CanvasView*>(page))
+    auto* canvas = canvas_at(index);
+    if (canvas) {
         QFile::remove(canvas->recovery_file);
+        if (canvas != page) {
+            auto* floating = canvas->window();
+            floating->removeEventFilter(this);
+            floating->hide();
+            floating->deleteLater();
+        }
+    }
     documents_->removeTab(index);
     page->deleteLater();
     refresh_document_state();
@@ -296,15 +392,20 @@ void MainWindow::request_close_document(int index) {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     for (int i = 0; i < documents_->count(); ++i) {
-        auto* canvas = dynamic_cast<CanvasView*>(documents_->widget(i));
+        auto* canvas = canvas_at(i);
         if (editor_ && !editor_->confirm_close(canvas)) {
             event->ignore();
             return;
         }
     }
     for (int i = 0; i < documents_->count(); ++i) {
-        if (auto* canvas = dynamic_cast<CanvasView*>(documents_->widget(i)))
+        if (auto* canvas = canvas_at(i))
             QFile::remove(canvas->recovery_file);
+    }
+    if (read_canvas_preferences().restore_workspace) {
+        QSettings settings;
+        settings.setValue("workspace/lastLayout", saveState(1));
+        settings.sync();
     }
     event->accept();
 }
@@ -357,6 +458,21 @@ bool MainWindow::nativeEvent(const QByteArray& event_type, void* message, qintpt
 
 void MainWindow::reset_workspace() {
     restoreState(default_layout_, 1);
+    apply_workspace_preferences();
+}
+void MainWindow::apply_workspace_preferences() {
+    const auto preferences = read_canvas_preferences();
+    for (auto* dock : findChildren<QDockWidget*>()) {
+        dock->setFeatures(preferences.lock_workspace
+                              ? QDockWidget::DockWidgetFeatures(QDockWidget::DockWidgetClosable)
+                              : QDockWidget::DockWidgetFeatures(QDockWidget::DockWidgetClosable |
+                                                                QDockWidget::DockWidgetMovable |
+                                                                QDockWidget::DockWidgetFloatable));
+    }
+    documents_->setMovable(preferences.movable_tabs);
+    documents_->setTabsClosable(preferences.close_tabs);
+    documents_->tabBar()->setStyleSheet(
+        preferences.large_tabs ? "QTabBar::tab { padding: 12px 22px; }" : QString{});
 }
 
 void MainWindow::refresh_document_state() {

@@ -1,4 +1,8 @@
 #include "tone_panel.h"
+#include "color_band_slider.h"
+#include "curve_panel.h"
+#include "point_color_panel.h"
+#include "raw_section_header.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -6,6 +10,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QKeyEvent>
 #include <QListWidget>
 #include <QMouseEvent>
 #include <QPainter>
@@ -23,95 +28,6 @@
 
 namespace huelith::desktop {
 namespace {
-class ColorBandSlider final : public QSlider {
-  public:
-    ColorBandSlider(int channel, int band, QWidget* parent)
-        : QSlider(Qt::Horizontal, parent), channel_(channel), band_(band) {
-        setRange(-100, 100);
-        setFixedHeight(16);
-        setFocusPolicy(Qt::StrongFocus);
-        setTracking(true);
-        setToolTip(tr("拖动或点击调整；方向键微调；双击归零"));
-    }
-    void set_default(int value) {
-        default_ = value;
-        setToolTip(tr("拖动或点击调整；方向键微调；双击恢复默认值"));
-    }
-
-  protected:
-    void paintEvent(QPaintEvent*) override {
-        static constexpr std::array<double, 8> hues{0, 30, 60, 120, 180, 240, 270, 300};
-        const double hue = hues[band_] / 360;
-        const auto color = [](double h, double s, double v) {
-            return QColor::fromHsvF(std::fmod(h + 1, 1.), s, v);
-        };
-        QLinearGradient gradient(6, 0, width() - 6, 0);
-        if (channel_ < 0) {
-            gradient.setColorAt(0, QColor("#8a8a8a"));
-            gradient.setColorAt(1, QColor("#8a8a8a"));
-        } else if (channel_ == 0) {
-            gradient.setColorAt(0, color(hue - .08, .55, .65));
-            gradient.setColorAt(.5, color(hue, .55, .65));
-            gradient.setColorAt(1, color(hue + .08, .55, .65));
-        } else if (channel_ == 1) {
-            gradient.setColorAt(0, QColor("#737373"));
-            gradient.setColorAt(1, color(hue, .9, .9));
-        } else {
-            gradient.setColorAt(0, color(hue, .6, .16));
-            gradient.setColorAt(.5, color(hue, .65, .65));
-            gradient.setColorAt(1, color(hue, .2, 1));
-        }
-        QPainter painter(this);
-        painter.fillRect(QRectF(6, 6, width() - 12, 3), gradient);
-        const double x = 6 + (width() - 12.) * (value() - minimum()) / (maximum() - minimum());
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(QPen(QColor("#303030"), .8));
-        painter.setBrush(isEnabled() ? QColor("#cccccc") : QColor("#707070"));
-        painter.drawPolygon(QPolygonF{QPointF(x, 3), QPointF(x + 5, 11), QPointF(x - 5, 11)});
-        if (hasFocus()) {
-            painter.setPen(QPen(QColor("#999999"), 1, Qt::DotLine));
-            painter.setBrush(Qt::NoBrush);
-            painter.drawRect(rect().adjusted(0, 0, -1, -1));
-        }
-    }
-    void mousePressEvent(QMouseEvent* event) override {
-        if (event->button() != Qt::LeftButton)
-            return;
-        setFocus(Qt::MouseFocusReason);
-        setSliderDown(true);
-        set_at(event->position().x());
-        event->accept();
-    }
-    void mouseMoveEvent(QMouseEvent* event) override {
-        if (isSliderDown())
-            set_at(event->position().x());
-    }
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        if (event->button() != Qt::LeftButton || !isSliderDown())
-            return;
-        set_at(event->position().x());
-        setSliderDown(false);
-        event->accept();
-    }
-    void mouseDoubleClickEvent(QMouseEvent* event) override {
-        if (event->button() != Qt::LeftButton)
-            return;
-        setSliderDown(true);
-        setValue(default_);
-        setSliderDown(false);
-        event->accept();
-    }
-
-  private:
-    void set_at(double x) {
-        const double position = std::clamp((x - 6) / std::max(1., width() - 12.), 0., 1.);
-        setValue(qRound(minimum() + (maximum() - minimum()) * position));
-    }
-    int channel_;
-    int band_;
-    int default_{};
-};
-
 class HslMixer final : public QWidget {
   public:
     HslMixer(editing::ToneSettings& settings, std::function<void()> changed, QWidget* parent)
@@ -126,6 +42,12 @@ class HslMixer final : public QWidget {
         mode_->setObjectName("rawHslMode");
         mode_->addItems({tr("HSL"), tr("颜色")});
         adjust->addWidget(mode_, 1);
+        auto* target = new QToolButton(this);
+        target->setObjectName("rawHslTarget");
+        target->setText(QStringLiteral("◎"));
+        target->setCheckable(true);
+        target->setToolTip(tr("目标调整：在图像上按住并上下拖动调整对应颜色"));
+        adjust->addWidget(target);
         layout->addLayout(adjust);
         channels_ = new QTabBar(this);
         channels_->setObjectName("rawHslTabs");
@@ -259,7 +181,9 @@ class ColorWheel final : public QWidget {
     ColorWheel(double& hue, double& saturation, QWidget* parent)
         : QWidget(parent), hue_(hue), saturation_(saturation) {
         setFixedSize(112, 112);
-        setToolTip(tr("拖动调整色相与饱和度，双击恢复中性"));
+        setFocusPolicy(Qt::StrongFocus);
+        setToolTip(
+            tr("拖动调整色相与饱和度；Shift 只调饱和度，Ctrl 只调色相，Alt 微调；双击恢复中性"));
         wheel_ = QImage(112, 112, QImage::Format_ARGB32);
         wheel_.fill(Qt::transparent);
         for (int y = 0; y < 112; ++y)
@@ -279,6 +203,7 @@ class ColorWheel final : public QWidget {
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
+        painter.scale(width() / 112., height() / 112.);
         painter.drawImage(0, 0, wheel_);
         const double angle = hue_ / 180 * std::numbers::pi;
         const double radius = saturation_ / 100 * 51;
@@ -291,11 +216,40 @@ class ColorWheel final : public QWidget {
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() != Qt::LeftButton)
             return;
-        adjust(event->position());
+        last_ = event->position() * (112. / width());
+        start_hue_ = hue_;
+        start_saturation_ = saturation_;
+        dragging_ = true;
+        adjust(event->position() * (112. / width()), event->modifiers());
     }
     void mouseMoveEvent(QMouseEvent* event) override {
-        if (event->buttons().testFlag(Qt::LeftButton))
-            adjust(event->position());
+        if (dragging_ && event->buttons().testFlag(Qt::LeftButton))
+            adjust(event->position() * (112. / width()), event->modifiers());
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton)
+            dragging_ = false;
+    }
+    void keyPressEvent(QKeyEvent* event) override {
+        if (event->key() == Qt::Key_Escape && dragging_) {
+            hue_ = start_hue_;
+            saturation_ = start_saturation_;
+            dragging_ = false;
+        } else if (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right) {
+            const double step = event->modifiers().testFlag(Qt::ShiftModifier) ? 10. : 1.;
+            hue_ = std::fmod(hue_ + (event->key() == Qt::Key_Left ? -step : step) + 360., 360.);
+        } else if (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down) {
+            const double step = event->modifiers().testFlag(Qt::ShiftModifier) ? 10. : 1.;
+            saturation_ = std::clamp(saturation_ +
+                (event->key() == Qt::Key_Down ? -step : step), 0., 100.);
+        } else {
+            QWidget::keyPressEvent(event);
+            return;
+        }
+        update();
+        if (changed)
+            changed();
+        event->accept();
     }
     void mouseDoubleClickEvent(QMouseEvent*) override {
         saturation_ = 0;
@@ -305,10 +259,20 @@ class ColorWheel final : public QWidget {
     }
 
   private:
-    void adjust(QPointF point) {
+    void adjust(QPointF point, Qt::KeyboardModifiers modifiers) {
         const double dx = point.x() - 55.5, dy = 55.5 - point.y();
-        hue_ = std::fmod(std::atan2(dy, dx) * 180 / std::numbers::pi + 360, 360.);
-        saturation_ = std::min(100., std::hypot(dx, dy) / 51 * 100);
+        const double hue = std::fmod(std::atan2(dy, dx) * 180 / std::numbers::pi + 360, 360.);
+        const double saturation = std::min(100., std::hypot(dx, dy) / 51 * 100);
+        if (modifiers.testFlag(Qt::AltModifier)) {
+            if (!modifiers.testFlag(Qt::ShiftModifier))
+                hue_ = std::fmod(hue_ + (point.x() - last_.x()) * .2 + 360, 360.);
+            if (!modifiers.testFlag(Qt::ControlModifier))
+                saturation_ = std::clamp(saturation_ - (point.y() - last_.y()) * .2, 0., 100.);
+        } else {
+            hue_ = modifiers.testFlag(Qt::ShiftModifier) ? start_hue_ : hue;
+            saturation_ = modifiers.testFlag(Qt::ControlModifier) ? start_saturation_ : saturation;
+        }
+        last_ = point;
         update();
         if (changed)
             changed();
@@ -316,106 +280,9 @@ class ColorWheel final : public QWidget {
     double& hue_;
     double& saturation_;
     QImage wheel_;
-};
-class CurveEditor final : public QWidget {
-  public:
-    explicit CurveEditor(std::vector<QPointF>& points, QWidget* parent)
-        : QWidget(parent), points_source_(&points) {
-        setMinimumSize(200, 200);
-        setObjectName("toneCurve");
-        setToolTip(tr("单击添加节点，拖动调整；右键删除中间节点"));
-    }
-    std::function<void()> changed;
-    void set_points(std::vector<QPointF>& points) {
-        points_source_ = &points;
-        selected_ = -1;
-        update();
-    }
-
-  protected:
-    void paintEvent(QPaintEvent*) override {
-        const auto& points_ = *points_source_;
-        QPainter painter(this);
-        painter.fillRect(rect(), QColor("#202428"));
-        painter.setRenderHint(QPainter::Antialiasing);
-        const auto area = rect().adjusted(10, 10, -10, -10);
-        painter.setPen(QColor("#40464c"));
-        for (int i = 0; i <= 4; ++i) {
-            painter.drawLine(area.left() + area.width() * i / 4, area.top(),
-                             area.left() + area.width() * i / 4, area.bottom());
-            painter.drawLine(area.left(), area.top() + area.height() * i / 4, area.right(),
-                             area.top() + area.height() * i / 4);
-        }
-        QPolygonF line;
-        for (const auto point : points_)
-            line.append(QPointF(area.left() + point.x() * area.width(),
-                                area.bottom() - point.y() * area.height()));
-        painter.setPen(QPen(QColor("#d8dce1"), 1.5));
-        painter.drawPolyline(line);
-        painter.setBrush(QColor("#348dec"));
-        for (const auto point : line)
-            painter.drawEllipse(point, 4, 4);
-    }
-    void mousePressEvent(QMouseEvent* event) override {
-        auto& points_ = *points_source_;
-        const auto point = normalized(event->position());
-        selected_ = -1;
-        double nearest = .04;
-        for (std::size_t i = 0; i < points_.size(); ++i) {
-            const auto distance = QLineF(points_[i], point).length();
-            if (distance < nearest) {
-                selected_ = int(i);
-                nearest = distance;
-            }
-        }
-        if (event->button() == Qt::RightButton) {
-            if (selected_ > 0 && selected_ + 1 < int(points_.size())) {
-                points_.erase(points_.begin() + selected_);
-                if (changed)
-                    changed();
-                update();
-            }
-            selected_ = -1;
-            return;
-        }
-        if (selected_ < 0 && points_.size() < 64 && point.x() > .002 && point.x() < .998) {
-            auto position = std::upper_bound(points_.begin(), points_.end(), point.x(),
-                                             [](double x, QPointF p) { return x < p.x(); });
-            if (point.x() - (position - 1)->x() < .002 || position->x() - point.x() < .002)
-                return;
-            selected_ = int(position - points_.begin());
-            points_.insert(position, point);
-            if (changed)
-                changed();
-            update();
-        }
-    }
-    void mouseMoveEvent(QMouseEvent* event) override {
-        auto& points_ = *points_source_;
-        if (selected_ < 0 || !event->buttons().testFlag(Qt::LeftButton))
-            return;
-        auto point = normalized(event->position());
-        if (selected_ == 0)
-            point.setX(0);
-        else if (selected_ + 1 == int(points_.size()))
-            point.setX(1);
-        else
-            point.setX(std::clamp(point.x(), points_[selected_ - 1].x() + .001,
-                                  points_[selected_ + 1].x() - .001));
-        points_[selected_] = point;
-        update();
-        if (changed)
-            changed();
-    }
-
-  private:
-    QPointF normalized(QPointF p) const {
-        const auto area = rect().adjusted(10, 10, -10, -10);
-        return {std::clamp((p.x() - area.left()) / area.width(), 0., 1.),
-                std::clamp((area.bottom() - p.y()) / area.height(), 0., 1.)};
-    }
-    std::vector<QPointF>* points_source_;
-    int selected_{-1};
+    QPointF last_;
+    double start_hue_{}, start_saturation_{};
+    bool dragging_{};
 };
 } // namespace
 TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
@@ -434,6 +301,10 @@ TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
     pages_ = new QStackedWidget(this);
     layout->addWidget(pages_, 1);
     const auto notify = [this] {
+        if (refresh_details_)
+            refresh_details_();
+        if (refresh_hsl_)
+            refresh_hsl_();
         for (auto* widget : findChildren<QWidget*>())
             if (widget->objectName().startsWith("rawColorWheel"))
                 widget->update();
@@ -464,8 +335,9 @@ TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
         slider->setRange(qRound(low / step), qRound(high / step));
         slider->setValue(qRound(value / step));
         slider->set_default(qRound(
-            (QLatin1String(name) == "toneGamma" || QLatin1String(name) == "toneWhitePoint" ? 1.
-                                                                                           : 0.) /
+            (QLatin1String(name) == "toneGradingBlending"                                    ? 50.
+             : QLatin1String(name) == "toneGamma" || QLatin1String(name) == "toneWhitePoint" ? 1.
+                                                                                             : 0.) /
             step));
         slider->setTracking(false);
         row_layout->addWidget(slider, 1);
@@ -492,8 +364,8 @@ TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
     auto* color = page();
     number(color, "toneTemperature", tr("冷暖偏移"), settings_.temperature);
     number(color, "toneTint", tr("色调"), settings_.tint);
-    number(color, "toneSaturation", tr("饱和度"), settings_.saturation);
     number(color, "toneVibrance", tr("自然饱和度"), settings_.vibrance);
+    number(color, "toneSaturation", tr("饱和度"), settings_.saturation);
     auto* monochrome = new QCheckBox(tr("黑白"), this);
     monochrome->setObjectName("toneMonochrome");
     monochrome->setChecked(settings_.monochrome);
@@ -507,27 +379,15 @@ TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
     number(levels, "toneGamma", tr("中间调"), settings_.gamma, .1, 10, .01);
     number(levels, "toneWhitePoint", tr("输入白场"), settings_.white_point, .5, 1, .001);
     auto* curve = page();
-    auto* channel = new QComboBox(this);
-    channel->setObjectName("toneCurveChannel");
-    channel->addItems({tr("RGB"), tr("红"), tr("绿"), tr("蓝")});
-    curve->addRow(tr("通道"), channel);
-    auto* editor = new CurveEditor(settings_.curve, this);
-    connect(channel, &QComboBox::currentIndexChanged, this, [this, editor](int index) {
-        editor->set_points(index == 0 ? settings_.curve : settings_.channel_curves[index - 1]);
-    });
-    editor->changed = notify;
-    curve->addRow(editor);
-    auto* reset = new QPushButton(tr("重置曲线"), this);
-    reset->setAutoDefault(false);
-    curve->addRow(reset);
-    connect(reset, &QPushButton::clicked, this, [this, editor, channel, notify] {
-        auto& points = channel->currentIndex() == 0
-                           ? settings_.curve
-                           : settings_.channel_curves[channel->currentIndex() - 1];
-        points = {{0, 0}, {1, 1}};
-        editor->update();
-        notify();
-    });
+    curves_ = new CurvePanel(settings_, notify, this);
+    curve->addRow(curves_);
+    auto* curve_target = new QToolButton(curves_);
+    curve_target->setObjectName("toneCurveTarget");
+    curve_target->setText(tr("◎ 目标调整"));
+    curve_target->setCheckable(true);
+    static_cast<QVBoxLayout*>(curves_->layout())->insertWidget(0, curve_target);
+    connect(curve_target, &QToolButton::toggled, this,
+            [this](bool checked) { set_target_mode(checked ? 3 : -1); });
     auto* hsl = page();
     auto* band = new QComboBox(this);
     band->setObjectName("toneBand");
@@ -555,24 +415,153 @@ TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
             spin->setValue((*array)[index]);
         });
     }
+    for (int i = 0; i < hsl->count(); ++i)
+        if (auto* widget = hsl->itemAt(i)->widget())
+            widget->hide();
+    auto* shared_mixer = new HslMixer(settings_, notify, pages_->widget(4));
+    hsl->addRow(shared_mixer);
+    refresh_hsl_ = [shared_mixer] { shared_mixer->refresh(); };
+    auto* target_button = shared_mixer->findChild<QToolButton*>("rawHslTarget");
+    auto* target_tabs = shared_mixer->findChild<QTabBar*>("rawHslTabs");
+    connect(target_button, &QToolButton::toggled, this, [this, target_tabs](bool checked) {
+        set_target_mode(checked ? std::min(2, target_tabs->currentIndex()) : -1);
+    });
+    connect(target_tabs, &QTabBar::currentChanged, this, [this](int index) {
+        if (target_mode_ >= 0 && target_mode_ < 3 && index < 3 && target_mode_ != index)
+            set_target_mode(index);
+    });
+    auto* mixer_tabs = new QTabBar(pages_->widget(4));
+    mixer_tabs->setObjectName("rawMixerTabs");
+    mixer_tabs->addTab(tr("混合器"));
+    mixer_tabs->addTab(tr("点颜色"));
+    mixer_tabs->setDrawBase(false);
+    mixer_tabs->setExpanding(false);
+    hsl->insertRow(0, mixer_tabs);
+    point_colors_ = new PointColorPanel(settings_, pages_->widget(4));
+    point_colors_->changed = [this] {
+        if (changed)
+            changed();
+    };
+    point_colors_->preview_changed = [this] {
+        if (point_colors_->sampling())
+            set_target_mode(-1);
+        if (point_view_changed)
+            point_view_changed();
+    };
+    hsl->addRow(point_colors_);
+    point_colors_->hide();
+    connect(mixer_tabs, &QTabBar::currentChanged, this, [this, shared_mixer](int index) {
+        shared_mixer->setVisible(index == 0);
+        point_colors_->setVisible(index == 1);
+        if (index == 0)
+            point_colors_->stop_sampling();
+        else
+            set_target_mode(-1);
+    });
     auto* grading = page();
     auto* zone = new QComboBox(this);
     zone->setObjectName("toneGradingZone");
-    zone->addItems({tr("阴影"), tr("中间调"), tr("高光")});
-    grading->addRow(tr("范围"), zone);
-    const std::array<std::array<double, 3>*, 3> grade_arrays{
+    zone->addItems({tr("阴影"), tr("中间调"), tr("高光"), tr("全局")});
+    zone->hide();
+    auto* grading_tabs = new QTabBar(this);
+    grading_tabs->setObjectName("toneGradingViews");
+    grading_tabs->setExpanding(true);
+    grading_tabs->setUsesScrollButtons(false);
+    grading_tabs->setStyleSheet("QTabBar::tab { min-width:0; padding:4px 5px; }");
+    for (const auto& title : {tr("三向"), tr("阴影"), tr("中间调"), tr("高光"), tr("全局")})
+        grading_tabs->addTab(title);
+    grading->addRow(grading_tabs);
+    auto* wheels = new QWidget(this);
+    auto* wheel_layout = new QGridLayout(wheels);
+    wheel_layout->setContentsMargins(0, 0, 0, 0);
+    std::array<ColorWheel*, 4> wheel_items{};
+    std::array<QWidget*, 4> wheel_containers{};
+    for (int i = 0; i < 4; ++i) {
+        auto* container = new QWidget(wheels);
+        wheel_containers[i] = container;
+        auto* box = new QVBoxLayout(container);
+        box->setContentsMargins(0, 0, 0, 0);
+        auto* label = new QLabel(zone->itemText(i), container);
+        label->setAlignment(Qt::AlignCenter);
+        box->addWidget(label);
+        auto* wheel =
+            new ColorWheel(settings_.grading_hue[i], settings_.grading_saturation[i], container);
+        wheel_items[i] = wheel;
+        wheel->setObjectName(QString("rawColorWheel%1").arg(i));
+        wheel->changed = [this, zone, i] {
+            zone->setCurrentIndex(i);
+            set_settings(settings_);
+            if (changed)
+                changed();
+        };
+        box->addWidget(wheel, 0, Qt::AlignCenter);
+        auto* luminance_slider = new ColorBandSlider(0, 0, container);
+        luminance_slider->set_colors(QColor("#444444"), QColor("#eeeeee"));
+        luminance_slider->setFixedWidth(112);
+        luminance_slider->setObjectName(QString("toneGradingLight%1").arg(i));
+        luminance_slider->setRange(-100, 100);
+        luminance_slider->setValue(qRound(settings_.grading_luminance[i]));
+        luminance_slider->setAccessibleName(zone->itemText(i) + tr("明度"));
+        box->addWidget(luminance_slider, 0, Qt::AlignCenter);
+        connect(luminance_slider, &QSlider::valueChanged, this, [this, zone, i](int value) {
+            settings_.grading_luminance[i] = value;
+            zone->setCurrentIndex(i);
+            set_settings(settings_);
+            if (changed)
+                changed();
+        });
+    }
+    const auto show_wheels = [wheel_layout, wheel_containers, wheel_items, zone](int view) {
+        for (int i = 0; i < 4; ++i) {
+            wheel_layout->removeWidget(wheel_containers[i]);
+            const bool show = view == 0 ? i < 3 : i == view - 1;
+            wheel_containers[i]->setVisible(show);
+            wheel_items[i]->setFixedSize(view ? 180 : 112, view ? 180 : 112);
+            if (show)
+                wheel_layout->addWidget(wheel_containers[i],
+                                        view     ? 0
+                                        : i == 1 ? 0
+                                                 : 1,
+                                        view     ? 0
+                                        : i == 2 ? 1
+                                                 : 0,
+                                        1, view || i == 1 ? 2 : 1);
+        }
+        if (view)
+            zone->setCurrentIndex(view - 1);
+    };
+    connect(grading_tabs, &QTabBar::currentChanged, this, show_wheels);
+    show_wheels(0);
+    grading->addRow(wheels);
+    refresh_grading_ = [this, wheel_items] {
+        for (int i = 0; i < 4; ++i) {
+            wheel_items[i]->update();
+            auto* light = findChild<QSlider*>(QString("toneGradingLight%1").arg(i));
+            const QSignalBlocker block(light);
+            light->setValue(qRound(settings_.grading_luminance[i]));
+        }
+    };
+    const std::array<std::array<double, 4>*, 3> grade_arrays{
         &settings_.grading_hue, &settings_.grading_saturation, &settings_.grading_luminance};
     const std::array<const char*, 3> grade_names{"toneGradingHue", "toneGradingSaturation",
                                                  "toneGradingLuminance"};
+    auto* grading_numbers = new QWidget(this);
+    auto* grading_numbers_form = new QFormLayout(grading_numbers);
+    grading_numbers_form->setContentsMargins(0, 0, 0, 0);
+    grading->addRow(grading_numbers);
+    grading_numbers->hide();
+    connect(grading_tabs, &QTabBar::currentChanged, grading_numbers,
+            [grading_numbers](int index) { grading_numbers->setVisible(index != 0); });
     for (int i = 0; i < 3; ++i) {
         auto* spin = new QDoubleSpinBox(this);
         spin->setObjectName(QLatin1String(grade_names[i]));
         spin->setRange(i == 2 ? -100 : 0, i == 0 ? 360 : 100);
         spin->setValue((*grade_arrays[i])[0]);
-        grading->addRow(labels[i], spin);
+        grading_numbers_form->addRow(labels[i], spin);
         connect(spin, &QDoubleSpinBox::valueChanged, this,
-                [zone, array = grade_arrays[i], notify](double value) {
+                [this, zone, array = grade_arrays[i], notify](double value) {
                     (*array)[zone->currentIndex()] = value;
+                    refresh_grading_();
                     notify();
                 });
         connect(zone, &QComboBox::currentIndexChanged, this,
@@ -581,6 +570,7 @@ TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
                     spin->setValue((*array)[index]);
                 });
     }
+    number(grading, "toneGradingBlending", tr("混合"), settings_.grading_blending, 0, 100);
     number(grading, "toneGradingBalance", tr("平衡"), settings_.grading_balance);
     categories_->addItems({tr("效果"), tr("细节")});
     auto* effects = page();
@@ -588,9 +578,141 @@ TonePanel::TonePanel(editing::ToneSettings settings, QWidget* parent)
     number(effects, "toneClarity", tr("清晰度"), settings_.clarity);
     number(effects, "toneDehaze", tr("去薄雾"), settings_.dehaze);
     number(effects, "toneVignette", tr("晕影"), settings_.vignette);
+    auto* vignette_style = new QComboBox(this);
+    vignette_style->setObjectName("toneVignetteStyle");
+    vignette_style->addItems({tr("高光优先"), tr("颜色优先"), tr("绘画叠加")});
+    effects->addRow(tr("样式"), vignette_style);
+    number(effects, "toneVignetteMidpoint", tr("中点"), settings_.vignette_midpoint, 0, 100);
+    number(effects, "toneVignetteRoundness", tr("圆度"), settings_.vignette_roundness);
+    number(effects, "toneVignetteFeather", tr("羽化"), settings_.vignette_feather, 0, 100);
+    number(effects, "toneVignetteHighlights", tr("高光"), settings_.vignette_highlights, 0, 100);
     number(effects, "toneGrain", tr("颗粒"), settings_.grain, 0, 100);
+    number(effects, "toneGrainSize", tr("大小"), settings_.grain_size, 0, 100);
+    number(effects, "toneGrainRoughness", tr("粗糙度"), settings_.grain_roughness, 0, 100);
+    refresh_film_ = [this, vignette_style] {
+        const QSignalBlocker blocker(vignette_style);
+        vignette_style->setCurrentIndex(int(settings_.vignette_style));
+        vignette_style->setEnabled(settings_.vignette != 0);
+        for (const auto* name :
+             {"toneVignetteMidpoint", "toneVignetteRoundness", "toneVignetteFeather",
+              "toneVignetteHighlights", "toneGrainSize", "toneGrainRoughness"}) {
+            const bool grain = QByteArray(name).startsWith("toneGrain");
+            const bool enabled =
+                grain ? settings_.grain != 0
+                      : settings_.vignette != 0 &&
+                            (QByteArray(name) != "toneVignetteHighlights" ||
+                             (settings_.vignette < 0 && settings_.vignette_style != 2));
+            findChild<QDoubleSpinBox*>(QLatin1String(name))->parentWidget()->setEnabled(enabled);
+        }
+    };
+    connect(vignette_style, &QComboBox::currentIndexChanged, this, [this, notify](int index) {
+        settings_.vignette_style = index;
+        settings_.legacy_film_effects = false;
+        refresh_film_();
+        notify();
+    });
+    for (const auto* name :
+         {"toneVignette", "toneVignetteMidpoint", "toneVignetteRoundness", "toneVignetteFeather",
+          "toneVignetteHighlights", "toneGrain", "toneGrainSize", "toneGrainRoughness"})
+        connect(findChild<QDoubleSpinBox*>(QLatin1String(name)), &QDoubleSpinBox::valueChanged,
+                this, [this, notify] {
+                    settings_.legacy_film_effects = false;
+                    refresh_film_();
+                    notify();
+                });
+    refresh_film_();
+    for (const auto& [name, value] :
+         {std::pair{"toneVignetteMidpointSlider", 50}, std::pair{"toneVignetteFeatherSlider", 50},
+          std::pair{"toneGrainSizeSlider", 25}, std::pair{"toneGrainRoughnessSlider", 50}})
+        static_cast<ColorBandSlider*>(findChild<QSlider*>(QLatin1String(name)))->set_default(value);
     auto* details = page();
-    number(details, "toneSharpening", tr("锐化"), settings_.sharpening, 0, 100);
+    number(details, "toneSharpening", tr("锐化"), settings_.sharpening, 0, 150);
+    number(details, "toneSharpenRadius", tr("半径"), settings_.details.radius, .5, 3, .1);
+    number(details, "toneSharpenDetail", tr("细节"), settings_.details.detail, 0, 100);
+    number(details, "toneSharpenMasking", tr("蒙版"), settings_.details.masking, 0, 100);
+    details->addRow(new QLabel(tr("手动减少杂色"), this));
+    number(details, "toneNoiseLuminance", tr("明度"), settings_.details.luminance, 0, 100);
+    number(details, "toneNoiseLuminanceDetail", tr("细节"), settings_.details.luminance_detail, 0,
+           100);
+    number(details, "toneNoiseLuminanceContrast", tr("对比度"),
+           settings_.details.luminance_contrast, 0, 100);
+    number(details, "toneNoiseColor", tr("颜色"), settings_.details.color, 0, 100);
+    number(details, "toneNoiseColorDetail", tr("细节"), settings_.details.color_detail, 0, 100);
+    number(details, "toneNoiseColorSmoothness", tr("平滑度"), settings_.details.color_smoothness, 0,
+           100);
+    details->addRow(new QLabel(tr("请在 100% 或更大倍率检查锐化与降噪效果。"), this));
+    for (const auto* name :
+         {"toneSharpening", "toneSharpenRadius", "toneSharpenDetail", "toneSharpenMasking"})
+        connect(findChild<QDoubleSpinBox*>(QLatin1String(name)), &QDoubleSpinBox::valueChanged,
+                this, [this, notify] {
+                    settings_.details.legacy_sharpening = false;
+                    notify();
+                });
+    for (const auto& [name, value] : {std::pair{"toneSharpenRadius", 1.},
+                                      {"toneSharpenDetail", 25.},
+                                      {"toneNoiseLuminanceDetail", 50.},
+                                      {"toneNoiseColorDetail", 50.},
+                                      {"toneNoiseColorSmoothness", 50.}}) {
+        auto* spin = findChild<QDoubleSpinBox*>(QLatin1String(name));
+        static_cast<ColorBandSlider*>(findChild<QSlider*>(QString::fromLatin1(name) + "Slider"))
+            ->set_default(qRound(value / spin->singleStep()));
+    }
+    refresh_details_ = [this] {
+        for (const auto* name : {"toneNoiseLuminanceDetail", "toneNoiseLuminanceContrast"})
+            findChild<QDoubleSpinBox*>(QLatin1String(name))
+                ->parentWidget()
+                ->setEnabled(settings_.details.luminance > 0);
+        for (const auto* name : {"toneNoiseColorDetail", "toneNoiseColorSmoothness"})
+            findChild<QDoubleSpinBox*>(QLatin1String(name))
+                ->parentWidget()
+                ->setEnabled(settings_.details.color > 0);
+    };
+    refresh_details_();
+    for (const auto* name :
+         {"toneSharpening", "toneSharpenRadius", "toneSharpenDetail", "toneSharpenMasking"}) {
+        const int mode = QLatin1String(name) == "toneSharpenMasking" ? 1 : 2;
+        auto* slider = static_cast<ColorBandSlider*>(
+            findChild<QSlider*>(QString::fromLatin1(name) + "Slider"));
+        slider->setToolTip(tr("按住 Alt 拖动查看锐化辅助预览；松开恢复彩图。"));
+        slider->auxiliary_preview = [this, mode](bool active) {
+            const int next = active ? mode : 0;
+            if (next == detail_preview_)
+                return;
+            detail_preview_ = next;
+            if (detail_view_changed)
+                detail_view_changed();
+        };
+    }
+    categories_->addItem(tr("校正"));
+    auto* calibration = page();
+    auto* process = new QComboBox(this);
+    process->setObjectName("rawCalibrationProcess");
+    process->addItem(tr("Huelith 1（当前）"), 1);
+    process->setToolTip(
+        tr("工程保留处理版本。此版本使用 Huelith 原色校正，不对应 Adobe 处理版本。"));
+    calibration->addRow(tr("处理版本"), process);
+    calibration->addRow(new QLabel(tr("阴影"), this));
+    number(calibration, "toneCalibrationShadowTint", tr("色调"), settings_.calibration.shadow_tint);
+    static_cast<ColorBandSlider*>(findChild<QSlider*>("toneCalibrationShadowTintSlider"))
+        ->set_colors(QColor("#69ad70"), QColor("#b56aaf"));
+    const std::array<const char*, 3> primary_names{"Red", "Green", "Blue"};
+    const QStringList primary_labels{tr("主要红色"), tr("主要绿色"), tr("主要蓝色")};
+    const std::array<QColor, 3> low{QColor("#b64a8a"), QColor("#bab457"), QColor("#5fa39e")};
+    const std::array<QColor, 3> high{QColor("#c5a252"), QColor("#4caaa1"), QColor("#9468bc")};
+    const std::array<QColor, 3> saturated{QColor("#ca5656"), QColor("#62ae64"), QColor("#587dd2")};
+    for (int i = 0; i < 3; ++i) {
+        calibration->addRow(new QLabel(primary_labels[i], this));
+        const auto prefix = QByteArray("toneCalibration") + primary_names[i];
+        number(calibration, (prefix + "Hue").constData(), tr("色相"), settings_.calibration.hue[i]);
+        number(calibration, (prefix + "Saturation").constData(), tr("饱和度"),
+               settings_.calibration.saturation[i]);
+        static_cast<ColorBandSlider*>(
+            findChild<QSlider*>(QString::fromLatin1(prefix + "HueSlider")))
+            ->set_colors(low[i], high[i]);
+        static_cast<ColorBandSlider*>(
+            findChild<QSlider*>(QString::fromLatin1(prefix + "SaturationSlider")))
+            ->set_colors(QColor("#777777"), saturated[i]);
+    }
     connect(categories_, &QListWidget::currentRowChanged, pages_, &QStackedWidget::setCurrentIndex);
     categories_->setCurrentRow(0);
 }
@@ -611,88 +733,14 @@ void TonePanel::use_accordion() {
         pages_->removeWidget(page);
         pages.push_back(page);
     }
-    auto* hsl_form = qobject_cast<QFormLayout*>(pages[4]->layout());
-    for (int i = 0; i < hsl_form->count(); ++i)
-        if (auto* widget = hsl_form->itemAt(i)->widget())
-            widget->hide();
-    auto* mixer = new HslMixer(
-        settings_,
-        [this] {
-            if (changed)
-                changed();
-        },
-        pages[4]);
-    const auto refresh_hsl = [mixer] { mixer->refresh(); };
-    hsl_form->addRow(mixer);
-    auto* grading_form = qobject_cast<QFormLayout*>(pages[5]->layout());
-    auto* wheels = new QWidget(pages[5]);
-    auto* wheel_layout = new QGridLayout(wheels);
-    wheel_layout->setContentsMargins(0, 0, 0, 0);
-    std::array<ColorWheel*, 3> wheel_items{};
-    for (int i = 0; i < 3; ++i) {
-        auto* container = new QWidget(wheels);
-        auto* wheel_box = new QVBoxLayout(container);
-        wheel_box->setContentsMargins(0, 0, 0, 0);
-        auto* label = new QLabel(i == 0   ? tr("阴影")
-                                 : i == 1 ? tr("中间调")
-                                          : tr("高光"),
-                                 container);
-        label->setAlignment(Qt::AlignCenter);
-        auto* wheel =
-            new ColorWheel(settings_.grading_hue[i], settings_.grading_saturation[i], container);
-        wheel->setObjectName(QString("rawColorWheel%1").arg(i));
-        wheel->changed = [this] {
-            set_settings(settings_);
-            if (changed)
-                changed();
-        };
-        wheel_items[i] = wheel;
-        wheel_box->addWidget(label);
-        wheel_box->addWidget(wheel, 0, Qt::AlignCenter);
-        wheel_layout->addWidget(container, i == 1 ? 0 : 1, i == 2 ? 1 : 0, 1, i == 1 ? 2 : 1);
-    }
-    grading_form->insertRow(0, wheels);
-    refresh_extra_ = [refresh_hsl, wheel_items] {
-        refresh_hsl();
-        for (auto* wheel : wheel_items)
-            wheel->update();
-    };
-    for (const int index : {0, 1, 6, 3, 4, 5, 7, 2}) {
-        auto* header = new QToolButton(accordion);
-        header->setObjectName(QString("rawSection%1").arg(index));
-        header->setText(categories_->item(index)->text());
-        header->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        header->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        header->setMinimumHeight(34);
-        header->setCheckable(true);
-        header->setChecked(index == 0);
-        header->setArrowType(index == 0 ? Qt::DownArrow : Qt::RightArrow);
-        auto* header_row = new QHBoxLayout;
-        header_row->setContentsMargins(0, 0, 0, 0);
-        header_row->setSpacing(0);
-        header_row->addWidget(header, 1);
-        auto* enabled = new QToolButton(accordion);
-        enabled->setObjectName(QString("rawSectionEnable%1").arg(index));
-        enabled->setCheckable(true);
-        enabled->setChecked(settings_.sections[index]);
-        enabled->setFixedSize(30, 34);
-        enabled->setToolTip(tr("启用/停用本组调整，保留参数"));
-        enabled->setAccessibleName(header->text() + tr("效果开关"));
-        QPixmap icon(36, 36);
-        icon.fill(Qt::transparent);
-        QPainter painter(&icon);
-        QSvgRenderer eye(
-            QByteArray("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><g fill='none' "
-                       "stroke='#c6c6c6' stroke-width='1.5'><path d='M2 12Q12 1 22 12Q12 23 2 "
-                       "12Z'/><circle cx='12' cy='12' r='3'/></g></svg>"));
-        eye.render(&painter);
-        painter.end();
-        icon.setDevicePixelRatio(2);
-        enabled->setIcon(QIcon(icon));
-        enabled->setStyleSheet("QToolButton {border:0;} QToolButton:checked {background:#34383b;} "
-                               "QToolButton:!checked {background:#202427;}");
-        header_row->addWidget(enabled);
-        box->addLayout(header_row);
+    refresh_extra_ = [this] { point_colors_->refresh(); };
+    for (const int index : {0, 1, 6, 3, 4, 5, 7, 2, 8}) {
+        const auto section = raw_section_header(
+            accordion, categories_->item(index)->text(), QString("rawSection%1").arg(index),
+            QString("rawSectionEnable%1").arg(index), index == 0, settings_.sections[index]);
+        auto* header = section.expand;
+        auto* enabled = section.enabled;
+        box->addLayout(section.layout);
         connect(enabled, &QToolButton::toggled, this, [this, index](bool value) {
             settings_.sections[index] = value;
             if (changed)
@@ -751,35 +799,82 @@ void TonePanel::use_accordion() {
 void TonePanel::set_category(int index) {
     categories_->setCurrentRow(index);
 }
+bool TonePanel::point_color_sampling() const {
+    return point_colors_ && point_colors_->sampling();
+}
+void TonePanel::sample_point_color(QColor color) {
+    if (point_colors_)
+        point_colors_->sample(color);
+}
+void TonePanel::stop_point_sampling() {
+    if (point_colors_)
+        point_colors_->stop_sampling();
+}
+std::optional<editing::PointColor> TonePanel::point_color_visualized() const {
+    return point_colors_ ? point_colors_->visualized() : std::nullopt;
+}
+void TonePanel::set_curve_histogram(const QImage& image) {
+    if (curves_)
+        curves_->histogram(image);
+}
 void TonePanel::set_settings(editing::ToneSettings settings) {
     settings_ = std::move(settings);
-    for (int i = 0; i < 8; ++i)
+    if (curves_)
+        curves_->refresh();
+    if (refresh_grading_)
+        refresh_grading_();
+    for (int i = 0; i < 9; ++i)
         if (auto* enabled = findChild<QToolButton*>(QString("rawSectionEnable%1").arg(i))) {
             const QSignalBlocker blocker(enabled);
             enabled->setChecked(settings_.sections[i]);
         }
+    if (refresh_hsl_)
+        refresh_hsl_();
     if (refresh_extra_)
         refresh_extra_();
-    const std::pair<const char*, double> values[]{{"toneExposure", settings_.exposure},
-                                                  {"rawExposure", settings_.exposure},
-                                                  {"toneContrast", settings_.contrast},
-                                                  {"toneHighlights", settings_.highlights},
-                                                  {"toneShadows", settings_.shadows},
-                                                  {"toneWhites", settings_.whites},
-                                                  {"toneBlacks", settings_.blacks},
-                                                  {"toneTemperature", settings_.temperature},
-                                                  {"toneTint", settings_.tint},
-                                                  {"toneSaturation", settings_.saturation},
-                                                  {"toneVibrance", settings_.vibrance},
-                                                  {"toneTexture", settings_.texture},
-                                                  {"toneClarity", settings_.clarity},
-                                                  {"toneDehaze", settings_.dehaze},
-                                                  {"toneVignette", settings_.vignette},
-                                                  {"toneGrain", settings_.grain},
-                                                  {"toneSharpening", settings_.sharpening},
-                                                  {"toneBlackPoint", settings_.black_point},
-                                                  {"toneWhitePoint", settings_.white_point},
-                                                  {"toneGamma", settings_.gamma}};
+    const std::pair<const char*, double> values[]{
+        {"toneExposure", settings_.exposure},
+        {"rawExposure", settings_.exposure},
+        {"toneContrast", settings_.contrast},
+        {"toneHighlights", settings_.highlights},
+        {"toneShadows", settings_.shadows},
+        {"toneWhites", settings_.whites},
+        {"toneBlacks", settings_.blacks},
+        {"toneTemperature", settings_.temperature},
+        {"toneTint", settings_.tint},
+        {"toneSaturation", settings_.saturation},
+        {"toneVibrance", settings_.vibrance},
+        {"toneTexture", settings_.texture},
+        {"toneClarity", settings_.clarity},
+        {"toneDehaze", settings_.dehaze},
+        {"toneVignette", settings_.vignette},
+        {"toneGrain", settings_.grain},
+        {"toneVignetteMidpoint", settings_.vignette_midpoint},
+        {"toneVignetteRoundness", settings_.vignette_roundness},
+        {"toneVignetteFeather", settings_.vignette_feather},
+        {"toneVignetteHighlights", settings_.vignette_highlights},
+        {"toneGrainSize", settings_.grain_size},
+        {"toneGrainRoughness", settings_.grain_roughness},
+        {"toneSharpening", settings_.sharpening},
+        {"toneSharpenRadius", settings_.details.radius},
+        {"toneSharpenDetail", settings_.details.detail},
+        {"toneSharpenMasking", settings_.details.masking},
+        {"toneNoiseLuminance", settings_.details.luminance},
+        {"toneNoiseLuminanceDetail", settings_.details.luminance_detail},
+        {"toneNoiseLuminanceContrast", settings_.details.luminance_contrast},
+        {"toneNoiseColor", settings_.details.color},
+        {"toneNoiseColorDetail", settings_.details.color_detail},
+        {"toneNoiseColorSmoothness", settings_.details.color_smoothness},
+        {"toneBlackPoint", settings_.black_point},
+        {"toneWhitePoint", settings_.white_point},
+        {"toneGamma", settings_.gamma},
+        {"toneCalibrationShadowTint", settings_.calibration.shadow_tint},
+        {"toneCalibrationRedHue", settings_.calibration.hue[0]},
+        {"toneCalibrationGreenHue", settings_.calibration.hue[1]},
+        {"toneCalibrationBlueHue", settings_.calibration.hue[2]},
+        {"toneCalibrationRedSaturation", settings_.calibration.saturation[0]},
+        {"toneCalibrationGreenSaturation", settings_.calibration.saturation[1]},
+        {"toneCalibrationBlueSaturation", settings_.calibration.saturation[2]}};
     for (const auto& [name, value] : values)
         if (auto* spin = findChild<QDoubleSpinBox*>(QLatin1String(name))) {
             QSignalBlocker blocker(spin);
@@ -795,6 +890,10 @@ void TonePanel::set_settings(editing::ToneSettings settings) {
         spin->setValue(value);
     }
     findChild<QWidget*>("toneCurve")->update();
+    if (refresh_details_)
+        refresh_details_();
+    if (refresh_film_)
+        refresh_film_();
     for (auto* spin : findChildren<QDoubleSpinBox*>()) {
         if (auto* slider =
                 spin->parentWidget()->findChild<QSlider*>(QString{}, Qt::FindDirectChildrenOnly)) {
@@ -810,7 +909,8 @@ void TonePanel::set_settings(editing::ToneSettings settings) {
          {std::pair{"toneGradingHue", settings_.grading_hue[zone]},
           std::pair{"toneGradingSaturation", settings_.grading_saturation[zone]},
           std::pair{"toneGradingLuminance", settings_.grading_luminance[zone]},
-          std::pair{"toneGradingBalance", settings_.grading_balance}}) {
+          std::pair{"toneGradingBalance", settings_.grading_balance},
+          std::pair{"toneGradingBlending", settings_.grading_blending}}) {
         auto* spin = findChild<QDoubleSpinBox*>(QLatin1String(name));
         const QSignalBlocker blocker(spin);
         spin->setValue(value);
@@ -819,6 +919,97 @@ void TonePanel::set_settings(editing::ToneSettings settings) {
             const QSignalBlocker slider_blocker(slider);
             slider->setValue(qRound(value / spin->singleStep()));
         }
+    }
+}
+void TonePanel::set_target_mode(int mode) {
+    if (target_mode_ == mode)
+        return;
+    finish_target(true);
+    target_mode_ = std::clamp(mode, -1, 3);
+    if (mode >= 0)
+        stop_point_sampling();
+    for (const auto& item : {std::pair{"rawHslTarget", mode >= 0 && mode < 3},
+                             std::pair{"toneCurveTarget", mode == 3}}) {
+        auto* button = findChild<QToolButton*>(QLatin1String(item.first));
+        const QSignalBlocker blocker(button);
+        button->setChecked(item.second);
+    }
+    if (mode == 3)
+        findChild<QTabBar*>("toneCurveTabs")->setCurrentIndex(0);
+    if (mode >= 0 && mode < 3) {
+        auto* tabs = findChild<QTabBar*>("rawHslTabs");
+        tabs->setCurrentIndex(mode);
+    }
+    if (point_view_changed)
+        point_view_changed();
+}
+bool TonePanel::begin_target(QColor color) {
+    if (target_mode_ < 0 || color.alphaF() <= 0)
+        return false;
+    target_weights_.fill(0);
+    if (target_mode_ < 3) {
+        if (color.hsvSaturationF() < .001)
+            return false;
+        constexpr std::array<double, 8> centers{0, 30, 60, 120, 180, 240, 270, 300};
+        const double hue = color.hsvHueF() * 360;
+        double maximum{};
+        for (int i = 0; i < 8; ++i) {
+            const double distance =
+                std::min(std::abs(hue - centers[i]), 360 - std::abs(hue - centers[i]));
+            target_weights_[i] = std::max(0., 1 - distance / 60);
+            maximum = std::max(maximum, target_weights_[i]);
+        }
+        for (auto& w : target_weights_)
+            w /= maximum;
+    } else {
+        const auto& b = settings_.curve_splits;
+        const std::array<double, 4> centers{b[0] / 2, (b[0] + b[1]) / 2, (b[1] + b[2]) / 2,
+                                            (b[2] + 1) / 2};
+        const double value = .2126 * color.redF() + .7152 * color.greenF() + .0722 * color.blueF();
+        if (value <= centers[0])
+            target_weights_[0] = 1;
+        else if (value >= centers[3])
+            target_weights_[3] = 1;
+        else
+            for (int i = 0; i < 3; ++i)
+                if (value >= centers[i] && value < centers[i + 1]) {
+                    const double t = (value - centers[i]) / (centers[i + 1] - centers[i]);
+                    target_weights_[i] = 1 - t;
+                    target_weights_[i + 1] = t;
+                    break;
+                }
+    }
+    target_base_ = settings_;
+    return true;
+}
+void TonePanel::move_target(double amount) {
+    if (!target_base_)
+        return;
+    auto next = *target_base_;
+    if (target_mode_ == 3) {
+        for (int i = 0; i < 4; ++i)
+            next.parametric_curve[i] =
+                std::clamp(next.parametric_curve[i] + amount * target_weights_[i], -100., 100.);
+    } else {
+        auto& values = target_mode_ == 0   ? next.hue
+                       : target_mode_ == 1 ? next.saturation_bands
+                                           : next.luminance_bands;
+        for (int i = 0; i < 8; ++i)
+            values[i] = std::clamp(values[i] + amount * target_weights_[i], -100., 100.);
+    }
+    set_settings(std::move(next));
+    if (changed)
+        changed();
+}
+void TonePanel::finish_target(bool cancel) {
+    if (!target_base_)
+        return;
+    const auto original = *target_base_;
+    target_base_.reset();
+    if (cancel) {
+        set_settings(original);
+        if (changed)
+            changed();
     }
 }
 } // namespace huelith::desktop

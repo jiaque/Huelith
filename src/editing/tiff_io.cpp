@@ -1,3 +1,4 @@
+#include "huelith/editing/image_storage.h"
 #include "huelith/editing/tiff_io.h"
 #include <QFile>
 #include <QSaveFile>
@@ -53,7 +54,7 @@ QImage read_tiff(const QString& path) {
     TIFFGetFieldDefaulted(tiff, TIFFTAG_ORIENTATION, &orientation);
     TIFFGetFieldDefaulted(tiff, TIFFTAG_SAMPLEFORMAT, &format);
     check(TIFFGetField(tiff, TIFFTAG_PHOTOMETRIC, &photometric));
-    if (!width || !height || uint64_t(width) * height > 64'000'000 || (bits != 8 && bits != 16) ||
+    if (!width || !height || uint64_t(width) * height > huelith::editing::maximum_image_pixels || (bits != 8 && bits != 16) ||
         (samples != 3 && samples != 4) || planar != PLANARCONFIG_CONTIG ||
         photometric != PHOTOMETRIC_RGB || format != SAMPLEFORMAT_UINT || orientation < 1 ||
         orientation > 8 || TIFFIsTiled(tiff))
@@ -65,7 +66,7 @@ QImage read_tiff(const QString& path) {
          (extra[0] != EXTRASAMPLE_ASSOCALPHA && extra[0] != EXTRASAMPLE_UNASSALPHA)))
         throw EditError(QStringLiteral("TIFF 透明度语义不明确"));
     const bool associated = samples == 4 && extra[0] == EXTRASAMPLE_ASSOCALPHA;
-    QImage image(int(width), int(height),
+    auto image = allocate_image(int(width), int(height),
                  associated ? QImage::Format_RGBA64_Premultiplied : QImage::Format_RGBA64);
     if (image.isNull())
         throw EditError(QStringLiteral("TIFF 内存不足"));
@@ -123,11 +124,11 @@ void write_tiff(const QImage& source, const QString& path, int bits,
         !std::isfinite(ppi) || ppi <= 0 || ppi > 100000)
         throw EditError(QStringLiteral("TIFF 输出参数无效"));
     const auto image =
-        source.convertedTo(bits == 16 ? QImage::Format_RGBA64 : QImage::Format_RGBA8888);
+        convert_image(source, source.colorSpace(), bits == 16 ? QImage::Format_RGBA64 : QImage::Format_RGBA8888);
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))
         throw EditError(file.errorString());
-    Tiff handle(open_device(file, "w"), TIFFClose);
+    Tiff handle(open_device(file, image.sizeInBytes() > 3500000000LL ? "w8" : "w"), TIFFClose);
     if (!handle)
         throw EditError(QStringLiteral("无法创建 TIFF"));
     auto* tiff = handle.get();

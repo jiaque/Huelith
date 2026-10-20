@@ -82,6 +82,20 @@ def main():
         redone = call('raw_window_state', click='rawRedo')
         assert redone['recipe']['tone']['exposure'] == drag['exposure'], redone
         report['slider_one_drag_one_undo'] = True
+        call('raw_window_state',control='toneNoiseLuminance',value=40)
+        call('raw_window_state',control='toneNoiseColor',value=40)
+        call('raw_window_state',control='toneSharpening',value=60)
+        until(settled)
+        advanced=call('raw_slider_drag')
+        start=time.perf_counter();until(settled)
+        report['manual_noise_and_sharpen_drag']=dict(max_input_ms=max(advanced['eventMs']),
+            heartbeat_ticks=advanced['heartbeatTicks'],frames=len(set(advanced['presented'])),
+            settle_ms=(time.perf_counter()-start)*1000)
+        assert max(advanced['eventMs'])<100 and advanced['heartbeatTicks']>=20,advanced
+        assert len(set(advanced['presented']))>=3,advanced
+        for name in ('toneNoiseLuminance','toneNoiseColor','toneSharpening'):
+            call('raw_window_state',control=name,value=0)
+        until(settled)
         call('raw_window_state', section=6, dehaze=35)
         start = time.perf_counter()
         state = until(settled)

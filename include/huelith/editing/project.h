@@ -1,6 +1,8 @@
 #pragma once
 #include "huelith/editing/blend.h"
+#include "huelith/editing/design.h"
 #include "huelith/editing/effects.h"
+#include "huelith/editing/layer_style.h"
 #include "huelith/editing/tone.h"
 #include <QColorSpace>
 #include <QImage>
@@ -19,15 +21,20 @@
 namespace huelith::editing {
 class EditError : public std::runtime_error {
   public:
-    explicit EditError(const QString& message) : std::runtime_error(message.toStdString()) {}
+    explicit EditError(const QString& message)
+        : std::runtime_error(message.toUtf8().toStdString()) {}
 };
-enum class LayerKind { pixels, source, repair, adjustment, fill, group, composition };
+enum class LayerKind { pixels, source, repair, adjustment, fill, group, composition, text, shape };
 
 enum class RangeOp { replace, add, subtract, intersect };
 struct Layer {
     QUuid id{QUuid::createUuid()};
     QString name;
     LayerKind kind{LayerKind::pixels};
+    TextContent text;
+    ShapeContent shape;
+    LayerStyles styles;
+    std::optional<QRectF> frame; // Editable layout frame in the group's local coordinate system.
     QImage pixels; // Immutable source, linear Rec.2020 floating-point premultiplied RGBA.
     QImage mask;   // Grayscale coverage in canvas coordinates before mask_transform.
     QTransform transform;
@@ -55,14 +62,17 @@ struct Layer {
     QByteArray linked_hash;
     QByteArray raw_source;  // Original camera bytes; re-development survives a missing linked file.
     QJsonObject raw_recipe; // Versioned source-level parameters, separate from layer effects.
+    QJsonObject source_metadata; // Imported once, retained even if original files disappear.
     ToneSettings tone;
     std::vector<Effect> effects;
     std::vector<Layer> children; // Bottom to top, also editable nested composition content.
 };
 struct State {
+    QJsonObject metadata;
     QSize size;
     QString name;
     double ppi{300.0};
+    double global_light_angle{120};
     std::vector<Layer> layers;
     QImage selection; // Null = no active selection; non-null zero = active empty selection.
     QMap<QString, QImage> saved_selections;
@@ -73,8 +83,17 @@ struct State {
 };
 [[nodiscard]] QColorSpace working_space();
 [[nodiscard]] QImage import_image(const QString& path);
+[[nodiscard]] QImage convert_linear_rgb(const QImage& source, const QColorSpace& destination,
+                                        const std::atomic_bool* cancelled = nullptr);
 [[nodiscard]] QImage to_working(QImage image);
-[[nodiscard]] QImage render(const State& state);
+struct RenderOptions {
+    double pixel_scale{1};
+    QUuid detail_layer;
+    int detail_preview{};                // Transient UI only; never stored in the document.
+    double global_light_angle{120};      // Filled from State by render().
+    const std::atomic_bool* cancelled{}; // Caller owns it until render() returns.
+};
+[[nodiscard]] QImage render(const State& state, const RenderOptions& options = {});
 [[nodiscard]] State preview_state(const State& state, int maximum_edge = 1280);
 [[nodiscard]] QImage display_image(const QImage& linear,
                                    const QColorSpace& output = QColorSpace::SRgb);
@@ -95,6 +114,7 @@ void export_image(const State& state, const QString& path, QColor matte = Qt::wh
 
 [[nodiscard]] QTransform parent_matrix(const State& state, const QUuid& id);
 [[nodiscard]] QRectF layer_bounds(const State& state, const QUuid& id);
+[[nodiscard]] QSize layer_source_size(const Layer& layer, QSize fallback);
 [[nodiscard]] QUuid hit_layer(const State& state, QPointF point, double tolerance);
 [[nodiscard]] std::vector<QUuid> root_targets(const State& state, const std::vector<QUuid>& ids);
 void transform_targets(State& state, const std::vector<QUuid>& ids, const QTransform& delta,
@@ -125,6 +145,7 @@ class Project final {
         return {state_, revision_};
     }
     [[nodiscard]] QStringList history_names() const;
+    void set_history_limit(std::size_t count);
     void edit(const QString& name, const std::function<void(State&)>& operation);
     bool undo();
     bool redo();
@@ -146,6 +167,7 @@ class Project final {
     State state_;
     std::vector<Entry> history_;
     std::size_t position_{};
+    std::size_t history_limit_{100};
     quint64 revision_{1};
     quint64 next_revision_{2};
     quint64 saved_revision_{};

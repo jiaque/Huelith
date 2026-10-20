@@ -1,6 +1,11 @@
 #include "canvas_view.h"
+#include "canvas_preferences.h"
+#include "text_edit_view.h"
+#include <QAction>
 #include <QFile>
+#include <QJsonDocument>
 #include <QKeyEvent>
+#include <QMenu>
 #include <QScreen>
 #include <QSettings>
 #ifdef Q_OS_WIN
@@ -14,6 +19,7 @@
 #include <QResizeEvent>
 #include <QTabletEvent>
 #include <QTimer>
+#include <QToolTip>
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
@@ -38,6 +44,7 @@ CanvasView::CanvasView(CanvasSpec spec, QWidget* parent) : QWidget(parent), spec
     }
     project_ = std::make_unique<editing::Project>(state);
     history_source = editing::render(state);
+    reset_preview(history_source);
     setMinimumSize(160, 120);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
@@ -52,9 +59,29 @@ CanvasView::CanvasView(CanvasSpec spec, QWidget* parent) : QWidget(parent), spec
         }
     });
     ants->start();
-    refresh();
+    auto* brush_timer = new QTimer(this);
+    brush_timer->setInterval(40);
+    connect(brush_timer, &QTimer::timeout, this, [this] {
+        if (!dragging_ || !stroke_base_ || !brush_clock_.isValid())
+            return;
+        const int before = brush_stroke_.stamps();
+        brush_stroke_.idle(stroke_coverage_, std::min(.1, brush_clock_.restart() / 1000.));
+        if (brush_stroke_.stamps() != before)
+            update_brush_preview();
+    });
+    brush_timer->start();
+    initialize_navigation();
+    try {
+        set_brush_settings(editing::brush_from_json(
+            QJsonDocument::fromJson(QSettings().value("brush/current").toByteArray()).object()));
+    } catch (const std::exception&) {
+        // A damaged preference must not prevent opening a document.
+    }
+    apply_preferences();
+    refresh(false);
 }
 void CanvasView::set_path(QPainterPath value) {
+    path_layer_ = {};
     path = std::move(value);
     pen_nodes_.clear();
     pen_closed_ = !path.isEmpty() &&
@@ -62,6 +89,8 @@ void CanvasView::set_path(QPainterPath value) {
     update();
 }
 void CanvasView::load_state(editing::State state, bool saved) {
+    path_layer_ = {};
+    finish_text(false);
     cancel_transform();
     selected_layers.clear();
     path = {};
@@ -73,19 +102,23 @@ void CanvasView::load_state(editing::State state, bool saved) {
     brush_draft_.reset();
     clone_source_.reset();
     clone_offset_.reset();
+    clone_preview_ = {};
+    photo_sample_ = {};
     crop_bounds_.reset();
     quick_mask = false;
     auto loaded = std::make_unique<editing::Project>(std::move(state));
     if (saved)
         loaded->mark_saved(loaded->revision());
     project_ = std::move(loaded);
+    project_->set_history_limit(std::size_t(read_canvas_preferences().history_states));
     history_source = editing::render(project_->state());
+    reset_preview(history_source);
     spec_.width = project_->state().size.width();
     spec_.height = project_->state().size.height();
     spec_.name = project_->state().name.toStdString();
     spec_.resolution_ppi = project_->state().ppi;
     active_layer = project_->state().layers.empty() ? QUuid{} : project_->state().layers.back().id;
-    refresh();
+    refresh(false);
     fit_to_view();
 }
 void CanvasView::edit(const QString& name, const std::function<void(editing::State&)>& operation) {
@@ -93,38 +126,102 @@ void CanvasView::edit(const QString& name, const std::function<void(editing::Sta
     project_->edit(name, operation);
     refresh();
 }
-void CanvasView::refresh() {
+void CanvasView::refresh(bool update_pixels) {
+    if (!path_layer_.isNull() && !dragging_ &&
+        (tool_ == CanvasTool::pen || tool_ == CanvasTool::path_select))
+        bind_shape_path();
     spec_.width = project_->state().size.width();
     spec_.height = project_->state().size.height();
-    linear_preview_ = editing::render(project_->state());
-    preview_ = editing::display_image(linear_preview_, monitor_space_);
+    if (update_pixels)
+        request_preview(project_->state());
     update();
     if (changed)
         changed();
 }
 void CanvasView::preview(const editing::State& state) {
-    linear_preview_ = editing::render(state);
-    preview_ = editing::display_image(linear_preview_, monitor_space_);
+    request_preview(state);
     update();
 }
 void CanvasView::set_tool(CanvasTool tool) {
+    if (tool != tool_)
+        object_cancel();
+    scrub_gesture_ = false;
+    zoom_animating_ = false;
+    pan_velocity_ = {};
     if (tool != tool_) {
+        if (patch_base_)
+            patch_cancel();
+        finish_text(true);
         cancel_crop();
         commit_transform();
     }
     tool_ = tool;
-    setCursor(tool == CanvasTool::hand   ? Qt::OpenHandCursor
-              : tool == CanvasTool::move ? Qt::ArrowCursor
-                                         : Qt::CrossCursor);
+    if (tool == CanvasTool::object_selection)
+        update_object_options();
+    if (tool == CanvasTool::path_select || tool == CanvasTool::pen)
+        bind_shape_path();
+    switch (tool) {
+    case CanvasTool::rectangle:
+    case CanvasTool::ellipse:
+        group_tools_[0] = tool;
+        break;
+    case CanvasTool::lasso:
+    case CanvasTool::polygon:
+        group_tools_[1] = tool;
+        break;
+    case CanvasTool::wand:
+    case CanvasTool::object_selection:
+    case CanvasTool::color_range:
+        group_tools_[2] = tool;
+        break;
+    case CanvasTool::spot:
+    case CanvasTool::heal:
+    case CanvasTool::patch:
+        group_tools_[3] = tool;
+        break;
+    case CanvasTool::dodge:
+    case CanvasTool::burn:
+    case CanvasTool::sponge:
+        group_tools_[4] = tool;
+        break;
+    default:
+        break;
+    }
+    update_tool_cursor();
     update();
     if (tool_changed)
         tool_changed();
+}
+void CanvasView::apply_preferences() {
+    const auto preferences = read_canvas_preferences();
+    const auto previous_history_count = project_->history_names().size();
+    project_->set_history_limit(std::size_t(preferences.history_states));
+    grid_spacing = preferences.grid_spacing;
+    constrain_pan();
+    update_tool_cursor();
+    update();
+    if (project_->history_names().size() != previous_history_count && changed)
+        changed();
+}
+void CanvasView::update_tool_cursor() {
+    const auto p = read_canvas_preferences();
+    if (temporary_hand_ || tool_ == CanvasTool::hand)
+        setCursor(Qt::OpenHandCursor);
+    else if (painting_tool())
+        setCursor(precise_cursor_ || p.painting_cursor != 0 ? Qt::BlankCursor : Qt::CrossCursor);
+    else if (precise_cursor_ || p.precise_other)
+        setCursor(Qt::CrossCursor);
+    else
+        setCursor(tool_ == CanvasTool::move ? Qt::ArrowCursor : Qt::CrossCursor);
 }
 void CanvasView::set_zoom(double zoom) {
     if (!std::isfinite(zoom) || zoom <= 0)
         return;
     fit_mode_ = false;
     zoom_ = std::clamp(zoom, .001, 32.);
+    zoom_animating_ = false;
+    constrain_pan();
+    navigation_sync(true, false);
     if (tool_changed)
         tool_changed();
     update();
@@ -137,6 +234,9 @@ void CanvasView::fit_to_view() {
         std::min((width() - 64.) / bounds.width(), (height() - 64.) / bounds.height()), .001, 32.);
     fit_mode_ = true;
     pan_ = {};
+    zoom_animating_ = false;
+    pan_velocity_ = {};
+    navigation_sync(true, true);
     if (tool_changed)
         tool_changed();
     update();
@@ -156,6 +256,8 @@ void CanvasView::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     if (fit_mode_)
         fit_to_view();
+    if (text_editor_)
+        text_editor_->sync_view();
 }
 const editing::State& CanvasView::visible_state() const {
     return transform_draft_ ? *transform_draft_ : project_->state();
@@ -179,6 +281,8 @@ QRectF CanvasView::target_rect() const {
         return layer->mask.rect();
     if (!layer->children.empty())
         return editing::layer_bounds(project_->state(), active_layer);
+    if (layer->kind == editing::LayerKind::text || layer->kind == editing::LayerKind::shape)
+        return editing::design_bounds(*layer);
     return layer->pixels.isNull() ? QRectF(QPointF(), QSizeF(project_->state().size))
                                   : QRectF(layer->pixels.rect());
 }
@@ -325,7 +429,7 @@ std::array<QPointF, 9> CanvasView::warp_handles() const {
     const auto* layer = editing::find_layer(visible_state().layers, active_layer);
     if (!layer)
         return points;
-    const QSize size = layer->pixels.isNull() ? visible_state().size : layer->pixels.size();
+    const QSize size = editing::layer_source_size(*layer, visible_state().size);
     const auto matrix = layer->transform * parent_transform() * view_transform();
     for (std::size_t i = 0; i < 9; ++i)
         points[i] = matrix.map(QPointF(layer->warp_grid[i].x() * size.width(),
@@ -384,6 +488,71 @@ void CanvasView::apply_transform_delta(const QTransform& delta) {
     preview(*transform_draft_);
     update();
 }
+QPointF CanvasView::snapping_offset(QRectF bounds, bool moving) const {
+    if (!snap)
+        return {};
+    const auto preferences = read_canvas_preferences();
+    const double tolerance = preferences.snap_distance / zoom_;
+    double best_x = tolerance, best_y = tolerance;
+    const auto candidate_x = [&](double target) {
+        for (double edge : {bounds.left(), bounds.center().x(), bounds.right()}) {
+            const double distance = target - edge;
+            if (std::abs(distance) < std::abs(best_x))
+                best_x = distance;
+        }
+    };
+    const auto candidate_y = [&](double target) {
+        for (double edge : {bounds.top(), bounds.center().y(), bounds.bottom()}) {
+            const double distance = target - edge;
+            if (std::abs(distance) < std::abs(best_y))
+                best_y = distance;
+        }
+    };
+    if (preferences.snap_guides && show_guides) {
+        for (double x : project_->state().vertical_guides)
+            candidate_x(x);
+        for (double y : project_->state().horizontal_guides)
+            candidate_y(y);
+    }
+    if (preferences.snap_document) {
+        candidate_x(0);
+        candidate_x(project_->state().size.width());
+        candidate_y(0);
+        candidate_y(project_->state().size.height());
+    }
+    if (preferences.snap_grid && show_grid) {
+        const double spacing = grid_spacing / preferences.grid_subdivisions;
+        for (double edge : {bounds.left(), bounds.center().x(), bounds.right()})
+            candidate_x(std::round(edge / spacing) * spacing);
+        for (double edge : {bounds.top(), bounds.center().y(), bounds.bottom()})
+            candidate_y(std::round(edge / spacing) * spacing);
+    }
+    if (preferences.snap_layers) {
+        std::function<void(const std::vector<editing::Layer>&)> visit = [&](const auto& layers) {
+            for (const auto& layer : layers) {
+                if (!layer.visible ||
+                    (moving && std::find(transform_ids_.begin(), transform_ids_.end(), layer.id) !=
+                                   transform_ids_.end()))
+                    continue;
+                if (layer.kind == editing::LayerKind::group) {
+                    visit(layer.children);
+                    continue;
+                }
+                const auto target = editing::layer_bounds(project_->state(), layer.id);
+                if (target.isEmpty())
+                    continue;
+                for (double x : {target.left(), target.center().x(), target.right()})
+                    candidate_x(x);
+                for (double y : {target.top(), target.center().y(), target.bottom()})
+                    candidate_y(y);
+            }
+        };
+        visit(project_->state().layers);
+    }
+    // Select only the closest candidate on each axis. Summing guide
+    // corrections causes jumps when several targets share a tolerance.
+    return {std::abs(best_x) < tolerance ? best_x : 0., std::abs(best_y) < tolerance ? best_y : 0.};
+}
 void CanvasView::transform_motion(QPointF point, Qt::KeyboardModifiers modifiers) {
     if (!transform_draft_ || transform_handle_ < 0)
         return;
@@ -392,7 +561,7 @@ void CanvasView::transform_motion(QPointF point, Qt::KeyboardModifiers modifiers
         auto* layer = editing::find_layer(transform_draft_->layers, active_layer);
         if (!layer)
             return;
-        const auto size = layer->pixels.isNull() ? drag_state_.size : layer->pixels.size();
+        const auto size = editing::layer_source_size(*layer, drag_state_.size);
         const auto local =
             (layer->transform * parent_transform()).inverted().map(image_point(point));
         layer->warped = true;
@@ -413,35 +582,8 @@ void CanvasView::transform_motion(QPointF point, Qt::KeyboardModifiers modifiers
             else
                 shift.setX(0);
         }
-        if (snap && move_gesture_) {
-            const auto bounds = start.mapRect(transform_rect_).translated(shift);
-            const double tolerance = 8 / zoom_;
-            for (double x : project_->state().vertical_guides)
-                for (double edge : {bounds.left(), bounds.center().x(), bounds.right()})
-                    if (std::abs(edge - x) < tolerance)
-                        shift.setX(shift.x() + x - edge);
-            for (double y : project_->state().horizontal_guides)
-                for (double edge : {bounds.top(), bounds.center().y(), bounds.bottom()})
-                    if (std::abs(edge - y) < tolerance)
-                        shift.setY(shift.y() + y - edge);
-            if (show_grid) {
-                double best_x = tolerance, best_y = tolerance;
-                for (double edge : {bounds.left(), bounds.center().x(), bounds.right()}) {
-                    const double distance = std::round(edge / grid_spacing) * grid_spacing - edge;
-                    if (std::abs(distance) < std::abs(best_x))
-                        best_x = distance;
-                }
-                for (double edge : {bounds.top(), bounds.center().y(), bounds.bottom()}) {
-                    const double distance = std::round(edge / grid_spacing) * grid_spacing - edge;
-                    if (std::abs(distance) < std::abs(best_y))
-                        best_y = distance;
-                }
-                if (std::abs(best_x) < tolerance)
-                    shift.rx() += best_x;
-                if (std::abs(best_y) < tolerance)
-                    shift.ry() += best_y;
-            }
-        }
+        if (snap && move_gesture_ && !modifiers.testFlag(Qt::ControlModifier))
+            shift += snapping_offset(start.mapRect(transform_rect_).translated(shift), true);
         delta.translate(shift.x(), shift.y());
     } else if (transform_handle_ == 9) {
         const auto center = start.map(transform_rect_.center());
@@ -557,18 +699,22 @@ void CanvasView::paintEvent(QPaintEvent*) {
             DeleteDC(dc);
         }
 #endif
-        preview_ = editing::display_image(linear_preview_, monitor_space_);
+        request_preview(display_state());
     }
 
+    const auto preferences = read_canvas_preferences();
     QPainter painter(this);
-    painter.fillRect(rect(), QColor("#202428"));
+    painter.fillRect(rect(), preferences.canvas_color);
     painter.setTransform(view_transform());
-    QPixmap checker(16, 16);
-    checker.fill(QColor(98, 98, 98));
+    const int checker_size = std::max(1, preferences.checker_size);
+    QPixmap checker(checker_size * 2, checker_size * 2);
+    checker.fill(preferences.checker_size == 0 ? preferences.checker_light
+                                               : preferences.checker_dark);
     {
         QPainter p(&checker);
-        p.fillRect(0, 0, 8, 8, QColor(120, 120, 120));
-        p.fillRect(8, 8, 8, 8, QColor(120, 120, 120));
+        p.fillRect(0, 0, checker_size, checker_size, preferences.checker_light);
+        p.fillRect(checker_size, checker_size, checker_size, checker_size,
+                   preferences.checker_light);
     }
     // Bound raster work to the visible source region even at very large zoom factors.
     const QRectF visible =
@@ -584,22 +730,40 @@ void CanvasView::paintEvent(QPaintEvent*) {
             layer && !layer->mask.isNull())
             image = layer->mask;
     }
-    const QRectF source = visible.intersected(QRectF(image.rect()));
-    if (!source.isEmpty())
-        painter.drawImage(source, image, source);
+    const QSize image_canvas = (!mask_view && comparison.isEmpty()) ? project_->state().size : image.size();
+    const auto image_scale=QTransform::fromScale(double(image.width())/image_canvas.width(),double(image.height())/image_canvas.height());
+    const QRectF source = visible.intersected(QRectF(QPointF(),image_canvas));
+    if (tool_ == CanvasTool::crop && crop_angle != 0) {
+        QTransform rotate;
+        rotate.translate(spec_.width / 2., spec_.height / 2.);
+        rotate.rotate(crop_angle);
+        rotate.translate(-spec_.width / 2., -spec_.height / 2.);
+        const auto region = rotate.inverted().mapRect(visible).intersected(QRectF(QPointF(),image_canvas));
+        painter.save();
+        painter.setTransform(rotate * view_transform());
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.drawImage(region, image, image_scale.mapRect(region));
+        painter.restore();
+    } else if (!source.isEmpty())
+        painter.drawImage(source, image, image_scale.mapRect(source));
+    if (tool_ == CanvasTool::object_selection)
+        object_paint(painter);
     if (quick_mask) {
         const auto& range = display_state().selection;
         if (!range.isNull()) {
-            QImage overlay(range.size(), QImage::Format_ARGB32_Premultiplied);
-            overlay.fill(Qt::transparent);
-            for (int y = 0; y < range.height(); ++y) {
-                auto* row = reinterpret_cast<QRgb*>(overlay.scanLine(y));
-                for (int x = 0; x < range.width(); ++x) {
-                    const int alpha = (255 - range.constScanLine(y)[x]) / 2;
-                    row[x] = qRgba(alpha, 0, 0, alpha);
+            if (quick_mask_cache_key_ != range.cacheKey()) {
+                quick_mask_cache_ = QImage(range.size(), QImage::Format_ARGB32_Premultiplied);
+                for (int y = 0; y < range.height(); ++y) {
+                    auto* row = reinterpret_cast<QRgb*>(quick_mask_cache_.scanLine(y));
+                    for (int x = 0; x < range.width(); ++x) {
+                        const int alpha = (255 - range.constScanLine(y)[x]) / 2;
+                        row[x] = qRgba(alpha, 0, 0, alpha);
+                    }
                 }
+                quick_mask_cache_key_ = range.cacheKey();
             }
-            painter.drawImage(0, 0, overlay);
+            const auto region = visible.intersected(QRectF(range.rect()));
+            painter.drawImage(region, quick_mask_cache_, region);
         }
     }
     update_selection_outline();
@@ -608,13 +772,23 @@ void CanvasView::paintEvent(QPaintEvent*) {
     painter.setPen(edge);
     if (!quick_mask)
         painter.drawPath(selection_outline_);
+    if (patch_base_ && !patch_selecting_) {
+        painter.save();
+        painter.translate(patch_offset_);
+        QPen outline(QColor("#65bdff"), 1 / zoom_, Qt::DashLine);
+        painter.setPen(outline);
+        painter.drawPath(selection_outline_);
+        painter.restore();
+    }
     edge.setColor(Qt::black);
-    edge.setStyle(Qt::DashLine);
+    edge.setDashPattern({4, 4}); // Eight-pixel cycle matches the animation counter.
     edge.setDashOffset(ants_phase_);
     painter.setPen(edge);
     if (!quick_mask)
         painter.drawPath(selection_outline_);
-    QPen pen(QColor("#43c9f7"));
+    const std::array<Qt::PenStyle, 3> styles{Qt::SolidLine, Qt::DashLine, Qt::DotLine};
+    QPen pen(preferences.guide_color);
+    pen.setStyle(styles[preferences.guide_style]);
     pen.setCosmetic(true);
     painter.setPen(pen);
     if (show_guides)
@@ -624,14 +798,33 @@ void CanvasView::paintEvent(QPaintEvent*) {
         for (const auto y : project_->state().horizontal_guides)
             painter.drawLine(QPointF(0, y), QPointF(spec_.width, y));
     if (show_grid && zoom_ > .05) {
-        QPen grid(QColor(120, 120, 120, 90));
+        QPen grid(preferences.grid_color);
+        grid.setStyle(styles[preferences.grid_style]);
         grid.setCosmetic(true);
-        painter.setPen(grid);
-        for (double x = 0; x < spec_.width; x += grid_spacing)
-            painter.drawLine(QPointF(x, 0), QPointF(x, spec_.height));
-        for (double y = 0; y < spec_.height; y += grid_spacing)
-            painter.drawLine(QPointF(0, y), QPointF(spec_.width, y));
+        const QRectF area = visible.intersected(QRectF(QPointF(), project_->state().size));
+        const double minor = grid_spacing / preferences.grid_subdivisions;
+        double spacing = minor * zoom_ >= 4 ? minor : grid_spacing;
+        if (spacing * zoom_ < 4)
+            spacing *= std::ceil(4 / (spacing * zoom_));
+        for (bool vertical : {false, true}) {
+            const double start = vertical ? area.left() : area.top();
+            const double end = vertical ? area.right() : area.bottom();
+            for (double value = std::ceil(start / spacing) * spacing; value <= end;
+                 value += spacing) {
+                auto color = preferences.grid_color;
+                const bool major =
+                    std::abs(value / grid_spacing - std::round(value / grid_spacing)) < 1e-6;
+                color.setAlpha(major ? 210 : 95);
+                grid.setColor(color);
+                painter.setPen(grid);
+                if (vertical)
+                    painter.drawLine(QPointF(value, area.top()), QPointF(value, area.bottom()));
+                else
+                    painter.drawLine(QPointF(area.left(), value), QPointF(area.right(), value));
+            }
+        }
     }
+    pen.setStyle(Qt::SolidLine);
     painter.setPen(pen);
     painter.drawPath(path);
     painter.drawPath(stroke_);
@@ -669,15 +862,84 @@ void CanvasView::paintEvent(QPaintEvent*) {
     if (crop_bounds_) {
         painter.save();
         painter.setTransform(view_transform());
+        QPainterPath shade;
+        shade.addRect(visible);
+        shade.addRect(*crop_bounds_);
+        painter.fillPath(shade, QColor(0, 0, 0, 130));
         painter.setPen(QPen(QColor("#ffffff"), 1 / zoom_));
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(*crop_bounds_);
+        auto grid = QPen(QColor(255, 255, 255, 110), 1 / zoom_);
+        painter.setPen(grid);
+        for (int i = 1; i < 3; ++i) {
+            const auto r = *crop_bounds_;
+            painter.drawLine(QPointF(r.left() + r.width() * i / 3, r.top()),
+                             QPointF(r.left() + r.width() * i / 3, r.bottom()));
+            painter.drawLine(QPointF(r.left(), r.top() + r.height() * i / 3),
+                             QPointF(r.right(), r.top() + r.height() * i / 3));
+        }
+        painter.setPen(QPen(Qt::black, 1 / zoom_));
+        painter.setBrush(Qt::white);
+        for (const auto& point : crop_handles())
+            painter.drawRect(
+                QRectF(point - QPointF(3 / zoom_, 3 / zoom_), QSizeF(6 / zoom_, 6 / zoom_)));
         painter.restore();
     }
-    if (painting_tool()) {
+    if (tool_ == CanvasTool::clone && clone_source_ && !temporary_hand_) {
+        const auto destination = image_point(cursor_position_);
+        auto source_options = photo_brush;
+        if (!clone_aligned || !clone_offset_) {
+            source_options.source_anchor = destination;
+            source_options.source_offset = *clone_source_ - destination;
+        }
+        const auto sample = editing::clone_sample_position(source_options, destination);
+        painter.save();
+        painter.setTransform(view_transform());
+        if (clone_overlay && !clone_preview_.isNull()) {
+            const auto origin = editing::clone_sample_position(source_options, {});
+            const auto x = editing::clone_sample_position(source_options, QPointF(1, 0)) - origin;
+            const auto y = editing::clone_sample_position(source_options, QPointF(0, 1)) - origin;
+            const QTransform map(x.x(), x.y(), y.x(), y.y(), origin.x(), origin.y());
+            painter.save();
+            QPainterPath clip; clip.addEllipse(destination, brush_radius, brush_radius);
+            painter.setClipPath(clip, Qt::IntersectClip);
+            painter.setOpacity(clone_overlay_opacity);
+            painter.setTransform(map.inverted(), true);
+            painter.drawImage(QRectF(QPointF(), clone_preview_size_), clone_preview_);
+            painter.restore();
+        }
+        painter.setPen(QPen(Qt::white, 1/zoom_));
+        painter.drawLine(sample-QPointF(5/zoom_,0), sample+QPointF(5/zoom_,0));
+        painter.drawLine(sample-QPointF(0,5/zoom_), sample+QPointF(0,5/zoom_));
+        painter.restore();
+    }
+    if (painting_tool() && !temporary_hand_ &&
+        (precise_cursor_ || preferences.painting_cursor != 0)) {
         painter.setBrush(Qt::NoBrush);
-        painter.setPen(QPen(Qt::white, 1));
-        painter.drawEllipse(cursor_position_, brush_radius * zoom_, brush_radius * zoom_);
+        const bool precise = precise_cursor_ || preferences.painting_cursor == 1;
+        const double radius = brush_radius * zoom_ *
+                              (preferences.painting_cursor == 2 ? (1 + brush_hardness) / 2 : 1);
+        for (const auto color : {Qt::black, Qt::white}) {
+            painter.setPen(QPen(color, color == Qt::black ? 3 : 1));
+            if (!precise) {
+                painter.save();
+                painter.translate(cursor_position_);
+                painter.rotate(rotation + advanced_brush_.angle);
+                const QRectF bounds(-radius, -radius * advanced_brush_.roundness, radius * 2,
+                                    radius * 2 * advanced_brush_.roundness);
+                if (advanced_brush_.tip == 1)
+                    painter.drawRect(bounds);
+                else
+                    painter.drawEllipse(bounds);
+                painter.restore();
+            }
+            if (precise || preferences.cursor_crosshair) {
+                painter.drawLine(cursor_position_ - QPointF(5, 0),
+                                 cursor_position_ + QPointF(5, 0));
+                painter.drawLine(cursor_position_ - QPointF(0, 5),
+                                 cursor_position_ + QPointF(0, 5));
+            }
+        }
     }
     if (warp_mode && tool_ == CanvasTool::move && selected_layers.size() < 2) {
         const auto points = warp_handles();
@@ -715,8 +977,11 @@ void CanvasView::paintEvent(QPaintEvent*) {
             const QPointF start = vertical ? inv.map(QPointF(20, 20)) : inv.map(QPointF(20, 20));
             const QPointF finish =
                 vertical ? inv.map(QPointF(20, extent)) : inv.map(QPointF(extent, 20));
-            const double first = vertical ? start.y() : start.x(),
-                         last = vertical ? finish.y() : finish.x();
+            const double unit_scale =
+                ruler_units_per_pixel(preferences.ruler_unit, project_->state().ppi,
+                                      vertical ? spec_.height : spec_.width);
+            const double first = (vertical ? start.y() : start.x()) * unit_scale,
+                         last = (vertical ? finish.y() : finish.x()) * unit_scale;
             if (std::abs(last - first) < 1e-8)
                 continue;
             const double step = nice(std::abs(last - first) * 75 / std::max(extent - 20, 1));
@@ -745,8 +1010,40 @@ void CanvasView::paintEvent(QPaintEvent*) {
         }
         painter.fillRect(0, 0, 20, 20, QColor("#292e33"));
     }
+    const auto error = property("previewError").toString();
+    if (preview_pending() || !error.isEmpty()) {
+        painter.resetTransform();
+        painter.fillRect(QRect(25, height() - 32, width() - 50, 26), QColor(30, 34, 38, 220));
+        painter.setPen(error.isEmpty() ? QColor("#d3dbe2") : QColor("#ffb9a9"));
+        painter.drawText(QPoint(33, height() - 14),
+                         error.isEmpty() ? tr("正在更新预览…") : tr("预览失败：%1").arg(error));
+    }
 }
 void CanvasView::mousePressEvent(QMouseEvent* event) {
+    navigation_timer_->stop();
+    zoom_animating_ = false;
+    pan_velocity_ = {};
+    if (event->button() == Qt::RightButton && show_rulers &&
+        (event->position().x() < 20 || event->position().y() < 20)) {
+        QMenu menu(this);
+        menu.setObjectName("rulerUnitsMenu");
+        const QStringList units{tr("像素"), tr("英寸"), tr("厘米"),
+                                tr("毫米"), tr("点"),   tr("百分比")};
+        const int current = read_canvas_preferences().ruler_unit;
+        for (int index = 0; index < units.size(); ++index) {
+            auto* action = menu.addAction(units[index]);
+            action->setCheckable(true);
+            action->setChecked(index == current);
+            connect(action, &QAction::triggered, this, [this, index] {
+                QSettings().setValue("units/rulers", index);
+                for (auto* widget : window()->findChildren<QWidget*>())
+                    if (auto* canvas = dynamic_cast<CanvasView*>(widget))
+                        canvas->update();
+            });
+        }
+        menu.exec(event->globalPosition().toPoint());
+        return;
+    }
     setFocus();
     if (event->button() != Qt::LeftButton && event->button() != Qt::MiddleButton)
         return;
@@ -757,12 +1054,19 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
         const auto fixed = image_point(event->position());
         const bool reverse = event->modifiers().testFlag(Qt::AltModifier);
         const bool out = temporary_hand_ ? reverse : zoom_out != reverse;
-        set_zoom(zoom_ * (out ? .5 : 2));
         const QPointF target = QSettings().value("navigation/centerClicked", false).toBool()
                                    ? QPointF(width() / 2., height() / 2.)
                                    : event->position();
-        pan_ += target - view_transform().map(fixed);
-        update();
+        if (read_canvas_preferences().scrubby_zoom) {
+            scrub_gesture_ = true;
+            scrub_moved_ = false;
+            scrub_out_ = out;
+            scrub_scale_ = zoom_;
+            press_ = event->position();
+            zoom_anchor_ = fixed;
+            zoom_screen_ = target;
+        } else
+            navigate_zoom(zoom_ * (out ? .5 : 2), fixed, target, true);
         return;
     }
     if (tool_ == CanvasTool::move && !transforming() && !lock_guides) {
@@ -794,9 +1098,32 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
     }
     if (temporary_hand_ || event->button() == Qt::MiddleButton || tool_ == CanvasTool::hand) {
         pan_gesture_ = true;
+        pan_clock_.restart();
         dragging_ = true;
         last_ = event->position();
         setCursor(Qt::ClosedHandCursor);
+        return;
+    }
+    if (tool_ == CanvasTool::object_selection) {
+        object_press(image_point(event->position()), event->modifiers());
+        return;
+    }
+    if (tool_ == CanvasTool::text || tool_ == CanvasTool::shape) {
+        if (tool_ == CanvasTool::text && !event->modifiers().testFlag(Qt::ShiftModifier)) {
+            const auto id =
+                editing::hit_layer(project_->state(), image_point(event->position()), 2 / zoom_);
+            const auto* layer = editing::find_layer(project_->state().layers, id);
+            if (layer && layer->kind == editing::LayerKind::text) {
+                active_layer = id;
+                begin_text({}, false, true);
+                return;
+            }
+        }
+        design_drag_ = true;
+        press_ = event->position();
+        const auto origin = image_point(press_);
+        press_ = view_transform().map(origin + snapping_offset(QRectF(origin, QSizeF(0, 0))));
+        design_rect_ = QRectF(image_point(press_), QSizeF());
         return;
     }
     selection_start_modifiers_ = event->modifiers();
@@ -849,7 +1176,12 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
     press_ = event->position();
     last_ = press_;
     dragging_ = true;
-    const auto p = image_point(press_);
+    auto p = image_point(press_);
+    if (!event->modifiers().testFlag(Qt::ControlModifier) &&
+        (tool_ == CanvasTool::rectangle || tool_ == CanvasTool::ellipse || tool_ == CanvasTool::crop)) {
+        p += snapping_offset(QRectF(p, QSizeF(0, 0)));
+        press_ = view_transform().map(p);
+    }
     stroke_ = QPainterPath(p);
     path_before_ = path;
     node_index_ = -1;
@@ -865,10 +1197,19 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
             dragging_ = false;
             return;
         }
+        if (!quick_mask && !mask_target && layer &&
+            (layer->kind == editing::LayerKind::text || layer->kind == editing::LayerKind::shape)) {
+            dragging_ = false;
+            QToolTip::showText(mapToGlobal(event->position().toPoint()),
+                tr("文字和形状保持可编辑。请先使用“图层 > 栅格化文字 / 形状”，或新建像素图层绘画。"), this);
+            return;
+        }
         stroke_base_ = project_->state();
         brush_revision_ = project_->revision();
         stroke_coverage_ = QImage(project_->state().size, QImage::Format_ARGB32_Premultiplied);
         stroke_coverage_.fill(Qt::transparent);
+        brush_stroke_.reset(brush_settings(), ++brush_seed_, zoom_);
+        brush_clock_.start();
         stamp_brush(p, p);
         update_brush_preview();
         return;
@@ -891,18 +1232,51 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
                     i += 2;
                 }
             }
+            if (pen_nodes_.size() > 1 && pen_nodes_.front().anchor == pen_nodes_.back().anchor) {
+                pen_nodes_.front().incoming = pen_nodes_.back().incoming;
+                pen_nodes_.pop_back();
+                pen_closed_ = true;
+            }
+        }
+        if (tool_ == CanvasTool::pen && pen_mode == 1) {
+            if (insert_pen_node(p))
+                update_shape_path(true);
+            dragging_ = false;
+            return;
+        }
+        if (tool_ == CanvasTool::pen && (pen_mode == 2 || pen_mode == 3)) {
+            for (std::size_t i = 0; i < pen_nodes_.size(); ++i)
+                if (QLineF(p, pen_nodes_[i].anchor).length() < 8 / zoom_) {
+                    if (pen_mode == 2) {
+                        pen_nodes_.erase(pen_nodes_.begin() + static_cast<std::ptrdiff_t>(i));
+                        rebuild_pen();
+                        update_shape_path(true);
+                        dragging_ = false;
+                    } else {
+                        auto& node = pen_nodes_[i];
+                        node.incoming = node.outgoing = node.anchor;
+                        pen_drag_node_ = int(i);
+                        pen_drag_control_ = 3;
+                        rebuild_pen();
+                    }
+                    return;
+                }
+            dragging_ = false;
+            return;
         }
         if (tool_ == CanvasTool::path_select || event->modifiers().testFlag(Qt::ControlModifier) ||
             event->modifiers().testFlag(Qt::AltModifier)) {
             for (std::size_t i = 0; i < pen_nodes_.size(); ++i) {
                 const auto& node = pen_nodes_[i];
-                for (int control : {1, 2, 0}) {
+                for (int control : {0, 1, 2}) {
                     const auto point = control == 1   ? node.incoming
                                        : control == 2 ? node.outgoing
                                                       : node.anchor;
                     if (QLineF(p, point).length() < 7 / zoom_) {
                         pen_drag_node_ = int(i);
-                        pen_drag_control_ = control;
+                        pen_drag_control_ =
+                            control == 0 && event->modifiers().testFlag(Qt::AltModifier) ? 2
+                                                                                         : control;
                         return;
                     }
                 }
@@ -935,7 +1309,7 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
     }
     if (tool_ == CanvasTool::wand || tool_ == CanvasTool::color_range) {
         const QPoint seed = p.toPoint();
-        if (!preview_.rect().contains(seed))
+        if (!require_current_preview() || !preview_.rect().contains(seed))
             return;
         const QColor color = preview_.pixelColor(seed);
         QImage range(preview_.size(), QImage::Format_Grayscale8);
@@ -984,6 +1358,40 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
 }
 void CanvasView::mouseMoveEvent(QMouseEvent* event) {
     cursor_position_ = event->position();
+    if (tool_ == CanvasTool::object_selection && !temporary_hand_ && !pan_gesture_ &&
+        !guide_axis_) {
+        object_move(image_point(event->position()));
+        return;
+    }
+    if (tool_ == CanvasTool::patch && dragging_ && patch_base_) {
+        patch_move(image_point(event->position()));
+        return;
+    }
+    if (scrub_gesture_) {
+        const double distance = event->position().x() - press_.x();
+        scrub_moved_ = scrub_moved_ || std::abs(distance) > 3;
+        if (scrub_moved_)
+            navigate_zoom(scrub_scale_ * std::exp(std::clamp(distance / 160., -10., 10.)),
+                          zoom_anchor_, zoom_screen_, false);
+        return;
+    }
+    if (design_drag_) {
+        auto endpoint = image_point(event->position());
+        endpoint += snapping_offset(QRectF(endpoint, QSizeF(0, 0)));
+        auto delta = endpoint - image_point(press_);
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+            const double side = std::max(std::abs(delta.x()), std::abs(delta.y()));
+            delta = QPointF(std::copysign(side, delta.x()), std::copysign(side, delta.y()));
+        }
+        const auto origin = image_point(press_);
+        design_rect_ = QRectF(origin, origin + delta).normalized();
+        if (event->modifiers().testFlag(Qt::AltModifier))
+            design_rect_ = QRectF(origin - delta, origin + delta).normalized();
+        stroke_ = {};
+        stroke_.addRect(design_rect_);
+        update();
+        return;
+    }
     if (dragging_ && (painting_tool()) && stroke_base_) {
         stamp_brush(image_point(last_), image_point(event->position()));
         last_ = event->position();
@@ -992,7 +1400,9 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
     }
     if (dragging_ && pen_drag_node_ >= 0) {
         auto& node = pen_nodes_[std::size_t(pen_drag_node_)];
-        const auto p = image_point(event->position());
+        auto p = image_point(event->position());
+        if (pen_drag_control_ == 0)
+            p += snapping_offset(QRectF(p, QSizeF(0, 0)));
         if (pen_drag_control_ == 0) {
             const auto delta = p - node.anchor;
             node.anchor = p;
@@ -1016,10 +1426,7 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
     }
 
     if (pan_gesture_) {
-        pan_ += event->position() - last_;
-        last_ = event->position();
-        fit_mode_ = false;
-        update();
+        pan_motion(event->position());
         return;
     }
     if (transform_handle_ >= 0 && dragging_) {
@@ -1041,10 +1448,12 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
         update();
         return;
     }
-    const auto p = image_point(event->position());
+    auto p = image_point(event->position());
+    if (!event->modifiers().testFlag(Qt::ControlModifier) &&
+        (tool_ == CanvasTool::crop || tool_ == CanvasTool::rectangle || tool_ == CanvasTool::ellipse))
+        p += snapping_offset(QRectF(p, QSizeF(0, 0)));
     if (tool_ == CanvasTool::crop) {
-        crop_bounds_ = QRectF(image_point(press_), p).normalized();
-        update();
+        crop_motion(p, event->modifiers());
         return;
     }
     if (node_index_ >= 0) {
@@ -1083,23 +1492,34 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
     last_ = event->position();
     update();
 }
-void CanvasView::stamp_brush(QPointF from, QPointF to) {
-    QPainter painter(&stroke_coverage_);
-    painter.setRenderHint(QPainter::Antialiasing);
-    const double radius = std::max(.5, brush_radius * (pressure_enabled ? pressure_ : 1));
-    const double distance = QLineF(from, to).length();
-    const int count = std::max(1, int(std::ceil(distance / std::max(1., radius * .2))));
-    for (int i = 0; i <= count; ++i) {
-        const auto center = from + (to - from) * (double(i) / count);
-        QRadialGradient gradient(center, radius);
-        const QColor solid = QColor::fromRgbF(1, 1, 1, brush_flow);
-        gradient.setColorAt(0, solid);
-        gradient.setColorAt(std::min(.999, brush_hardness), solid);
-        gradient.setColorAt(1, QColor(255, 255, 255, 0));
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(gradient);
-        painter.drawEllipse(center, radius, radius);
+editing::BrushSettings CanvasView::brush_settings() const {
+    auto settings = advanced_brush_;
+    settings.diameter = brush_radius * 2;
+    settings.hardness = brush_hardness;
+    settings.opacity = brush_opacity;
+    settings.flow = brush_flow;
+    if (tool_ >= CanvasTool::blur && tool_ <= CanvasTool::sponge) {
+        settings.flow = 1;
+        settings.opacity = 1;
     }
+    settings.pressure_size = pressure_enabled;
+    return settings;
+}
+void CanvasView::set_brush_settings(const editing::BrushSettings& settings) {
+    editing::validate_brush(settings);
+    advanced_brush_ = settings;
+    brush_radius = settings.diameter / 2;
+    brush_hardness = settings.hardness;
+    brush_opacity = settings.opacity;
+    brush_flow = settings.flow;
+    pressure_enabled = settings.pressure_size;
+    update_tool_cursor();
+    update();
+    if (tool_changed)
+        tool_changed();
+}
+void CanvasView::stamp_brush(QPointF, QPointF to) {
+    brush_stroke_.add(stroke_coverage_, to, pressure_);
 }
 void CanvasView::update_brush_preview() {
     if (!stroke_base_)
@@ -1196,6 +1616,12 @@ void CanvasView::update_brush_preview() {
     preview(*brush_draft_);
 }
 void CanvasView::apply_stroke() {
+    if (stroke_base_) {
+        const int before = brush_stroke_.stamps();
+        brush_stroke_.finish(stroke_coverage_);
+        if (brush_stroke_.stamps() != before)
+            update_brush_preview();
+    }
     if (brush_draft_ && brush_revision_ == project_->revision()) {
         const auto draft = *brush_draft_;
         QString name = quick_mask ? tr("快速蒙版笔画") : tr("画笔笔画");
@@ -1213,8 +1639,10 @@ void CanvasView::apply_stroke() {
 }
 void CanvasView::rebuild_pen() {
     path = {};
-    if (pen_nodes_.empty())
+    if (pen_nodes_.empty()) {
+        update_shape_path(false);
         return;
+    }
     path.moveTo(pen_nodes_[0].anchor);
     for (std::size_t i = 1; i < pen_nodes_.size(); ++i)
         path.cubicTo(pen_nodes_[i - 1].outgoing, pen_nodes_[i].incoming, pen_nodes_[i].anchor);
@@ -1223,10 +1651,69 @@ void CanvasView::rebuild_pen() {
                      pen_nodes_.front().anchor);
         path.closeSubpath();
     }
+    update_shape_path(false);
     update();
 }
 void CanvasView::mouseReleaseEvent(QMouseEvent* event) {
+    if (tool_ == CanvasTool::crop && dragging_ && !pan_gesture_ && !guide_axis_) {
+        auto point=image_point(event->position());
+        if(!event->modifiers().testFlag(Qt::ControlModifier))point+=snapping_offset(QRectF(point,QSizeF(0,0)));
+        crop_motion(point, event->modifiers());
+        if (crop_straighten) {
+            const auto delta = image_point(event->position()) - image_point(press_);
+            if (std::hypot(delta.x(), delta.y()) > 1)
+                crop_angle =
+                    std::remainder(crop_angle - std::remainder(std::atan2(delta.y(), delta.x()) *
+                                                                   180 / 3.141592653589793,
+                                                               90.),
+                                   360.);
+            crop_straighten = false;
+            if (!crop_bounds_)
+                crop_bounds_ = QRectF(QPointF(), project_->state().size);
+        }
+        dragging_ = false;
+        stroke_ = {};
+        update();
+        if (tool_changed)
+            tool_changed();
+        return;
+    }
+    if (tool_ == CanvasTool::object_selection && !pan_gesture_ && !guide_axis_) {
+        object_finish(image_point(event->position()));
+        return;
+    }
+    if (tool_ == CanvasTool::patch && dragging_ && patch_base_) {
+        patch_finish(image_point(event->position()));
+        return;
+    }
+    if (scrub_gesture_) {
+        scrub_gesture_ = false;
+        if (!scrub_moved_)
+            navigate_zoom(scrub_scale_ * (scrub_out_ ? .5 : 2), zoom_anchor_, zoom_screen_, true);
+        return;
+    }
+    if (design_drag_) {
+        mouseMoveEvent(event);
+        design_drag_ = false;
+        stroke_ = {};
+        if (tool_ == CanvasTool::text) {
+            const bool paragraph = QLineF(press_, event->position()).length() > 4 &&
+                                   design_rect_.width() > 1 && design_rect_.height() > 1;
+            begin_text(paragraph ? design_rect_ : QRectF(image_point(press_), QSizeF(1, 1)),
+                       paragraph);
+        } else {
+            if (design_rect_.width() < .1)
+                design_rect_.setWidth(1);
+            if (design_rect_.height() < .1)
+                design_rect_.setHeight(1);
+            const auto delta = image_point(event->position()) - image_point(press_);
+            create_shape(design_rect_, delta.x() * delta.y() < 0);
+        }
+        update();
+        return;
+    }
     if (pan_gesture_) {
+        finish_pan();
         pan_gesture_ = false;
         dragging_ = false;
         setCursor(temporary_hand_ || tool_ == CanvasTool::hand ? Qt::OpenHandCursor
@@ -1250,6 +1737,7 @@ void CanvasView::mouseReleaseEvent(QMouseEvent* event) {
     if (pen_drag_node_ >= 0) {
         pen_drag_node_ = -1;
         stroke_ = {};
+        update_shape_path(true);
         update();
         return;
     }
@@ -1331,13 +1819,16 @@ void CanvasView::mouseDoubleClickEvent(QMouseEvent*) {
         finish_path();
 }
 void CanvasView::wheelEvent(QWheelEvent* event) {
+    navigation_timer_->stop();
+    zoom_animating_ = false;
+    pan_velocity_ = {};
     const bool wheel_zoom = QSettings().value("navigation/wheelZoom", false).toBool();
     if (wheel_zoom != event->modifiers().testFlag(Qt::AltModifier)) {
         const auto fixed = image_point(event->position());
         const double delta = event->pixelDelta().isNull() ? event->angleDelta().y() / 120.
                                                           : event->pixelDelta().y() / 40.;
-        set_zoom(zoom_ * std::pow(1.2, std::clamp(delta, -20., 20.)));
-        pan_ += event->position() - view_transform().map(fixed);
+        navigate_zoom(zoom_ * std::pow(1.2, std::clamp(delta, -20., 20.)), fixed, event->position(),
+                      false);
     } else {
         const QPointF delta = event->pixelDelta().isNull() ? QPointF(event->angleDelta()) / 2.
                                                            : QPointF(event->pixelDelta());
@@ -1346,11 +1837,162 @@ void CanvasView::wheelEvent(QWheelEvent* event) {
                     ? QPointF(delta.y(), delta.x())
                     : delta;
         fit_mode_ = false;
+        constrain_pan();
+        navigation_sync(false, true);
     }
     update();
     event->accept();
 }
+std::optional<CanvasTool> CanvasView::shortcut_tool(QKeyEvent* key) const {
+    const auto modifiers = key->modifiers();
+    if (modifiers != Qt::NoModifier && modifiers != Qt::ShiftModifier)
+        return {};
+    QAction* matched = nullptr;
+    for (auto* action : actions()) {
+        if (!action->isEnabled() || !action->property("canvasTool").isValid())
+            continue;
+        const auto sequence = action->shortcut();
+        if (sequence.count() != 1)
+            continue;
+        if (sequence[0] == key->keyCombination()) {
+            matched = action;
+            break;
+        }
+        if (modifiers == Qt::ShiftModifier && sequence[0].key() == key->key() &&
+            sequence[0].keyboardModifiers() == Qt::NoModifier)
+            matched = action;
+    }
+    if (!matched)
+        return {};
+    const auto selected = static_cast<CanvasTool>(matched->property("canvasTool").toInt());
+    if (matched->shortcut() != QKeySequence(matched->property("defaultShortcut").toString()))
+        return selected;
+    std::vector<CanvasTool> group;
+    std::size_t group_index{};
+    switch (key->key()) {
+    case Qt::Key_M:
+        group = {CanvasTool::rectangle, CanvasTool::ellipse};
+        break;
+    case Qt::Key_L:
+        group_index = 1;
+        group = {CanvasTool::lasso, CanvasTool::polygon};
+        break;
+    case Qt::Key_W:
+        group_index = 2;
+        group = {CanvasTool::wand, CanvasTool::color_range, CanvasTool::object_selection};
+        break;
+    case Qt::Key_J:
+        group_index = 3;
+        group = {CanvasTool::spot, CanvasTool::heal, CanvasTool::patch};
+        break;
+    case Qt::Key_O:
+        group_index = 4;
+        group = {CanvasTool::dodge, CanvasTool::burn, CanvasTool::sponge};
+        break;
+    default:
+        return selected;
+    }
+    auto current = std::find(group.begin(), group.end(), tool_);
+    if (current == group.end() && modifiers != Qt::ShiftModifier)
+        return group_tools_[group_index];
+    if (current == group.end())
+        current = std::find(group.begin(), group.end(), group_tools_[group_index]);
+    if (modifiers == Qt::ShiftModifier || !read_canvas_preferences().shift_tool_switch)
+        return group[(std::size_t(current - group.begin()) + 1) % group.size()];
+    return tool_;
+}
+bool CanvasView::event(QEvent* event) {
+    if (event->type() == QEvent::FocusOut || event->type() == QEvent::WindowDeactivate) {
+        scrub_gesture_ = false;
+        zoom_animating_ = false;
+        pan_velocity_ = {};
+        if (navigation_timer_)
+            navigation_timer_->stop();
+        temporary_hand_ = false;
+        if (spring_original_) {
+            const auto preferences = read_canvas_preferences();
+            const bool restore =
+                preferences.spring_tools && spring_timer_.elapsed() >= preferences.spring_delay;
+            spring_key_ = 0;
+            if (!restore)
+                spring_original_.reset();
+            else if (!dragging_) {
+                const auto original = *spring_original_;
+                spring_original_.reset();
+                set_tool(original);
+            }
+        }
+        update_tool_cursor();
+    }
+    if (event->type() == QEvent::ShortcutOverride &&
+        shortcut_tool(static_cast<QKeyEvent*>(event))) {
+        event->accept();
+        return true;
+    }
+    const bool handled = QWidget::event(event);
+    // Finish the current stroke before restoring a spring-loaded tool.
+    if (event->type() == QEvent::MouseButtonRelease && !dragging_ && spring_original_ &&
+        spring_key_ == 0) {
+        const auto original = *spring_original_;
+        spring_original_.reset();
+        set_tool(original);
+    }
+    return handled;
+}
 void CanvasView::keyPressEvent(QKeyEvent* event) {
+    if (tool_ == CanvasTool::object_selection && event->key() == Qt::Key_Escape) {
+        object_cancel();
+        return;
+    }
+    if (patch_base_ && event->key() == Qt::Key_Escape) {
+        patch_cancel();
+        event->accept();
+        return;
+    }
+    if (const auto selected = shortcut_tool(event)) {
+        if (!event->isAutoRepeat() && !dragging_) {
+            spring_original_ = tool_;
+            spring_key_ = event->key();
+            spring_timer_.start();
+            spring_timestamp_ = event->timestamp();
+            set_tool(*selected);
+        }
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_CapsLock && !event->isAutoRepeat()) {
+        precise_cursor_ = !precise_cursor_;
+        update_tool_cursor();
+        update();
+        return;
+    }
+    if (tool_ == CanvasTool::crop && event->key() == Qt::Key_X &&
+        event->modifiers() == Qt::NoModifier) {
+        if (crop_ratio > 0)
+            set_crop_ratio(1 / crop_ratio);
+        else if (crop_bounds_) {
+            auto r = *crop_bounds_;
+            const auto center = r.center();
+            r.setSize(QSizeF(r.height(), r.width()));
+            r.moveCenter(center);
+            crop_bounds_ = r;
+            update();
+        }
+        return;
+    }
+    if (tool_ == CanvasTool::crop && crop_bounds_ &&
+        (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right ||
+         event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)) {
+        const double step = event->modifiers().testFlag(Qt::ShiftModifier) ? 10 : 1;
+        crop_bounds_->translate(event->key() == Qt::Key_Left    ? -step
+                                : event->key() == Qt::Key_Right ? step
+                                                                : 0,
+                                event->key() == Qt::Key_Up     ? -step
+                                : event->key() == Qt::Key_Down ? step
+                                                               : 0);
+        update();
+        return;
+    }
     if (crop_bounds_ && event->key() == Qt::Key_Escape) {
         cancel_crop();
         return;
@@ -1423,6 +2065,8 @@ void CanvasView::keyPressEvent(QKeyEvent* event) {
     }
 
     if (event->key() == Qt::Key_Escape) {
+        path_layer_ = {};
+        design_drag_ = false;
         path = {};
         pen_nodes_.clear();
         pen_drag_node_ = -1;
@@ -1434,22 +2078,31 @@ void CanvasView::keyPressEvent(QKeyEvent* event) {
         update();
     } else if (event->key() == Qt::Key_Return)
         finish_path();
-    else {
-        const auto key = event->key();
-        if (event->modifiers().testFlag(Qt::ShiftModifier) && key == Qt::Key_M)
-            set_tool(tool_ == CanvasTool::rectangle ? CanvasTool::ellipse : CanvasTool::rectangle);
-        else if (event->modifiers().testFlag(Qt::ShiftModifier) && key == Qt::Key_L)
-            set_tool(tool_ == CanvasTool::lasso ? CanvasTool::polygon : CanvasTool::lasso);
-        else if (event->modifiers().testFlag(Qt::ShiftModifier) && key == Qt::Key_W)
-            set_tool(tool_ == CanvasTool::wand ? CanvasTool::color_range : CanvasTool::wand);
-        else
-            QWidget::keyPressEvent(event);
-    }
+    else
+        QWidget::keyPressEvent(event);
 }
 void CanvasView::keyReleaseEvent(QKeyEvent* event) {
+    if (event->key() == spring_key_ && !event->isAutoRepeat()) {
+        spring_key_ = 0;
+        const auto preferences = read_canvas_preferences();
+        const auto duration = spring_timestamp_ && event->timestamp() >= spring_timestamp_
+                                  ? qint64(event->timestamp() - spring_timestamp_)
+                                  : spring_timer_.elapsed();
+        if (spring_original_ && preferences.spring_tools && duration >= preferences.spring_delay) {
+            if (!dragging_) {
+                const auto original = *spring_original_;
+                spring_original_.reset();
+                set_tool(original);
+            }
+        } else {
+            spring_original_.reset();
+        }
+        event->accept();
+        return;
+    }
     if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
         temporary_hand_ = false;
-        setCursor(tool_ == CanvasTool::hand ? Qt::OpenHandCursor : Qt::ArrowCursor);
+        update_tool_cursor();
         return;
     }
     QWidget::keyReleaseEvent(event);

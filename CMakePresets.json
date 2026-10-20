@@ -8,6 +8,7 @@
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "CMAKE_PREFIX_PATH": "$env{QT_ROOT}",
         "VCPKG_INSTALLED_DIR": "${sourceDir}/build/vcpkg_installed",
+        "VCPKG_OVERLAY_PORTS": "${sourceDir}/cmake/ports",
         "VCPKG_INSTALL_OPTIONS": "--x-buildtrees-root=${sourceDir}/build/vcpkg-buildtrees;--x-packages-root=${sourceDir}/build/vcpkg-packages",
         "VCPKG_TARGET_TRIPLET": "x64-windows", "BUILD_TESTING": "ON"
       },

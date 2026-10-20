@@ -46,13 +46,13 @@ def main():
         call('window')
         def all_tools():
             scene()
-            for index in range(25):
+            for index in range(29):
                 chrome = tool(index)
                 state = call('window_interaction_state')
                 assert state['tool'] == index and state['checkedTools'] == 1
                 inventory[str(index)] = dict(options=state['options'], controls=chrome['options'])
                 shown = state['options']
-                assert ('selectionOptions' in shown) == (index in (2,3,4,5,9,10)), (index, shown)
+                assert ('selectionOptions' in shown) == (index in (2,3,4,5,9,10,28)), (index, shown)
                 assert ('photo_aligned' in shown) == (index in (16,17)), (index, shown)
                 assert ('photo_allLayers' in shown) == (index == 14), (index, shown)
                 assert ('move_autoSelect' in shown) == (index == 0), (index, shown)
@@ -60,8 +60,8 @@ def main():
             assert len({b['x'] for b in chrome['buttons']}) == 2
             for parent, label in (('滤镜','智能效果…'), ('文件','批量导出与队列…'), ('图像','曲线…')):
                 assert any(parent in m['path'] and m['text'] == label for m in chrome['menus'])
-            return dict(tools=25, menus=len(chrome['menus']))
-        test('all_25_tools_context_options_and_reachable_menus', all_tools)
+            return dict(tools=29, menus=len(chrome['menus']))
+        test('all_29_tools_context_options_and_reachable_menus', all_tools)
         def ranges():
             for mode, expected in enumerate(((False,True,True),(True,True,True),(True,False,False),(False,True,False))):
                 scene();tool(2);control('selectionMode0');drag(20,120)

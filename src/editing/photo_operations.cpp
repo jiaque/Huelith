@@ -1,4 +1,6 @@
+#include "huelith/editing/image_storage.h"
 #include "huelith/editing/photo_operations.h"
+#include "huelith/editing/healing.h"
 #include <QPainter>
 #include <algorithm>
 #include <array>
@@ -15,7 +17,7 @@ Pixel pixel(const QImage& image, int x, int y) {
     return {p[0], p[1], p[2], p[3]};
 }
 QImage blank(QSize size) {
-    QImage image(size, QImage::Format_RGBA32FPx4_Premultiplied);
+    auto image = allocate_image(size, QImage::Format_RGBA32FPx4_Premultiplied);
     if (image.isNull())
         throw EditError(QStringLiteral("图像内存不足"));
     image.fill(Qt::transparent);
@@ -30,6 +32,8 @@ Layer& writable(State& state, const QUuid& id) {
         throw EditError(QStringLiteral("此工具需要像素／修复图层；源对象请先栅格化或新建修复层"));
     if (layer->pixels.isNull())
         layer->pixels = blank(state.size);
+    if(!layer->pixels.isDetached() && layer->pixels.sizeInBytes()>=mapped_image_threshold)
+        layer->pixels=copy_image(layer->pixels);
     return *layer;
 }
 float selection_at(const State& state, QPoint p) {
@@ -166,24 +170,69 @@ void fill_color(State& state, const QUuid& id, QPoint seed, QColor color, int to
     }
 }
 
-void retouch(State& state, const QUuid& id, const QImage& coverage, const RetouchOptions& options) {
+QPointF clone_sample_position(const RetouchOptions& options, QPointF point) {
+    const auto relative = point - options.source_anchor;
+    const double angle = options.source_rotation * std::acos(-1.) / 180.;
+    return options.source_anchor + options.source_offset +
+           QPointF((relative.x()*std::cos(angle)+relative.y()*std::sin(angle)) / options.source_scale_x * (options.source_flip_x ? -1 : 1),
+                   (-relative.x()*std::sin(angle)+relative.y()*std::cos(angle)) / options.source_scale_y * (options.source_flip_y ? -1 : 1));
+}
+void retouch(State& state, const QUuid& id, const QImage& coverage, const RetouchOptions& options,
+             const QImage* sampled_source) {
     if (coverage.size() != state.size || coverage.format() != QImage::Format_Grayscale8 ||
-        !std::isfinite(options.radius) || options.radius < 1 || options.radius > 500 ||
-        !std::isfinite(options.strength) || options.strength < 0 || options.strength > 1 ||
-        !std::isfinite(options.source_offset.x()) || !std::isfinite(options.source_offset.y()) ||
-        options.operation < Retouch::clone || options.operation > Retouch::sponge)
+        !std::isfinite(options.radius) || options.radius < 1 || options.radius > 2500 ||
+        !std::isfinite(options.color_adaptation) || options.color_adaptation < 0 ||
+        options.color_adaptation > 1 || !std::isfinite(options.strength) || options.strength < 0 ||
+        options.strength > 1 || !std::isfinite(options.source_offset.x()) ||
+        !std::isfinite(options.source_offset.y()) || options.operation < Retouch::clone ||
+        options.operation > Retouch::sponge || options.tone_range<0 || options.tone_range>2 ||
+        !std::isfinite(options.source_scale_x) || options.source_scale_x < .01 || options.source_scale_x > 100 ||
+        !std::isfinite(options.source_scale_y) || options.source_scale_y < .01 || options.source_scale_y > 100 ||
+        !std::isfinite(options.source_rotation) || std::abs(options.source_rotation) > 180 ||
+        !std::isfinite(options.source_anchor.x()) || !std::isfinite(options.source_anchor.y()))
         throw EditError(QStringLiteral("修饰笔画参数无效"));
-    const QImage source = sample_layers(state, id, options.sample);
+    int left=coverage.width(),top=coverage.height(),right=-1,bottom=-1;
+    for(int y=0;y<coverage.height();++y) {
+        const auto* row=coverage.constScanLine(y);
+        for(int x=0;x<coverage.width();++x) if(row[x]) {
+            left=std::min(left,x);right=std::max(right,x);top=std::min(top,y);bottom=y;
+        }
+    }
+    if(right<left)return;
+    const QRect affected(QPoint(left,top),QPoint(right,bottom));
+    const QImage source = sampled_source ? *sampled_source : sample_layers(state, id, options.sample);
+    if(source.size()!=state.size || source.format()!=QImage::Format_RGBA32FPx4_Premultiplied)
+        throw EditError(QStringLiteral("取样图像与文档不匹配"));
     const auto operation = options.operation;
-    const QImage low = operation == Retouch::clone || operation == Retouch::dodge ||
+    QImage healing;
+    auto offset = options.source_offset;
+    if (operation == Retouch::heal || operation == Retouch::spot) {
+        auto mask = coverage;
+        if (!state.selection.isNull())
+            for (int y = 0; y < mask.height(); ++y) {
+                auto* row = mask.scanLine(y);
+                const auto* selection = state.selection.constScanLine(y);
+                for (int x = 0; x < mask.width(); ++x)
+                    row[x] = uchar(int(row[x]) * selection[x] / 255);
+            }
+        if (operation == Retouch::spot)
+            offset = automatic_patch_offset(source, mask);
+        healing = patch_replacement(source, mask, offset, options.color_adaptation);
+    }
+    const QImage low = operation == Retouch::clone || operation == Retouch::heal ||
+                               operation == Retouch::spot || operation == Retouch::dodge ||
                                operation == Retouch::burn || operation == Retouch::sponge
                            ? QImage{}
                            : low_pass(source, std::clamp(int(options.radius / 2), 1, 64));
     auto& layer = writable(state, id);
     const auto matrix = layer.transform * parent_matrix(state, id);
-    for (int y = 0; y < layer.pixels.height(); ++y) {
+    bool invertible=false;
+    const auto inverse=matrix.inverted(&invertible);
+    const auto local_bounds=layer.warped || !invertible ? layer.pixels.rect() :
+        inverse.mapRect(QRectF(affected).adjusted(-1,-1,1,1)).toAlignedRect().intersected(layer.pixels.rect());
+    for (int y = local_bounds.top(); y <= local_bounds.bottom(); ++y) {
         auto* row = reinterpret_cast<float*>(layer.pixels.scanLine(y));
-        for (int x = 0; x < layer.pixels.width(); ++x) {
+        for (int x = local_bounds.left(); x <= local_bounds.right(); ++x) {
             const auto warped =
                 warp_point(layer, layer.pixels.size(), QPointF(x + .5, y + .5), false);
             if (!warped)
@@ -198,41 +247,14 @@ void retouch(State& state, const QUuid& id, const QImage& coverage, const Retouc
                 continue;
             const auto original = pixel(source, p.x(), p.y());
             auto value = original;
-            if (operation == Retouch::clone || operation == Retouch::heal) {
-                const auto point = QPointF(p) + options.source_offset;
+            if (operation == Retouch::heal || operation == Retouch::spot) {
+                value = pixel(healing, p.x(), p.y());
+            } else if (operation == Retouch::clone) {
+                const auto point = clone_sample_position(options, QPointF(p));
                 const QPoint q(int(std::floor(point.x())), int(std::floor(point.y())));
                 if (!source.rect().contains(q))
                     continue;
                 value = pixel(source, q.x(), q.y());
-                if (operation == Retouch::heal) {
-                    const auto src_low = pixel(low, q.x(), q.y()),
-                               dst_low = pixel(low, p.x(), p.y());
-                    for (int c = 0; c < 3; ++c)
-                        value[c] = std::max(0.F, value[c] + dst_low[c] - src_low[c]);
-                    value[3] = original[3];
-                }
-            } else if (operation == Retouch::spot) {
-                // Choose an unpainted surrounding sample; protected pixels are never a source.
-                double best = std::numeric_limits<double>::infinity();
-                const auto target_low = pixel(low, p.x(), p.y());
-                for (int direction = 0; direction < 16; ++direction) {
-                    const double angle = direction * 6.283185307179586 / 16;
-                    const QPoint q = p + QPoint(int(std::cos(angle) * options.radius * 3),
-                                                int(std::sin(angle) * options.radius * 3));
-                    if (!source.rect().contains(q) || coverage.constScanLine(q.y())[q.x()])
-                        continue;
-                    const auto candidate = pixel(source, q.x(), q.y());
-                    if (candidate[3] < .99F)
-                        continue;
-                    const auto candidate_low = pixel(low, q.x(), q.y());
-                    double error{};
-                    for (int c = 0; c < 3; ++c)
-                        error += std::pow(double(candidate_low[c] - target_low[c]), 2);
-                    if (error < best) {
-                        best = error;
-                        value = candidate;
-                    }
-                }
             } else if (operation == Retouch::blur || operation == Retouch::sharpen) {
                 const auto smooth = pixel(low, p.x(), p.y());
                 for (int c = 0; c < 3; ++c) {
@@ -245,12 +267,25 @@ void retouch(State& state, const QUuid& id, const QImage& coverage, const Retouc
             } else if (operation == Retouch::sponge) {
                 const float luminance =
                     original[0] * .2627F + original[1] * .678F + original[2] * .0593F;
+                const float maximum=std::max({original[0],original[1],original[2]}),minimum=std::min({original[0],original[1],original[2]});
+                const float saturation=maximum>1e-8F?std::clamp((maximum-minimum)/maximum,0.F,1.F):0.F;
+                const float amount=(options.sponge_saturate?1.F:-1.F)*(options.sponge_vibrance?1.F-.75F*saturation:1.F);
                 for (int c = 0; c < 3; ++c)
-                    value[c] = luminance;
+                    value[c] = original[c]+amount*(original[c]-luminance);
             } else {
-                const float gain = operation == Retouch::dodge ? 2.F : .5F;
+                if(original[3]<=0)continue;
+                const double luminance=(.2627*original[0]+.6780*original[1]+.0593*original[2])/original[3];
+                const double encoded=std::pow(std::clamp(luminance,0.,1.),1/2.2);
+                const auto smooth=[](double low,double high,double v){const double t=std::clamp((v-low)/(high-low),0.,1.);return t*t*(3-2*t);};
+                const double m=smooth(.1,.9,encoded);
+                const double weight=options.tone_range==0?1-smooth(.15,.65,encoded):options.tone_range==2?smooth(.35,.85,encoded):4*m*(1-m);
+                const double gain=std::exp2((operation==Retouch::dodge?1.:-1.)*weight);
+                double target=luminance*gain;
+                if(options.protect_tones && luminance>=0)
+                    target=luminance>1?1+(luminance-1)*gain:luminance*gain/(1+luminance*(gain-1));
+                const float multiplier=luminance>1e-12?float(target/luminance):float(gain);
                 for (int c = 0; c < 3; ++c)
-                    value[c] *= gain;
+                    value[c] *= multiplier;
             }
             for (int c = 0; c < 4; ++c)
                 row[x * 4 + c] =
@@ -259,27 +294,128 @@ void retouch(State& state, const QUuid& id, const QImage& coverage, const Retouc
     }
 }
 
-void crop_canvas(State& state, const QRect& bounds) {
-    if (bounds.isEmpty() || qint64(bounds.width()) * bounds.height() > 64'000'000)
+void patch_selection(State& state, const QUuid& target, QPointF drag, bool destination,
+                     SampleLayers scope, double adaptation) {
+    if (state.selection.isNull())
+        throw EditError("请先圈选需要修补的区域");
+    const QImage selected = state.selection;
+    QImage coverage = selected;
+    if (destination) {
+        coverage.fill(0);
+        const QPoint shift(qRound(drag.x()), qRound(drag.y()));
+        for (int y = 0; y < selected.height(); ++y) {
+            const int dy = y + shift.y();
+            if (dy < 0 || dy >= coverage.height())
+                continue;
+            auto* row = coverage.scanLine(dy);
+            for (int x = 0; x < selected.width(); ++x) {
+                const int dx = x + shift.x();
+                if (dx >= 0 && dx < coverage.width())
+                    row[dx] = selected.constScanLine(y)[x];
+            }
+        }
+    }
+    RetouchOptions options;
+    options.operation = Retouch::heal;
+    options.sample = scope;
+    options.source_offset = destination ? -drag : drag;
+    options.color_adaptation = adaptation;
+    state.selection = {};
+    try {
+        retouch(state, target, coverage, options);
+    } catch (...) {
+        state.selection = selected;
+        throw;
+    }
+    state.selection = destination ? coverage : selected;
+}
+
+void paint_replacement(State& state, const QUuid& id, const QImage& replacement,
+                       const QImage& coverage) {
+    if (replacement.format() != QImage::Format_RGBA32FPx4_Premultiplied ||
+        replacement.size() != state.size || coverage.size() != state.size ||
+        coverage.format() != QImage::Format_Grayscale8)
+        throw EditError("填充结果格式无效");
+    auto& layer = writable(state, id);
+    const auto matrix = layer.transform * parent_matrix(state, id);
+    for (int y = 0; y < layer.pixels.height(); ++y) {
+        auto* row = reinterpret_cast<float*>(layer.pixels.scanLine(y));
+        for (int x = 0; x < layer.pixels.width(); ++x) {
+            const auto warped =
+                warp_point(layer, layer.pixels.size(), QPointF(x + .5, y + .5), false);
+            if (!warped)
+                continue;
+            const auto mapped = matrix.map(*warped);
+            const QPoint p(int(std::floor(mapped.x())), int(std::floor(mapped.y())));
+            if (!coverage.rect().contains(p))
+                continue;
+            const float amount = coverage.constScanLine(p.y())[p.x()] / 255.F;
+            if (amount == 0)
+                continue;
+            const auto value = pixel(replacement, p.x(), p.y());
+            for (int c = 0; c < 4; ++c)
+                row[x * 4 + c] =
+                    row[x * 4 + c] * (1 - amount * (layer.background ? value[3] : 1.F)) +
+                    value[c] * amount;
+        }
+    }
+}
+
+void crop_canvas(State& state, const QRect& bounds, double angle, bool delete_pixels) {
+    if (bounds.isEmpty() || qint64(bounds.width()) * bounds.height() > huelith::editing::maximum_image_pixels || !std::isfinite(angle) || std::abs(angle)>180)
         throw EditError(QStringLiteral("裁剪尺寸无效"));
-    const auto delta = QTransform::fromTranslate(-bounds.x(), -bounds.y());
+    QTransform rotation;rotation.translate(state.size.width()/2.,state.size.height()/2.);rotation.rotate(angle);rotation.translate(-state.size.width()/2.,-state.size.height()/2.);
+    const auto delta = rotation*QTransform::fromTranslate(-bounds.x(), -bounds.y());
     for (auto& layer : state.layers) {
-        if (layer.background) {
+        if (layer.background && delete_pixels) {
             QImage cropped(bounds.size(), layer.pixels.format());
             cropped.setColorSpace(layer.pixels.colorSpace());
             cropped.fill(Qt::white);
             QPainter painter(&cropped);
-            painter.drawImage(-bounds.topLeft(), layer.pixels);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform);
+            painter.setTransform(delta);
+            painter.drawImage(0,0,layer.pixels);
             painter.end();
             layer.pixels = cropped;
             continue;
         }
+        if (layer.background) {
+            layer.background = false;
+            layer.locked = false;
+        }
         layer.transform *= delta;
         layer.mask_transform *= delta;
+    }
+    if (delete_pixels) {
+        const QRectF retained(QPointF(), bounds.size());
+        const std::function<void(std::vector<Layer>&)> erase_outside = [&](auto& layers) {
+            for (auto& layer : layers) {
+                if (!layer.children.empty()) erase_outside(layer.children);
+                if (layer.background || !layer.raw_source.isEmpty() || layer.pixels.isNull() ||
+                    (layer.kind != LayerKind::pixels && layer.kind != LayerKind::repair)) continue;
+                const auto matrix = layer.transform * parent_matrix(state, layer.id);
+                // Keep the editable transform/effect/mask coordinate system. Only actual
+                // raster samples outside the cropped canvas are discarded.
+                layer.pixels=copy_image(layer.pixels);
+                for (int y = 0; y < layer.pixels.height(); ++y) {
+                    auto* row = reinterpret_cast<float*>(layer.pixels.scanLine(y));
+                    for (int x = 0; x < layer.pixels.width(); ++x) {
+                        const auto warped = warp_point(layer, layer.pixels.size(), QPointF(x+.5, y+.5), false);
+                        if (!warped || !retained.contains(matrix.map(*warped)))
+                            std::fill_n(row + x*4, 4, 0.F);
+                    }
+                }
+            }
+        };
+        erase_outside(state.layers);
     }
     const auto crop_range = [&](QImage& image) {
         if (image.isNull())
             return;
+        if(angle!=0){
+            QImage output(bounds.size(),QImage::Format_ARGB32_Premultiplied);output.fill(Qt::black);
+            QPainter painter(&output);painter.setRenderHint(QPainter::SmoothPixmapTransform);painter.setTransform(delta);painter.drawImage(0,0,image);painter.end();image=output.convertToFormat(QImage::Format_Grayscale8);return;
+        }
         QImage output(bounds.size(), image.format());
         output.fill(0);
         // Grayscale images cannot be QPainter targets.

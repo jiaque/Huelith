@@ -1,0 +1,5 @@
+ExifTool 13.59, Phil Harvey; Windows package by Oliver Betz.
+https://exiftool.org/
+https://downloads.sourceforge.net/project/exiftool/exiftool-13.59_64.zip
+Separate metadata utility. Upstream Perl modules, Windows wrapper LICENSE and Strawberry Perl licenses are preserved in tools/exiftool/exiftool_files.
+Archive SHA256: 44b512b25af500724ba579d0a53c8fc5851628b692dd5e5d94ae4a15c2cba9ec

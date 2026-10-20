@@ -17,8 +17,11 @@ struct Effect {
     QString name{QStringLiteral("调整")};
     bool enabled{true};
     double amount{1};
+    double blur_radius{}; // Gaussian sigma in source pixels; zero disables blur.
     ToneSettings tone;
     std::shared_ptr<const CubeLut> lut;
+    QJsonObject portrait; // Versioned per-person non-destructive recipe.
+    QImage liquify; // Normalized inverse deformation and frozen coverage.
     QImage mask; // Source-local coverage; null means the whole layer.
 };
 [[nodiscard]] std::shared_ptr<const CubeLut> parse_cube(const QString& text);

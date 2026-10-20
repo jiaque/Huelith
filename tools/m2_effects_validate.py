@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import tempfile
 import traceback
+import subprocess
+import sys
+from contextlib import nullcontext
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,9 +47,19 @@ def main():
     red = cube(lambda r, g, b: (1, 0, 0))
     rgba = [.125, .25, .5, .5]
 
-    with tempfile.TemporaryDirectory(prefix='huelith-effects-') as directory:
+    child = len(sys.argv) > 1 and sys.argv[1] == '--library-check'
+    with (nullcontext(sys.argv[2]) if child else tempfile.TemporaryDirectory(prefix='huelith-effects-')) as directory:
         folder = Path(directory)
         call('init', settings=directory)
+        if child:
+            call('window')
+            call('window_scene', width=240, height=180, layers=[dict(name='grey', path=str(folder/'grey.png'))])
+            call('window_action', text='智能效果…', dialog=dict(accept=True, steps=[
+                dict(control='effectLibrarySearch', value=sys.argv[3]), dict(click='effectLibraryApply')]))
+            nodes = call('window_probe')['layers'][0]['effects']
+            assert len(nodes) == 1 and nodes[0]['amount'] == .65 and nodes[0]['lut'], nodes
+            call('shutdown')
+            return
 
         def probe(effects, color=rgba, **kw):
             return call('effect_probe', rgba=color, effects=effects, **kw)['pixels']
@@ -162,6 +175,33 @@ def main():
             assert effects()[0]['lut'] and effects()[0]['amount'] == .4
             assert call('window_probe', x=100, y=100)['rgba'] == expected
         test('real_lut_import_and_named_preset_save_load_pixels', preset)
+        def library():
+            scene()
+            lut_path = folder/'library.cube'
+            lut_path.write_text(swap, encoding='utf-8')
+            name = '验证预设-' + folder.name
+            dialog([dict(click='effectLut', file=str(lut_path)),
+                    dict(control='effectAmount', value=65),
+                    dict(control='effectLibraryName', value=name),
+                    dict(click='effectLibrarySave')])
+            expected = call('window_probe', x=100, y=100)['rgba']
+            subprocess.run([sys.executable, __file__, '--library-check', directory, name], check=True, timeout=30)
+            scene()
+            dialog([dict(control='effectLibrarySearch', value=name),
+                    dict(click='effectLibraryApply')])
+            assert len(effects()) == 1 and effects()[0]['amount'] == .65 and effects()[0]['lut']
+            assert call('window_probe', x=100, y=100)['rgba'] == expected
+            scene()
+            dialog([dict(control='effectLibrarySearch', value=name),
+                    dict(control='effectLibraryName', value=name+'重命名'),
+                    dict(click='effectLibraryRename')], False)
+            dialog([dict(control='effectLibrarySearch', value=name+'重命名'),
+                    dict(click='effectLibraryApply'), dict(click='effectLibraryDelete')])
+            assert effects()[0]['name'] == name+'重命名'
+            scene()
+            dialog([dict(control='effectLibrarySearch', value=name), dict(click='effectLibraryApply')])
+            assert not effects()
+        test('managed_library_embedded_lut_reopen_search_rename_apply_delete', library)
         call('shutdown')
     report = dict(tests=results, passed=sum(x['passed'] for x in results), total=len(results))
     (out/'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')

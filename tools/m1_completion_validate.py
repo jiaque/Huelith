@@ -82,7 +82,7 @@ def main():
    action('锁定参考线');drag(100,180,150,180);assert probe()['vertical']==[100];action('锁定参考线');action('显示参考线');assert not probe()['guidesVisible'];action('显示参考线');action('清除参考线');assert not probe()['vertical'];key('Ctrl+Z');assert probe()['vertical']==[100]
   test('rulers_guide_create_move_remove_and_snap',guides)
   def ants():
-   scene([dict(name='image',color='white')]);key('M');drag(50,50,150,120);old=probe()['phase'];first=out/f'{args.build}-ants-a.png';second=out/f'{args.build}-ants-b.png';call('window_capture',path=str(first));deadline=time.monotonic()+1
+   scene([dict(name='image',color='white')]);key('M');drag(50,50,150,120);old=probe()['phase'];first=out/f'{args.build}-ants-a.png';second=out/f'{args.build}-ants-b.png';old=call('window_capture',path=str(first))['phase'];deadline=time.monotonic()+1
    while probe()['phase']==old and time.monotonic()<deadline:call('pump')
    assert probe()['phase']!=old;call('window_capture',path=str(second));assert ImageChops.difference(Image.open(first).convert('RGB'),Image.open(second).convert('RGB')).getbbox()
   test('marching_ants_timer_actual_window_frames',ants)
@@ -187,7 +187,12 @@ def main():
    with zipfile.ZipFile(current) as z:entries={name:z.read(name) for name in z.namelist()}
    # Strip later layer fields to construct a real schema-2 payload (one-layer fixture).
    grid=b'\0'+b''.join(struct.pack('<dd',x,y) for y in (0,.5,1) for x in (0,.5,1));payload=entries['document.bin'];assert payload.count(grid)==1
-   version=struct.unpack_from('<I',payload)[0];start=payload.index(grid);end=start+len(grid)
+   version=struct.unpack_from('<I',payload)[0]
+   if version>=11:
+    name_bytes=struct.unpack_from('<I',payload,12)[0]
+    global_angle=16+name_bytes+8 # schema, QSize, QString, ppi.
+    payload=payload[:global_angle]+payload[global_angle+8:]
+   start=payload.index(grid);end=start+len(grid)
    for _ in range((2 if version>=4 else 0)+(1 if version>=5 else 0)):
     size=struct.unpack_from('<I',payload,end)[0];end+=4
     assert size!=0xfffffffe,'Extended QByteArray length unexpected in small fixture'
@@ -196,6 +201,13 @@ def main():
    if version>=7:
     assert struct.unpack_from('<I',payload,end)[0]==0,'Fixture should contain no effects'
     end+=4
+   for _ in range((2 if version>=8 else 0)+(1 if version>=9 else 0)):
+    size=struct.unpack_from('<I',payload,end)[0];end+=4
+    assert size not in (0xfffffffe,0xffffffff),'Expected small JSON payload'
+    end+=size
+   if version>=10:
+    assert payload[end]==0,'Legacy fixture has no frame'
+    end+=1
    assert end<=len(payload)
    entries['document.bin']=struct.pack('<I',2)+payload[4:start]+payload[end:];manifest=json.loads(entries['manifest.json']);manifest['schema']=2;entries['manifest.json']=json.dumps(manifest).encode();legacy=folder/'schema2.huelith'
    with zipfile.ZipFile(legacy,'w',compression=zipfile.ZIP_STORED) as z:
@@ -212,7 +224,7 @@ def main():
     call('window_chrome',click=index);assert state()['tool']==index and state()['checkedTools']==1
    paths={m['text']:m['path'] for m in chrome['menus']}
    for text,segment in [('反相蒙版','/图层蒙版/'),('右对齐','/对齐/'),('水平分布','/分布/'),('羽化','/修改/'),('网格','/显示/'),('保存工作区布局','/工作区/'),('原位粘贴','/选择性粘贴/'),('数值变换…','/变换/'),('导出 PNG / JPEG…','/导出/')]:assert segment in paths[text],(text,paths.get(text))
-   assert len(paths)==len(chrome['menus']), 'Duplicate menu command'
+   assert len({m['path'] for m in chrome['menus']})==len(chrome['menus']), 'Duplicate command in the same menu path'
    assert paths['设置菜单快捷键…'].startswith('/编辑') and paths['恢复未保存文档…'].startswith('/文件')
    key('V');key('B');assert state()['tool']==7;action('像素');key('Ctrl+Z');assert len(probe()['layers'])==1
    (out/f'{args.build}-chrome.json').write_text(json.dumps(chrome,ensure_ascii=False,indent=2),encoding='utf-8')

@@ -1,5 +1,7 @@
 #pragma once
 #include <QObject>
+#include <QHash>
+#include <QSet>
 #include <QPoint>
 #include <QUuid>
 #include <functional>
@@ -37,24 +39,42 @@ class EditorController final : public QObject {
     void create_layer(int kind);
     void layer_action(const QString& operation);
     void selection_action(const QString& operation);
+    void semantic_selection(int target);
+    void show_selection_refine();
     void configure_menus();
     void configure_photo_tools();
+    void configure_design_tools();
+    void configure_template_tools();
+    void configure_enhancement_tools();
+    void show_enhancement(int mode, bool selected_layer = false);
+    void show_photo_merge(int mode);
+    void refresh_design_tools();
     void show_tone(int category);
-    void show_effects();
+    void show_effects(bool add_blur = false);
+    void show_layer_styles();
     void refresh_tools();
     void copy_pixels(bool merged, bool cut);
     void paste_pixels(bool in_place, bool into_selection);
     void align_layers(const QString& operation);
     void show_export();
     void show_shortcuts();
+    void show_brush_settings();
+    void show_content_fill();
+    void show_liquify();
+    void show_portrait();
     void offer_recovery();
     [[nodiscard]] QString recovery_directory() const;
     void build_properties();
     void update_recent(const QString& path);
     void autosave();
+    void finish_recovery(bool wait);
+    void apply_file_preferences();
     void finish_save(bool wait);
     struct SaveJob;
     std::unique_ptr<SaveJob> save_job_;
+    struct RecoveryJob;
+    std::unique_ptr<RecoveryJob> recovery_job_;
+    QTimer* recovery_timer_{};
     [[nodiscard]] CanvasView* canvas() const;
     MainWindow* window_;
     ExportDialog* export_queue_{}; // Qt parent owns the modeless queue window.
@@ -74,5 +94,10 @@ class EditorController final : public QObject {
     QWidget* layer_controls_{};
     bool align_to_canvas_{true};
     Qt::KeyboardModifiers layer_click_modifiers_{};
+    QHash<QUuid,bool> visibility_saved_;
+    QUuid visibility_solo_;
+    CanvasView* visibility_canvas_{};
+    bool visibility_drag_{},visibility_value_{};
+    QSet<QUuid> visibility_touched_;
 };
 } // namespace huelith::desktop

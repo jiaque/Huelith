@@ -60,6 +60,28 @@ def main():
 
     test('linear_radial_ranges_feather', gradients)
 
+    def geometry_tracking():
+        # A mask painted before a flip must follow the photographed subject.
+        stamp = dict(mode='brush', radius=.07, feather=0,
+                     points=[dict(x=.2, y=.5)], geometryAtCreation={})
+        flipped = dict(version=1, flipHorizontal=True)
+        result = probe([stamp], [[20,40],[79,40]], geometry=flipped)['samples']
+        assert result[0]['mask']==0 and result[1]['mask']==255,result
+        assert abs(result[0]['rgba'][0]-.2)<1e-5 and abs(result[1]['rgba'][0]-.4)<1e-5
+        # A brush added while flipped is stored in that coordinate frame; both
+        # must land on the same subject when geometry is reset.
+        second=dict(stamp,points=[dict(x=.79,y=.5)],geometryAtCreation=flipped,subtract=True,radius=.03)
+        result=probe([stamp,second],[[20,40],[23,40]])['samples']
+        assert result[0]['mask']==0 and result[1]['mask']>200,result
+        translated=dict(version=1,offsetX=20)
+        result=probe([stamp],[[20,40],[40,40]],geometry=translated)['samples']
+        assert result[0]['mask']==0 and result[1]['mask']==255,result
+        # Previous recipes retain their existing screen-coordinate behavior.
+        old=dict(stamp);old.pop('geometryAtCreation')
+        result=probe([old],[[20,40],[79,40]],geometry=flipped)['samples']
+        assert result[0]['mask']==255 and result[1]['mask']==0,result
+    test('local_masks_follow_geometry_and_mixed_creation_frames_legacy_stable', geometry_tracking)
+
     def crop():
         result = probe([], [[1, 1]], crop=dict(x=.2, y=.25, endX=.8, endY=.75))
         assert (result['width'], result['height']) == (60, 40)
