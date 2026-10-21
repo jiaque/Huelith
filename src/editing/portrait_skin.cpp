@@ -90,6 +90,18 @@ QJsonArray portrait_sample_skin_color(const QImage& source,QPoint position) {
 }
 QImage portrait_color_region(const QImage& source,const QJsonObject& recipe,QRect region,double amount,const std::atomic_bool* cancelled,const QImage& effect_mask) {
     region=region.intersected(source.rect());if(region.isEmpty())return {};
+    // New repair strokes sample the visible colour stack. Keep old projects'
+    // ordering intact, and apply these strokes after skin, makeup and decorations.
+    auto beforePeople=recipe["people"].toArray(),afterPeople=beforePeople;bool hasAfter=false;
+    for(int i=0;i<beforePeople.size();++i){auto person=beforePeople[i].toObject(),settings=person["settings"].toObject();QJsonArray before,after;
+        for(auto value:settings["repairs"].toArray()){if(value.toObject()["afterStyle"].toBool()){after.append(value);hasAfter=true;}else before.append(value);}
+        settings["repairs"]=before;person["settings"]=settings;beforePeople[i]=person;
+        settings["repairs"]=after;settings["parameters"]=QJsonObject{};person["settings"]=settings;afterPeople[i]=person;
+    }
+    if(hasAfter){auto before=recipe,after=recipe;before["people"]=beforePeople;after["people"]=afterPeople;
+        const auto colored=portrait_color_region(source,before,source.rect(),amount,cancelled,effect_mask);
+        return portrait_repair_region(colored,after,region,amount,cancelled,effect_mask);
+    }
     const auto records=recipe["people"].toArray();std::vector<SkinPerson> people;bool active=false;
     const auto mask_size=source.size().scaled(768,768,Qt::KeepAspectRatio);
     for(const auto& value:records){const auto record=value.toObject();SkinPerson person;const auto settings=record["settings"].toObject(),params=settings["parameters"].toObject(),enabled=settings["enabled"].toObject();

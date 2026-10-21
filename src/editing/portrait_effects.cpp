@@ -57,9 +57,9 @@ std::vector<PortraitParameter> portrait_parameters(int panel) {
     case 5:return {{"skin.smooth",QStringLiteral("面部磨皮"),false,0,100},{"skin.bodySmooth",QStringLiteral("身体磨皮"),false,0,100},{"skin.retention",QStringLiteral("纹理保留"),false,0,100},{"skin.texture",QStringLiteral("纹理")},{"skin.uniform",QStringLiteral("均匀度"),false,0,100},{"skin.oil",QStringLiteral("油光抑制"),false,0,100},{"skin.oilGloss",QStringLiteral("保留光泽"),false,0,100}};
     case 6:return {{"color.light",QStringLiteral("明暗")},{"color.warmth",QStringLiteral("冷暖")},{"color.rosy",QStringLiteral("红润")},{"color.redness",QStringLiteral("去泛红"),false,0,100},{"color.balance",QStringLiteral("脸颈身体协调"),false,0,100},{"color.custom",QStringLiteral("自定义肤色"),false,0,100}};
     case 7:return {{"repair.conceal",QStringLiteral("遮瑕颜色协调"),false,0,100}};
-    case 9:{std::vector<PortraitParameter> result{{"eye.circles",QStringLiteral("黑眼圈淡化"),false,0,100},{"eye.bags",QStringLiteral("眼袋阴影淡化"),false,0,100},{"eye.white",QStringLiteral("眼白亮度"),false,0,100},{"eye.red",QStringLiteral("红眼修正"),false,0,100}};for(const auto& parameter:portrait_parameters(11))if(parameter.key.startsWith("makeup.iris") || parameter.key.startsWith("makeup.catch"))result.push_back(parameter);return result;}
-    case 10:return {{"teeth.yellow",QStringLiteral("去黄"),false,0,100},{"teeth.light",QStringLiteral("提亮"),false,0,100}};
-    case 11:return {{"makeup.tattoo",QStringLiteral("纹身浓度"),false,0,100},{"makeup.tattooCurve",QStringLiteral("曲面贴合"),false,0,100},{"makeup.nails",QStringLiteral("甲油浓度"),false,0,100},{"makeup.nailsGloss",QStringLiteral("保留原反光"),false,0,100},{"makeup.sticker",QStringLiteral("装饰浓度"),false,0,100},{"makeup.stickerSize",QStringLiteral("装饰大小"),false,0,100},{"makeup.stickerAngle",QStringLiteral("旋转")},{"makeup.stickerX",QStringLiteral("水平位置")},{"makeup.stickerY",QStringLiteral("垂直位置")},{"makeup.freckles",QStringLiteral("雀斑浓度"),false,0,100},{"makeup.frecklesSize",QStringLiteral("斑点大小"),false,0,100},{"makeup.frecklesDensity",QStringLiteral("斑点密度"),false,0,100},{"makeup.mole",QStringLiteral("装饰痣浓度"),false,0,100},{"makeup.moleSize",QStringLiteral("痣大小"),false,0,100},{"makeup.moleFeather",QStringLiteral("边缘柔和"),false,0,100},{"makeup.moleX",QStringLiteral("水平位置")},{"makeup.moleY",QStringLiteral("垂直位置")},{"makeup.foundation",QStringLiteral("底妆均匀度"),false,0,100},{"makeup.lip",QStringLiteral("口红强度"),false,0,100},{"makeup.lipCoverage",QStringLiteral("色素覆盖"),false,0,100},{"makeup.lipGloss",QStringLiteral("口红光泽／哑光")},{"makeup.lipFeather",QStringLiteral("唇缘晕染"),false,0,100},{ "makeup.lipBleed",QStringLiteral("唇外晕染"),false,0,100},{"makeup.lipBleedWidth",QStringLiteral("外溢宽度"),false,0,100},{"makeup.lipSparkle",QStringLiteral("细闪"),false,0,100},{"makeup.lipSparkleSize",QStringLiteral("粒子大小"),false,0,100},{"makeup.lipSparkleDensity",QStringLiteral("粒子疏密")},{"makeup.brow",QStringLiteral("眉色"),true,0,100},{"makeup.browShape",QStringLiteral("眉形浓淡"),true,0,100},{"makeup.blush",QStringLiteral("腮红"),true,0,100},{"makeup.blushSpread",QStringLiteral("腮红范围"),true,0,100},{"makeup.blushX",QStringLiteral("腮红水平位置"),true},{"makeup.blushY",QStringLiteral("腮红垂直位置"),true},{"makeup.blushGloss",QStringLiteral("腮红光泽／雾面"),true},{"makeup.blushSparkle",QStringLiteral("腮红细闪"),true,0,100},{"makeup.shadow",QStringLiteral("眼影底色"),true,0,100},{"makeup.shadowAccent",QStringLiteral("眼尾深色"),true,0,100},{"makeup.liner",QStringLiteral("上眼线"),true,0,100},{"makeup.linerLower",QStringLiteral("下眼线"),true,0,100},{"makeup.lash",QStringLiteral("睫毛"),true,0,100},{"makeup.aegyosal",QStringLiteral("卧蚕"),true,0,100},{"makeup.crease",QStringLiteral("双眼皮折痕"),true,0,100},{"makeup.iris",QStringLiteral("美瞳颜色"),true,0,100},{"makeup.irisTexture",QStringLiteral("虹膜纹理"),true,0,100},{"makeup.catchlight",QStringLiteral("眼神光"),true,0,100},{"makeup.catchX",QStringLiteral("眼神光水平位置"),true},{"makeup.catchY",QStringLiteral("眼神光垂直位置"),true},{"makeup.catchSize",QStringLiteral("眼神光大小"),true,0,100}};
+    case 9:{std::vector<PortraitParameter> result{{"eye.circles",QStringLiteral("黑眼圈淡化"),true,0,100},{"eye.bags",QStringLiteral("眼袋阴影淡化"),true,0,100},{"eye.white",QStringLiteral("眼白亮度"),true,0,100},{"eye.red",QStringLiteral("红眼修正"),true,0,100},{"eye.deRed",QStringLiteral("眼白去红"),true,0,100}};for(const auto& parameter:portrait_parameters(11))if(parameter.key.startsWith("makeup.iris") || parameter.key.startsWith("makeup.catch"))result.push_back(parameter);return result;}
+    case 10:return {{"teeth.yellow",QStringLiteral("去黄"),false,0,100},{"teeth.light",QStringLiteral("提亮"),false,0,100},{"teeth.natural",QStringLiteral("自然色"),false,-100,100}};
+    case 11:return {{"makeup.shadowFeather",QStringLiteral("边缘柔化"),true,0,100},{"makeup.linerWidth",QStringLiteral("眼线宽度"),true,-100,100},{"makeup.linerTail",QStringLiteral("眼尾长度"),true,-100,100},{"makeup.lashLength",QStringLiteral("睫毛长度"),true,-100,100},{"makeup.lashCurl",QStringLiteral("卷翘"),true,-100,100},{"makeup.aegyosalY",QStringLiteral("卧蚕位置"),true,-100,100},{"makeup.aegyosalWidth",QStringLiteral("卧蚕宽度"),true,-100,100},{"makeup.irisX",QStringLiteral("虹膜水平位置"),true,-100,100},{"makeup.irisY",QStringLiteral("虹膜垂直位置"),true,-100,100},{"makeup.irisSize",QStringLiteral("虹膜大小"),true,-100,100},{"makeup.irisFeather",QStringLiteral("虹膜边缘柔化"),true,0,100},{"makeup.tattoo",QStringLiteral("纹身浓度"),false,0,100},{"makeup.tattooCurve",QStringLiteral("曲面贴合"),false,0,100},{"makeup.nails",QStringLiteral("甲油浓度"),false,0,100},{"makeup.nailsGloss",QStringLiteral("保留原反光"),false,0,100},{"makeup.sticker",QStringLiteral("装饰浓度"),false,0,100},{"makeup.stickerSize",QStringLiteral("装饰大小"),false,0,100},{"makeup.stickerAngle",QStringLiteral("旋转")},{"makeup.stickerX",QStringLiteral("水平位置")},{"makeup.stickerY",QStringLiteral("垂直位置")},{"makeup.freckles",QStringLiteral("雀斑浓度"),false,0,100},{"makeup.frecklesSize",QStringLiteral("斑点大小"),false,0,100},{"makeup.frecklesDensity",QStringLiteral("斑点密度"),false,0,100},{"makeup.mole",QStringLiteral("装饰痣浓度"),false,0,100},{"makeup.moleSize",QStringLiteral("痣大小"),false,0,100},{"makeup.moleFeather",QStringLiteral("边缘柔和"),false,0,100},{"makeup.moleX",QStringLiteral("水平位置")},{"makeup.moleY",QStringLiteral("垂直位置")},{"makeup.foundation",QStringLiteral("底妆均匀度"),false,0,100},{"makeup.lip",QStringLiteral("口红强度"),false,0,100},{"makeup.lipCoverage",QStringLiteral("色素覆盖"),false,0,100},{"makeup.lipGloss",QStringLiteral("口红光泽／哑光")},{"makeup.lipFeather",QStringLiteral("唇缘晕染"),false,0,100},{ "makeup.lipBleed",QStringLiteral("唇外晕染"),false,0,100},{"makeup.lipBleedWidth",QStringLiteral("外溢宽度"),false,0,100},{"makeup.lipSparkle",QStringLiteral("细闪"),false,0,100},{"makeup.lipSparkleSize",QStringLiteral("粒子大小"),false,0,100},{"makeup.lipSparkleDensity",QStringLiteral("粒子疏密")},{"makeup.brow",QStringLiteral("眉色"),true,0,100},{"makeup.browShape",QStringLiteral("眉形浓淡"),true,0,100},{"makeup.blush",QStringLiteral("腮红"),true,0,100},{"makeup.blushSpread",QStringLiteral("腮红范围"),true,0,100},{"makeup.blushX",QStringLiteral("腮红水平位置"),true},{"makeup.blushY",QStringLiteral("腮红垂直位置"),true},{"makeup.blushGloss",QStringLiteral("腮红光泽／雾面"),true},{"makeup.blushSparkle",QStringLiteral("腮红细闪"),true,0,100},{"makeup.shadow",QStringLiteral("眼影底色"),true,0,100},{"makeup.shadowAccent",QStringLiteral("眼尾深色"),true,0,100},{"makeup.liner",QStringLiteral("上眼线"),true,0,100},{"makeup.linerLower",QStringLiteral("下眼线"),true,0,100},{"makeup.lash",QStringLiteral("睫毛"),true,0,100},{"makeup.aegyosal",QStringLiteral("卧蚕"),true,0,100},{"makeup.crease",QStringLiteral("双眼皮折痕"),true,0,100},{"makeup.iris",QStringLiteral("美瞳颜色"),true,0,100},{"makeup.irisTexture",QStringLiteral("虹膜纹理"),true,0,100},{"makeup.catchlight",QStringLiteral("眼神光"),true,0,100},{"makeup.catchX",QStringLiteral("眼神光水平位置"),true},{"makeup.catchY",QStringLiteral("眼神光垂直位置"),true},{"makeup.catchSize",QStringLiteral("眼神光大小"),true,0,100}};
     case 12:return {{"hair.color",QStringLiteral("染发强度"),false,0,100},{"hair.roots",QStringLiteral("发根补染"),false,0,100},{"hair.rootWidth",QStringLiteral("发根范围宽度"),false,0,100},{"hair.preserveGloss",QStringLiteral("保留光泽"),false,0,100},{"hair.shine",QStringLiteral("光泽"),false,0,100},{"hair.water",QStringLiteral("水光"),false,0,100},{"hair.detail",QStringLiteral("细节保留"),false,0,100},{"hair.smooth",QStringLiteral("局部柔顺"),false,0,100},{"hair.oil",QStringLiteral("减弱油亮"),false,0,100},{"head.hairVolume",QStringLiteral("头发蓬松度")},{"hair.accessory",QStringLiteral("发饰不透明度"),false,0,100},{"hair.accessoryRoughness",QStringLiteral("发饰哑光程度"),false,0,100},{"hair.accessoryX",QStringLiteral("发饰水平位置")},{"hair.accessoryY",QStringLiteral("发饰垂直位置")},{"hair.accessorySize",QStringLiteral("发饰大小"),false,0,100},{"hair.accessoryAngle",QStringLiteral("发饰旋转")}};
     case 13:return {{"paint.highlight",QStringLiteral("高光笔"),false,0,100},{"paint.shadow",QStringLiteral("阴影笔"),false,0,100},{"paint.makeup",QStringLiteral("彩妆笔"),false,0,100},{"paint.skin",QStringLiteral("肤色笔"),false,0,100},{"paint.glitter",QStringLiteral("亮片笔"),false,0,100},{"paint.light",QStringLiteral("提亮"),false,0,100},{"paint.dark",QStringLiteral("压暗"),false,0,100},{"paint.protect",QStringLiteral("高光保护"),false,0,100},{"paint.gloss",QStringLiteral("光泽"),false,0,100},{"paint.grainSize",QStringLiteral("粒径"),false,0,100},{"paint.grainDensity",QStringLiteral("密度"),false,0,100},{"contour.highlight",QStringLiteral("高光"),false,0,100},{"contour.shadow",QStringLiteral("阴影"),false,0,100},{"face.volume",QStringLiteral("面颊丰盈（轮廓，与面部共用）")},{"contour.paint",QStringLiteral("手绘上色"),false,0,100},{"contour.lines",QStringLiteral("身体线条"),false,0,100},{"contour.linesX",QStringLiteral("线条水平位置")},{"contour.linesY",QStringLiteral("线条垂直位置")},{"contour.linesWidth",QStringLiteral("线条宽度")},{"contour.linesHeight",QStringLiteral("线条长度")},{"contour.linesAngle",QStringLiteral("线条旋转")}};
     case 14:return {{"light.face",QStringLiteral("面部补光")},{"light.body",QStringLiteral("身体补光")},{"light.highlights",QStringLiteral("亮部保护"),false,0,100}};
@@ -113,6 +113,19 @@ QImage portrait_accessory_coverage(const QJsonObject& person,QSize size){
 }
 QImage portrait_effect_mask(const QJsonObject& person,const QString& key,QSize size) {
     const auto settings=person["settings"].toObject();const auto edited=settings["masks"].toObject();
+    if(key.startsWith("eye.") && (key.endsWith(".left") || key.endsWith(".right") || edited.contains(key+".left") || edited.contains(key+".right"))){
+        const QString root=key.section('.',0,1);const bool sided=key!=root;
+        auto clean=person;auto cleanSettings=settings;auto cleanMasks=edited;cleanMasks.remove(root+".left");cleanMasks.remove(root+".right");cleanSettings["masks"]=cleanMasks;clean["settings"]=cleanSettings;
+        const auto base=portrait_effect_mask(clean,root,size);
+        auto mask=sided && edited.contains(key)?mask_from(edited,key.toUtf8().constData()).scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation):base;
+        const auto lm=person["landmarks"].toArray();if(mask.isNull()){mask=QImage(size,QImage::Format_Grayscale8);mask.fill(0);}if(lm.size()!=66){mask.fill(0);return mask;}
+        const auto point=[&](int i){const auto p=lm[i].toArray();return QPointF(p[0].toDouble()*size.width(),p[1].toDouble()*size.height());};
+        const auto left=(point(42)+point(45))*.5,right=(point(36)+point(39))*.5,axis=left-right,mid=(left+right)*.5;
+        const auto leftMask=edited.contains(root+".left")?mask_from(edited,(root+".left").toUtf8().constData()).scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation):base;
+        const auto rightMask=edited.contains(root+".right")?mask_from(edited,(root+".right").toUtf8().constData()).scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation):base;
+        for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x){const bool leftSide=QPointF::dotProduct(QPointF(x+.5,y+.5)-mid,axis)>=0;if(sided){if(leftSide!=key.endsWith(".left"))mask.scanLine(y)[x]=0;}else{const auto& source=leftSide?leftMask:rightMask;mask.scanLine(y)[x]=source.isNull()?0:source.constScanLine(y)[x];}}
+        return mask;
+    }
     if(settings["imageScope"].toBool() && key=="skin"){QImage area(size,QImage::Format_Grayscale8);area.fill(255);return area;}
     if((key=="skin.smooth" || key=="skin.bodySmooth") && settings["smoothManual"].toObject()[key].toBool()){
         auto mask=mask_from(settings["smoothManualMasks"].toObject(),key.toUtf8().constData());if(mask.isNull()){mask=QImage(size,QImage::Format_Grayscale8);mask.fill(0);}return mask.scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
@@ -134,6 +147,7 @@ QImage portrait_effect_mask(const QJsonObject& person,const QString& key,QSize s
     if(key=="hair.edge")return portrait_style_mask(person,key,size);
     if(key.startsWith("decal.") && !edited.contains(key)){QImage full(size,QImage::Format_Grayscale8);full.fill(255);return full;}
     if(key=="__protection")mask=mask_from(settings,"protection");
+    else if(key.startsWith("teeth.") && edited.contains("teeth.scope"))mask=mask_from(edited,"teeth.scope");
     else if(edited.contains(key)){
         mask=key=="hair.accessory"?portrait_accessory_coverage(person,size):mask_from(edited,key.toUtf8().constData());
         if((key=="face.doubleChin" && settings["doubleChinVersion"].toInt()>=2) || key.startsWith("hair.") || key=="contour.lines" || key.startsWith("makeup.") || (settings["contourLightVersion"].toInt()>=2 && (key=="contour.highlight" || key=="contour.shadow"))){
@@ -354,19 +368,10 @@ static QImage portrait_deformation_impl(QSize size,const QJsonObject& recipe,dou
         if(value("body.manualSlim")!=0)manualSlims.emplace_back(size,record,value("body.manualSlim"));
         if(value("body.manualHeight")!=0)manualHeights.emplace_back(size,record,value("body.manualHeight"));
         const auto chestPaths=p.settings["chestContourPaths"].toObject();
-        if(!chestPaths.isEmpty()){
-            for(int side=0;side<2;++side)if(value("body.chest",side)!=0){
-                const auto path=chestPaths[side==0?"left":"right"].toArray();
-                if(path.size()!=3)throw EditError(side==0?"请先定位人物左侧胸部轮廓":"请先定位人物右侧胸部轮廓");
-                auto chestRecord=record;auto chestSettings=p.settings;chestSettings["chestContourPath"]=path;chestRecord["settings"]=chestSettings;
-                chests.emplace_back(size,chestRecord,value("body.chest",side));
-            }
-        }else {
-            if(value("body.chest",0)!=0 || value("body.chest",1)!=0){
-                if(parameters["body.chest.left"].toDouble()!=0 || parameters["body.chest.right"].toDouble()!=0)
-                    throw EditError("请先定位对应侧胸部轮廓，再应用胸部调整");
-            }
-            if(value("body.chest")!=0)chests.emplace_back(size,record,value("body.chest"));
+        for(int side=0;side<2;++side)if(value("body.chest",side)!=0){
+            auto chestRecord=record;auto chestSettings=p.settings;const auto path=chestPaths[side==0?"left":"right"].toArray();
+            if(path.size()==3)chestSettings["chestContourPath"]=path;
+            chestRecord["settings"]=chestSettings;chests.emplace_back(size,chestRecord,value("body.chest",side),side);
         }
         const auto pose=p.settings["pose"].toArray();
         auto reliable=[&](int i){return pose.size()==33 && pose[i].toArray().size()==3 && pose[i].toArray()[2].toDouble()>.5;};
@@ -388,16 +393,6 @@ static QImage portrait_deformation_impl(QSize size,const QJsonObject& recipe,dou
         if(use_waist && value("body.waist")!=0){
             if(p.body_ambiguous || !reliable(11) || !reliable(12) || !reliable(23) || !reliable(24))throw EditError("肩髋定位不足，不能可靠调整腰部，请修正定位");
             const auto shoulders=(point(pose,11)+point(pose,12))*.5,hips=(point(pose,23)+point(pose,24))*.5;
-            const QPointF torso((hips.x()-shoulders.x())*(size.width()-1),(hips.y()-shoulders.y())*(size.height()-1));
-            const double torsoLength=std::hypot(torso.x(),torso.y());
-            const QPointF shoulderSpan((point(pose,11).x()-point(pose,12).x())*(size.width()-1),(point(pose,11).y()-point(pose,12).y())*(size.height()-1));
-            const double shoulderWidth=std::hypot(shoulderSpan.x(),shoulderSpan.y());
-            for(int i:{13,14,15,16})if(reliable(i)){
-                const QPointF d((point(pose,i).x()-shoulders.x())*(size.width()-1),(point(pose,i).y()-shoulders.y())*(size.height()-1));
-                const double t=QPointF::dotProduct(d,torso)/std::max(1.,torsoLength*torsoLength);
-                const double cross=std::abs(d.x()*torso.y()-d.y()*torso.x())/std::max(1.,torsoLength);
-                if(t>.35 && t<.9 && cross<shoulderWidth*.75)throw EditError("手臂与腰部范围重叠，自动收腰会牵动手臂，请使用手动液化与保护区");
-            }
             // The lower torso band leaves the chest and pelvis untouched.
             limbs.emplace_back(size,shoulders,hips,masks[std::size_t(index)],value("body.waist"),1.,.4,.85);
         }
@@ -476,7 +471,7 @@ static QImage portrait_deformation_impl(QSize size,const QJsonObject& recipe,dou
         const auto protection=mask_from(p.settings,"protection");
         const auto background_subject=partial?mask_from(p.settings["automaticMasks"].toObject(),"skin"):masks[std::size_t(index)];
         const bool faceCoverageEdit=!orientation.empty() || value("face.width")!=0;
-        const bool smoothBackground=faceCoverageEdit || !manualHeights.empty() || !pelvis.empty() || !chests.empty() || !backs.empty() || editLegs || !longLegs.empty() || !heights.empty() || !neckLengths.empty() || !shoulderWidths.empty() || !shoulderContours.empty();
+        const bool smoothBackground=!limbs.empty() || !abdomens.empty() || faceCoverageEdit || !manualHeights.empty() || !pelvis.empty() || !chests.empty() || !backs.empty() || editLegs || !longLegs.empty() || !heights.empty() || !neckLengths.empty() || !shoulderWidths.empty() || !shoulderContours.empty();
         QJsonArray backgroundLines;
         for(const auto& entry:p.settings["backgroundLines"].toArray()){
             const auto a=entry.toArray();if(a.size()!=4)continue;bool crossesSubject=false;
@@ -487,7 +482,7 @@ static QImage portrait_deformation_impl(QSize size,const QJsonObject& recipe,dou
         if(faceCoverageEdit)backgroundBand=std::max(backgroundBand,w*size.width()*.4);
         for(const auto& height:manualHeights)backgroundBand=std::max(backgroundBand,4*height.maximum_displacement());
         for(const auto& hip:pelvis)backgroundBand=std::max(backgroundBand,4*hip.maximum_displacement());
-        if(editLegs)for(const auto& limb:limbs)backgroundBand=std::max(backgroundBand,limb.maximum_radius()*.8);
+        for(const auto& limb:limbs)backgroundBand=std::max(backgroundBand,limb.maximum_radius()*.8);
         for(const auto& shoulder:shoulderContours)backgroundBand=std::max(backgroundBand,4*shoulder.maximum_displacement());
         for(const auto& shoulder:shoulderWidths)backgroundBand=std::max(backgroundBand,4*shoulder.maximum_displacement());
         for(const auto& neck:neckLengths)backgroundBand=std::max(backgroundBand,4*neck.maximum_displacement());

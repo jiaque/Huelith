@@ -27,7 +27,11 @@ QJsonArray portrait_detect_nails(const QImage& image,const QString& model){
         auto mask=small.scaled(edge,edge,Qt::IgnoreAspectRatio,Qt::SmoothTransformation).copy(left,top,rgb.width(),rgb.height());QRect bounds;int count=0;std::vector<double> lights;
         for(int y=0;y<mask.height();++y)for(int x=0;x<mask.width();++x){auto& v=mask.scanLine(y)[x];v=v>127?255:0;if(!v)continue;++count;bounds=bounds.united(QRect(x,y,1,1));const int sx=std::clamp(int((x+.5)*linear.width()/mask.width()),0,linear.width()-1),sy=std::clamp(int((y+.5)*linear.height()/mask.height()),0,linear.height()-1);const auto* p=reinterpret_cast<const float*>(linear.constScanLine(sy))+sx*4;if(p[3]>.01F)lights.push_back((.2627*p[0]+.678*p[1]+.0593*p[2])/p[3]);}
         if(count<5||lights.empty())continue;std::nth_element(lights.begin(),lights.begin()+lights.size()/2,lights.end());const double x=double(bounds.x())/mask.width(),y=double(bounds.y())/mask.height(),w=double(bounds.width())/mask.width(),h=double(bounds.height())/mask.height();
-        nails.append(QJsonObject{{"origin","automatic"},{"confidence",c.score},{"enabled",true},{"mask",portrait_mask_png(mask)},{"outline",QJsonArray{QJsonArray{x,y},QJsonArray{x+w,y},QJsonArray{x+w,y+h},QJsonArray{x,y+h}}},{"color",QJsonArray{.32,.018,.035}},{"referenceLuminance",lights[lights.size()/2]}});
+        // Keep the learned edge confidence instead of turning every boundary pixel opaque.
+        auto confidence=small.scaled(edge,edge,Qt::IgnoreAspectRatio,Qt::SmoothTransformation).copy(left,top,rgb.width(),rgb.height());
+        for(int yy=0;yy<mask.height();++yy)for(int xx=0;xx<mask.width();++xx)
+            mask.scanLine(yy)[xx]=uchar(std::clamp((int(confidence.constScanLine(yy)[xx])-127)*2,0,255));
+        nails.append(QJsonObject{{"origin","automatic"},{"materialVersion",2},{"confidence",c.score},{"enabled",true},{"mask",portrait_mask_png(mask)},{"outline",QJsonArray{QJsonArray{x,y},QJsonArray{x+w,y},QJsonArray{x+w,y+h},QJsonArray{x,y+h}}},{"color",QJsonArray{.24,.09,.12}},{"referenceLuminance",lights[lights.size()/2]}});
     }return nails;
 }
 }

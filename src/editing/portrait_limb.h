@@ -38,7 +38,7 @@ public:
                         inRun=false;
                     }
                 }
-                if(bestDistance>length_*.12 || bestLo<=-limit+step || bestHi>=limit-step || bestHi-bestLo<4)
+                if(bestDistance>length_*.12 || bestHi-bestLo<4)
                     throw EditError("手臂轮廓不足或与其他部位贴合，请修正范围或使用手动液化");
                 centers_[i]=(bestLo+bestHi)*.5;
                 radii_[0][i]=radii_[1][i]=(bestHi-bestLo)*.5;
@@ -48,7 +48,7 @@ public:
             for(int side=0;side<2;++side){
             const auto center=a_+axis_*(length_*(.25+i*.125));
             if(!inside(center))throw EditError("肢段中线不在人物范围内，请修正关键点");
-            double radius=0;const double step=std::max(1.,length_/100.);
+            double radius=length_*maximumRadiusRatio;const double step=std::max(1.,length_/100.);
             for(double d=step;d<length_*maximumRadiusRatio;d+=step)if(!inside(center+normal_*(side==0?-d:d))){radius=d-step*.5;break;}
             if(radius<2)throw EditError("肢体边界被遮挡、贴近躯干或定位不足，请使用手动液化或修正范围");
             radii_[side][i]=radius;maxRadius_=std::max(maxRadius_,radius);
@@ -57,7 +57,7 @@ public:
         if(checkContourContinuity)for(int side=0;side<2;++side)for(int i=1;i<5;++i){
             const double smaller=std::min(radii_[side][i-1],radii_[side][i]);
             if(std::max(radii_[side][i-1],radii_[side][i])>smaller*2.)
-                throw EditError("手臂轮廓与其他部位贴合或突然中断，无法可靠区分粗细；请修正范围或使用手动液化");
+                radii_[side][i]=std::min(radii_[side][i],smaller*2.);
         }
         const double r=maxRadius_*2;
         bounds_=QRectF(QPointF(std::min(a_.x(),b.x())-r,std::min(a_.y(),b.y())-r),QPointF(std::max(a_.x(),b.x())+r,std::max(a_.y(),b.y())+r));

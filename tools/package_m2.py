@@ -75,6 +75,7 @@ def main():
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
             raise ValueError('Pinned ExifTool runtime mismatch: '+name)
     destination.mkdir(parents=True)
+    shutil.copy2(ROOT/'LICENSE', destination/'LICENSE')
     evidence = ROOT / 'docs/test-evidence' / args.stage / destination.name
     evidence.mkdir(parents=True, exist_ok=True)
     for file in runtime_files:
@@ -133,7 +134,11 @@ def main():
                 raise ValueError('Portrait model checksum mismatch: '+entry['file'])
             shutil.copy2(path,destination/'models'/entry['file'])
         (licenses/'portrait-models.json').write_text(json.dumps(portrait_models,indent=2),encoding='utf-8')
-        shutil.copytree(ROOT/'docs/m3',destination/'M3')
+        # Ship user instructions only; design mockups, research and local
+        # validation records are not runtime dependencies or release content.
+        (destination/'M3').mkdir()
+        for name in ('usage.md', 'delivery.md', 'layer-enhancement.md'):
+            shutil.copy2(ROOT/'docs/m3'/name, destination/'M3'/name)
     (licenses/'enhancement-models.json').write_text(json.dumps(enhancement_manifest,indent=2),encoding='utf-8')
     shutil.copy2(ROOT/'research/m2/instances/runtime/torchvision-0.28.0.dist-info/LICENSE', licenses/'Torchvision.txt')
     (licenses/'Torchvision-instance-model.txt').write_text(

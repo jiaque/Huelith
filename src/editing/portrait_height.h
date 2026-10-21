@@ -12,20 +12,21 @@
 
 namespace huelith::editing {
 // A skeleton-constrained inverse field. Feet stay on the ground; head and arms
-// move with the shoulders, while the torso and leg segments receive the gain.
+// move vertically with the shoulders; screen x coordinates remain unchanged.
 class PortraitHeight {
 public:
     PortraitHeight(QSize size,const QJsonObject& person,double amount):size_(size) {
         const auto pose=person["settings"].toObject()["pose"].toArray();
         if(pose.size()!=33 || person["bodyAmbiguous"].toBool())throw EditError("身体关联不足，无法可靠调整身高");
-        const auto point=[&](int i){const auto p=pose[i].toArray();if(p.size()!=3 || p[2].toDouble()<.6)throw EditError("全身、手臂或脚部定位不足，不能自动调整身高");return QPointF(p[0].toDouble()*(size.width()-1),p[1].toDouble()*(size.height()-1));};
+        const auto point=[&](int i){const auto p=pose[i].toArray();if(p.size()!=3 || p[2].toDouble()<.25 || !std::isfinite(p[0].toDouble()) || !std::isfinite(p[1].toDouble()) || p[0].toDouble()<=0 || p[0].toDouble()>=1 || p[1].toDouble()<=0 || p[1].toDouble()>=1)throw EditError("全身、手臂或脚部定位不足，不能自动调整身高");return QPointF(p[0].toDouble()*(size.width()-1),p[1].toDouble()*(size.height()-1));};
         const auto shoulders=(point(11)+point(12))*.5,hips=(point(23)+point(24))*.5,feet=(point(27)+point(28))*.5;
         const auto delta=shoulders-feet;scale_=std::hypot(delta.x(),delta.y());if(scale_<80)throw EditError("全身尺寸不足，不能可靠调整身高");
-        const auto axis=delta/scale_;const QPointF lateral(-axis.y(),axis.x());
+        const auto axis=delta/scale_;
         if(QPointF::dotProduct(shoulders-hips,axis)<scale_*.15 || QPointF::dotProduct(hips-feet,axis)<scale_*.35)throw EditError("当前不是可可靠伸展的站姿，请使用手动增高");
         for(int side=0;side<2;++side){const auto hip=point(23+side),knee=point(25+side),ankle=point(27+side),leg=hip-ankle;const double length=std::hypot(leg.x(),leg.y());
-            if(length<scale_*.4 || QPointF::dotProduct(leg,axis)<length*.8 || std::abs((knee-ankle).x()*leg.y()-(knee-ankle).y()*leg.x())/length>length*.12)throw EditError("坐姿、明显屈腿或大幅侧伸姿态不自动增高");}
-        const auto gain=axis*(scale_*.05*std::clamp(amount,-1.,1.));
+            if(length<scale_*.25 || QPointF::dotProduct(leg,axis)<length*.55 || std::abs((knee-ankle).x()*leg.y()-(knee-ankle).y()*leg.x())/length>length*.35)throw EditError("坐姿、明显屈腿或大幅侧伸姿态不自动增高");}
+        // Height changes screen-vertical distance; a leaning pose must not add lateral drift.
+        const QPointF gain(0,-std::abs(delta.y())*.05*std::clamp(amount,-1.,1.));
         maximum_displacement_=std::hypot(gain.x(),gain.y());
         const auto hair=QImage::fromData(QByteArray::fromBase64(person["settings"].toObject()["automaticMasks"].toObject()["hair"].toString().toLatin1()),"PNG").convertToFormat(QImage::Format_Grayscale8);
         const auto hairAt=[&](QPointF p){if(hair.isNull())return false;const int x=int(p.x()/(size.width()-1)*hair.width()),y=int(p.y()/(size.height()-1)*hair.height());return x>=0 && y>=0 && x<hair.width() && y<hair.height() && hair.constScanLine(y)[x]>200;};
@@ -34,7 +35,7 @@ public:
             // Visible hair belongs to the head even when it hangs over the torso.
             if(hairAt(p))d=gain;
             if(p.x()+d.x()<0 || p.y()+d.y()<0 || p.x()+d.x()>size.width()-1 || p.y()+d.y()>size.height()-1)throw EditError("增高后人物会超出照片，请先扩展画布或减小强度");
-            for(std::size_t i=0;i<source.size();++i)if(std::hypot((source[i]-p).x(),(source[i]-p).y())<scale_*.002){if(std::hypot((change[i]-d).x(),(change[i]-d).y())>scale_*.003)throw EditError("身体部位重叠，无法同时保持头脚与肢体形状");return;}
+            for(std::size_t i=0;i<source.size();++i)if(std::hypot((source[i]-p).x(),(source[i]-p).y())<scale_*.002){change[i]=(change[i]+d)*.5;return;}
             source.push_back(p);change.push_back(d);};
         const auto smooth=[](double t){return t*t*(3-2*t);};
         // Torso gain is deliberately smaller than leg gain. Interior rows

@@ -303,7 +303,8 @@ PortraitContour::PortraitContour(QSize size,const QJsonArray& points,
         const auto origin=sources[head],axis=sources[tail]-origin;
         const double browLength=length(axis);if(browLength<.01)continue;
         const auto tangent=axis/browLength;const QPointF normal(-tangent.y(),tangent.x());
-        const double angle=-direction*.16*brow.tilt;
+        browPivot_[side]=origin;browAxis_[side]=tangent;browLength_[side]=browLength;browAngle_[side]=-direction*.20*brow.tilt;
+        const double angle=0;
         const auto unconstrainedTarget=[&](QPointF p,double t){
             const auto d=p-origin;
             const auto rotated=QPointF(d.x()*std::cos(angle)-d.y()*std::sin(angle),d.x()*std::sin(angle)+d.y()*std::cos(angle));
@@ -634,6 +635,13 @@ QPointF PortraitContour::displacement(QPointF normalized) const {
         const auto weight=[&](QPointF q){const double x=(q.x()-box.left())/box.width()*(field.cols-1),y=(q.y()-box.top())/box.height()*(field.rows-1);if(x<0 || y<0 || x>=field.cols-1 || y>=field.rows-1)return 0.;const int ix=int(x),iy=int(y);const double tx=x-ix,ty=y-iy;return (1-ty)*((1-tx)*field.at<float>(iy,ix)+tx*field.at<float>(iy,ix+1))+ty*((1-tx)*field.at<float>(iy+1,ix)+tx*field.at<float>(iy+1,ix+1));};
         const QPointF step=QPointF((side%2==0?-1.:1.)*(side>=2?.003:.006),side>=2?.010:.012)*(skinLiftAmount_[side]/8);
         for(int i=0;i<8;++i){const auto q=p+d;d+=step*weight(q+step*(weight(q)*.5));}
+    }
+    // Integrate a smooth rotation field around the brow head. This avoids
+    // forcing a narrow rotated strip through stationary RBF constraints.
+    for(int side=0;side<2;++side)if(browAngle_[side]!=0){
+        const auto axis=browAxis_[side];const QPointF normal(-axis.y(),axis.x());const double width=browLength_[side];
+        const auto velocity=[&](QPointF q){const auto r=q-browPivot_[side];const double u=(QPointF::dotProduct(r,axis)/width-.5)/.95,v=QPointF::dotProduct(r,normal)/(width*.42);const double radius=std::hypot(u,v),t=std::clamp((1-radius)/.45,0.,1.);return QPointF(r.y(),-r.x())*(browAngle_[side]*t*t*(3-2*t));};
+        for(int step=0;step<16;++step){const auto q=p+d;d+=velocity(q+velocity(q)/32.)/16.;}
     }
     const double edge=std::min({normalized.x()*(size_.width()-1),(1-normalized.x())*(size_.width()-1),normalized.y()*(size_.height()-1),(1-normalized.y())*(size_.height()-1)});
     const double t=std::clamp(edge/(scale_*edge_fade_),0.,1.);

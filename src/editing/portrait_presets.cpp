@@ -73,12 +73,12 @@ QJsonObject portrait_portable_settings(const QJsonObject& settings,const QString
     if(parameters.contains("body.neck"))result["neckGeometryVersion"]=settings["neckGeometryVersion"].toInt(1);
     if(parameters.contains("body.height"))result["heightVersion"]=settings["heightVersion"].toInt(1);
     if(parameters.contains("body.waist"))result["waistGeometryVersion"]=settings["waistGeometryVersion"].toInt(1);
-    if(parameters.contains("teeth.yellow") || parameters.contains("teeth.light"))result["teethColorVersion"]=settings["teethColorVersion"].toInt(1);
+    if(parameters.contains("teeth.yellow") || parameters.contains("teeth.light") || parameters.contains("teeth.natural"))result["teethColorVersion"]=settings["teethColorVersion"].toInt(1);
     if(parameters.contains("repair.conceal"))result["concealVersion"]=settings["concealVersion"].toInt(1);
     if(parameters.contains("color.custom"))result["skinCustomVersion"]=settings["skinCustomVersion"].toInt(1);
     if(parameters.contains("skin.uniform"))result["skinUniformVersion"]=settings["skinUniformVersion"].toInt(1);
     if(parameters.contains("color.light"))result["skinLightVersion"]=settings["skinLightVersion"].toInt(1);
-    if(parameters.contains("eye.red"))result["redEyeVersion"]=settings["redEyeVersion"].toInt(1);
+    if((parameters.contains("eye.red") || parameters.contains("eye.red.left") || parameters.contains("eye.red.right")))result["redEyeVersion"]=settings["redEyeVersion"].toInt(1);
     for(auto it=parameters.begin();it!=parameters.end();++it)if(it.key().startsWith("makeup.iris") || it.key().startsWith("makeup.catch")){result["irisMaterialVersion"]=settings["irisMaterialVersion"].toInt(1);break;}
     for(auto it=parameters.begin();it!=parameters.end();++it)if(it.key().startsWith("makeup.lash")){result["eyeLashVersion"]=settings["eyeLashVersion"].toInt(1);result["lashMaterial"]=settings["lashMaterial"].toString("light");break;}
     for(auto it=parameters.begin();it!=parameters.end();++it)if(it.key().startsWith("makeup.liner")){result["eyeLinerVersion"]=settings["eyeLinerVersion"].toInt(1);result["linerMaterial"]=settings["linerMaterial"].toString("soft");break;}
@@ -99,9 +99,9 @@ QJsonObject portrait_portable_settings(const QJsonObject& settings,const QString
     if(categories.contains("hair") && (parameters.contains("hair.color") || settings.contains("hairColorVersion")))result["hairColorVersion"]=settings["hairColorVersion"].toInt(1);
     if(parameters.contains("face.volume"))result["cheekVolumeVersion"]=settings["cheekVolumeVersion"].toInt(1);
     if(parameters.contains("makeup.lipGloss"))result["lipFinishVersion"]=settings["lipFinishVersion"].toInt(1);
-    if(parameters.contains("eye.white"))result["eyeWhiteVersion"]=settings["eyeWhiteVersion"].toInt(1);
-    if(parameters.contains("eye.bags"))result["eyeBagsVersion"]=settings["eyeBagsVersion"].toInt(1);
-    if(parameters.contains("eye.circles"))result["eyeCirclesVersion"]=settings["eyeCirclesVersion"].toInt(1);
+    if((parameters.contains("eye.white") || parameters.contains("eye.white.left") || parameters.contains("eye.white.right")))result["eyeWhiteVersion"]=settings["eyeWhiteVersion"].toInt(1);
+    if((parameters.contains("eye.bags") || parameters.contains("eye.bags.left") || parameters.contains("eye.bags.right")))result["eyeBagsVersion"]=settings["eyeBagsVersion"].toInt(1);
+    if((parameters.contains("eye.circles") || parameters.contains("eye.circles.left") || parameters.contains("eye.circles.right")))result["eyeCirclesVersion"]=settings["eyeCirclesVersion"].toInt(1);
     if(parameters.contains("skin.texture"))result["textureVersion"]=settings["textureVersion"].toInt(1);
     if(parameters.contains("skin.smooth"))result["smoothScopeVersion"]=settings["smoothScopeVersion"].toInt(1);
     if(parameters.contains("skin.smooth"))result["smoothVersion"]=settings["smoothVersion"].toInt(1);

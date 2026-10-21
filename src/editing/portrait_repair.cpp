@@ -40,7 +40,7 @@ QImage portrait_makeup_repair_mask(const QJsonObject& person,const QString& part
     return empty;
 }
 QJsonObject portrait_makeup_repair(const QImage& source,const QJsonObject& person,const QJsonObject& object,bool manual_source){
-    auto input=object;for(const auto* key:{"kind","id","wrinkleMethod","makeupPart","validatedCandidateCoverage","requestedPart","hairSourceAngle","hairSourceScale"})input.remove(key);auto stroke=healing_from_json(input);
+    auto input=object;for(const auto* key:{"kind","id","wrinkleMethod","makeupPart","validatedCandidateCoverage","requestedPart","hairSourceAngle","hairSourceScale","afterStyle","imageRepair"})input.remove(key);auto stroke=healing_from_json(input);
     const auto size=source.size().scaled(2048,2048,Qt::KeepAspectRatio);QString part;QImage mask;double best=.25;
     for(const auto* key:{"lip.upper","lip.lower","brow.left","brow.right","shadow.left","shadow.right"}){const auto candidate=portrait_makeup_repair_mask(person,QLatin1String(key),size);const double weight=at(candidate,int(stroke.points.front().x()*source.width()),int(stroke.points.front().y()*source.height()),source.size());if(weight>best){best=weight;part=QLatin1String(key);mask=candidate;}}
     if(!object["requestedPart"].toString().isEmpty() && !part.startsWith(object["requestedPart"].toString()+"."))throw EditError("请在所选妆容部位内涂抹，或切换对应的部位卡片");
@@ -378,6 +378,7 @@ QJsonObject portrait_repair_analysis(const QImage& source,const QJsonObject& per
     }
     skin=originalSkin;
     std::sort(ranked.begin(),ranked.end(),[](const auto& a,const auto& b){return a["score"].toDouble()>b["score"].toDouble();});for(std::size_t i=0;i<std::min<std::size_t>(40,ranked.size());++i)suggestions.append(ranked[i]);
+    QImage scleraRed(size,QImage::Format_Grayscale8);scleraRed.fill(0);QImage scleraSupport(size,QImage::Format_Grayscale8);scleraSupport.fill(0);
     QImage whites(size,QImage::Format_Grayscale8),red_eye(size,QImage::Format_Grayscale8),under(size,QImage::Format_Grayscale8),bags(size,QImage::Format_Grayscale8);whites.fill(0);red_eye.fill(0);under.fill(0);bags.fill(0);
     int whitePixels=0,redPixels=0;
     for(int side=0;side<(partial?0:2);++side){const auto eye=side==0?polygon(points,{36,37,38,39,40,41},size):polygon(points,{42,43,44,45,46,47},size);const int start=side==0?36:42;
@@ -404,7 +405,7 @@ QJsonObject portrait_repair_analysis(const QImage& source,const QJsonObject& per
         for(int y=std::max(0,int(center.y()-ew));y<std::min(size.height(),int(center.y()+ew));++y)for(int x=std::max(0,int(center.x()-ew));x<std::min(size.width(),int(center.x()+ew));++x){
             const auto pixel=lab.at<cv::Vec3b>(y,x);const auto* c=image.constScanLine(y)+x*3;
             if(eye.constScanLine(y)[x]>220){const double neutral=std::clamp(1-std::hypot(pixel[1]-128.,pixel[2]-128.)/35.,0.,1.);
-                if(reliableIris && QLineF(QPointF(x,y),irisCenter).length()>irisRadius && std::abs(QPointF::dotProduct(QPointF(x,y)-center,axis))<ew*.44){whites.scanLine(y)[x]=uchar(neutral*std::clamp((pixel[0]-scleraThreshold)/35.,0.,1.)*255);if(whites.constScanLine(y)[x]>80)++whitePixels;}
+                if(reliableIris && QLineF(QPointF(x,y),irisCenter).length()>irisRadius && std::abs(QPointF::dotProduct(QPointF(x,y)-center,axis))<ew*.44){scleraSupport.scanLine(y)[x]=255;scleraRed.scanLine(y)[x]=uchar(std::clamp((pixel[0]-scleraThreshold)/35.,0.,1.)*255);whites.scanLine(y)[x]=uchar(neutral*std::clamp((pixel[0]-scleraThreshold)/35.,0.,1.)*255);if(whites.constScanLine(y)[x]>80)++whitePixels;}
                 const double excess=std::max(0.,c[0]-std::max(c[1],c[2])*1.4);red_eye.scanLine(y)[x]=uchar(std::min(1.,excess/80.)*255);}
             const auto offset=QPointF(x,y)-center;const double along=QPointF::dotProduct(offset,axis),below=QPointF::dotProduct(offset,down);
             const double dx=along/(ew*.65),dy=(below-ew*.36)/(ew*.24),db=(below-ew*.52)/(ew*.22);
@@ -434,7 +435,7 @@ QJsonObject portrait_repair_analysis(const QImage& source,const QJsonObject& per
             if(red_eye.constScanLine(y)[x]>80)++redPixels;
         }
     }
-    return {{"hairLighting",hair_lighting_analysis(source,person)},{"cheekLighting",cheek_lighting_analysis(source,person)},{"lipLighting",lip_lighting_analysis(source,person)},{"browMaterials",brow_material_analysis(image,person)},{"irisMaterials",iris_material_analysis(display_image(source.scaled(source.size().scaled(2048,2048,Qt::KeepAspectRatio),Qt::IgnoreAspectRatio,Qt::SmoothTransformation)).convertToFormat(QImage::Format_RGB888),person)},{"teeth",portrait_mask_png(teeth)},{"teethStatus",reason},{"redEyeStatus",redPixels>0?QStringLiteral("已发现闪光红眼候选"):QStringLiteral("未发现可靠的闪光红眼候选")},{"eyeStatus",whitePixels>5?QStringLiteral("已生成眼白建议范围，已排除估计的虹膜与瞳孔；请检查遮挡和反光"):QStringLiteral("眼白范围不够可靠，未自动提亮；可手动补选眼白")},{"blemishes",suggestions},{"eye.white",portrait_mask_png(whites)},{"eye.red",portrait_mask_png(red_eye)},{"eye.circles",portrait_mask_png(under)},{"eye.bags",portrait_mask_png(bags)},{"eyeglassFrame",partial?QString{}:portrait_mask_png(portrait_frame_protection(source,person))}};
+    return {{"hairLighting",hair_lighting_analysis(source,person)},{"cheekLighting",cheek_lighting_analysis(source,person)},{"lipLighting",lip_lighting_analysis(source,person)},{"browMaterials",brow_material_analysis(image,person)},{"irisMaterials",iris_material_analysis(display_image(source.scaled(source.size().scaled(2048,2048,Qt::KeepAspectRatio),Qt::IgnoreAspectRatio,Qt::SmoothTransformation)).convertToFormat(QImage::Format_RGB888),person)},{"teeth",portrait_mask_png(teeth)},{"teethStatus",reason},{"redEyeStatus",redPixels>0?QStringLiteral("已发现闪光红眼候选"):QStringLiteral("未发现可靠的闪光红眼候选")},{"eyeStatus",whitePixels>5?QStringLiteral("已生成眼白建议范围，已排除估计的虹膜与瞳孔；请检查遮挡和反光"):QStringLiteral("眼白范围不够可靠，未自动提亮；可手动补选眼白")},{"blemishes",suggestions},{"eye.scleraSupport",portrait_mask_png(scleraSupport)},{"eye.deRed",portrait_mask_png(scleraRed)},{"eye.white",portrait_mask_png(whites)},{"eye.red",portrait_mask_png(red_eye)},{"eye.circles",portrait_mask_png(under)},{"eye.bags",portrait_mask_png(bags)},{"eyeglassFrame",partial?QString{}:portrait_mask_png(portrait_frame_protection(source,person))}};
 }
 QImage portrait_repair_region(const QImage& source,const QJsonObject& recipe,QRect region,double amount,const std::atomic_bool* cancelled,const QImage& effect_mask) {
     const auto people=recipe["people"].toArray();bool active=false;for(const auto& entry:people){const auto s=entry.toObject()["settings"].toObject();active|=!s["repairs"].toArray().isEmpty();const auto p=s["parameters"].toObject();for(auto i=p.begin();i!=p.end();++i)if((i.key().startsWith("eye.") || i.key().startsWith("teeth.") || i.key()=="repair.conceal") && i.value().toDouble()!=0)active=true;}
@@ -450,7 +451,7 @@ QImage portrait_repair_region(const QImage& source,const QJsonObject& recipe,QRe
             for(int y=std::max(0,int(cy-r-2));y<std::min(preserved.height(),int(cy+r+3));++y)for(int x=std::max(0,int(cx-r-2));x<std::min(preserved.width(),int(cx+r+3));++x){const double weight=std::clamp(r+1-std::hypot(x-cx,y-cy),0.,1.);preserved.scanLine(y)[x]=std::max(preserved.constScanLine(y)[x],uchar(weight*255));}
         }
         for(const auto& entry:settings["repairs"].toArray()){
-            if(cancelled && cancelled->load())throw EditError("人像修复已取消");const auto object=entry.toObject();auto healing=object;healing.remove("kind");healing.remove("id");healing.remove("wrinkleMethod");healing.remove("makeupPart");healing.remove("validatedCandidateCoverage");healing.remove("hairSourceAngle");healing.remove("hairSourceScale");auto stroke=healing_from_json(healing);if(!stroke.enabled || stroke.points.empty())continue;
+            if(cancelled && cancelled->load())throw EditError("人像修复已取消");const auto object=entry.toObject();auto healing=object;healing.remove("kind");healing.remove("id");healing.remove("wrinkleMethod");healing.remove("makeupPart");healing.remove("validatedCandidateCoverage");healing.remove("hairSourceAngle");healing.remove("hairSourceScale");healing.remove("afterStyle");healing.remove("imageRepair");auto stroke=healing_from_json(healing);if(!stroke.enabled || stroke.points.empty())continue;
             const QString kind=object["kind"].toString("heal");if(!enabled[kind=="wrinkle"?"wrinkle":kind=="hairline"?"hair":"repair"].toBool(true))continue;
             const double radius=stroke.radius*std::min(source.width(),source.height());QRectF bounds;for(const auto p:stroke.points){const QPointF q(p.x()*source.width(),p.y()*source.height());const QRectF b(q.x()-radius-3,q.y()-radius-3,radius*2+6,radius*2+6);bounds=bounds.isNull()?b:bounds.united(b);}
             const auto destination=bounds.toAlignedRect().intersected(source.rect());const auto visible=destination.intersected(region);if(visible.isEmpty())continue;
@@ -501,7 +502,7 @@ QImage portrait_repair_region(const QImage& source,const QJsonObject& recipe,QRe
             const auto original=source.copy(crop);QImage strokeCoverage;const auto repaired=apply_healing(original,QJsonArray{healing_json(local)},cancelled,&strokeCoverage);
             auto skin=portrait_effect_mask(person,kind=="hairline"?"hair.smooth":"skin",source.size().scaled(768,768,Qt::KeepAspectRatio));
             // Explicit clone strokes must reach missing hair, not only existing hair pixels.
-            if(kind=="hairline")skin.fill(255);
+            if(kind=="hairline" || object["imageRepair"].toBool())skin.fill(255);
             // Confirmed candidates already contain their validated skin footprint.
             // Reapplying the original color mask would erase repaired detection holes.
             if(object["validatedCandidateCoverage"].toBool() && !edit_coverage.isNull())skin.fill(255);
@@ -509,8 +510,13 @@ QImage portrait_repair_region(const QImage& source,const QJsonObject& recipe,QRe
             else if(kind=="makeup")for(const auto* key:{"makeup.lip","makeup.brow.left","makeup.brow.right","makeup.shadow.left","makeup.shadow.right"}){const auto extra=portrait_effect_mask(person,QLatin1String(key),skin.size());for(int y=0;y<skin.height();++y)for(int x=0;x<skin.width();++x)skin.scanLine(y)[x]=std::max(skin.constScanLine(y)[x],extra.constScanLine(y)[x]);}
             for(int y=visible.top();y<=visible.bottom();++y){auto* out=reinterpret_cast<float*>(result.scanLine(y-region.y()));const auto* a=reinterpret_cast<const float*>(original.constScanLine(y-crop.y()));const auto* b=reinterpret_cast<const float*>(repaired.constScanLine(y-crop.y()));for(int x=visible.left();x<=visible.right();++x){const int i=(x-crop.x())*4,j=(x-region.x())*4;const double w=strength*protection(x,y)*(kind=="hairline"?1:1-at(preserved,x,y,source.size()))*at(skin,x,y,source.size())*(edit_coverage.isNull()?1:at(edit_coverage,x,y,source.size()));const double coverage=reinterpret_cast<const float*>(strokeCoverage.constScanLine(y-crop.y()))[i];for(int c=0;c<3;++c)out[j+c]+=float(((b[i+c]-a[i+c])+(a[i+c]-out[j+c])*coverage)*w);}}
         }
-        const std::array<QString,7> keys{"eye.circles","eye.bags","eye.white","eye.red","teeth.yellow","teeth.light","repair.conceal"};
-        for(const auto& key:keys){const double value=parameters[key].toDouble()*.01*strength;if(value==0 || settings["disabledParameters"].toObject()[key].toBool() || !enabled[key.section('.',0,0)].toBool(true))continue;const auto mask=portrait_effect_mask(person,key,source.size().scaled(768,768,Qt::KeepAspectRatio));
+        const auto landmarks=person["landmarks"].toArray();
+        const auto mouthInterior=landmarks.size()==66?polygon(landmarks,{58,59,60,61,62,63,64,65},source.size().scaled(768,768,Qt::KeepAspectRatio)):QImage{};
+        QStringList keys;
+        for(const auto& root:QStringList{"eye.circles","eye.bags","eye.white","eye.red","eye.deRed","teeth.yellow","teeth.light","teeth.natural","repair.conceal"}){
+            if(root.startsWith("eye.") && (parameters.contains(root+".left") || parameters.contains(root+".right")))keys<<root+".left"<<root+".right";else keys<<root;
+        }
+        for(const auto& fullKey:keys){const QString key=fullKey.section('.',0,1);const double value=parameters[fullKey].toDouble(parameters[key].toDouble())*.01*strength;if(value==0 || settings["disabledParameters"].toObject()[key].toBool() || !enabled[key.section('.',0,0)].toBool(true))continue;const auto mask=portrait_effect_mask(person,fullKey,source.size().scaled(768,768,Qt::KeepAspectRatio));
             if((key=="eye.circles" && settings["eyeCirclesVersion"].toInt(1)>=2) || (key=="eye.bags" && settings["eyeBagsVersion"].toInt(1)>=2)){
                 const bool circles=key=="eye.circles";
                 const auto automatic=settings["automaticMasks"].toObject();
@@ -565,9 +571,27 @@ QImage portrait_repair_region(const QImage& source,const QJsonObject& recipe,QRe
                 const double sigma=std::clamp(person["face"].toArray()[2].toDouble()*source.width()*.012,1.,8.);const int halo=int(std::ceil(sigma*4))+2;concealArea=region.adjusted(-halo,-halo,halo,halo).intersected(source.rect());
                 cv::Mat input(concealArea.height(),concealArea.width(),CV_32FC4,const_cast<uchar*>(source.constScanLine(concealArea.y()))+qint64(concealArea.x())*16,source.bytesPerLine());cv::GaussianBlur(input,concealBase,{0,0},sigma,sigma,cv::BORDER_REFLECT_101);
             }
-            const auto frame=key=="eye.white" && settings["eyeWhiteVersion"].toInt(1)>=2?QImage::fromData(QByteArray::fromBase64(settings["automaticMasks"].toObject()["eyeglassFrame"].toString().toLatin1()),"PNG").convertToFormat(QImage::Format_Grayscale8):QImage{};
+            const auto scleraSupport=(key=="eye.white" || key=="eye.deRed")?QImage::fromData(QByteArray::fromBase64(settings["automaticMasks"].toObject()["eye.scleraSupport"].toString().toLatin1()),"PNG").convertToFormat(QImage::Format_Grayscale8):QImage{};
+            const auto frame=((key=="eye.white" && settings["eyeWhiteVersion"].toInt(1)>=2) || key=="eye.deRed")?QImage::fromData(QByteArray::fromBase64(settings["automaticMasks"].toObject()["eyeglassFrame"].toString().toLatin1()),"PNG").convertToFormat(QImage::Format_Grayscale8):QImage{};
             for(int y=region.top();y<=region.bottom();++y){if(cancelled && cancelled->load())throw EditError("人像修复已取消");auto* row=reinterpret_cast<float*>(result.scanLine(y-region.y()));for(int x=region.left();x<=region.right();++x){auto* p=row+(x-region.x())*4;double w=value*at(mask,x,y,source.size())*protection(x,y)*(1-at(frame,x,y,source.size()))*(key=="repair.conceal"?1-at(preserved,x,y,source.size()):1);if(w==0 || p[3]<.00001F)continue;const double l=lum(p);
-                if(key=="teeth.light" || key=="eye.white"){
+                if(!scleraSupport.isNull()){w*=at(scleraSupport,x,y,source.size());if(w==0)continue;}
+                if(key.startsWith("teeth.") && settings["teethColorVersion"].toInt()>=3){
+                    const auto* original=reinterpret_cast<const float*>(source.constScanLine(y))+x*4;
+                    const double light=lum(original)/std::max(.00001F,original[3]);
+                    const double redRatio=original[0]/std::max(.00001F,original[1]);
+                    w*=std::clamp((light-.015)/.07,0.,1.)*std::clamp((1.6-redRatio)/.3,0.,1.);
+                    if(!mouthInterior.isNull())w*=at(mouthInterior,x,y,source.size());
+                    if(w==0)continue;
+                }
+                if(key=="teeth.natural"){
+                    // Small ivory/cool-neutral shift at constant luminance. Dark
+                    // interdental gaps and gingiva are excluded above, not painted white.
+                    const double tone=w*.075*l*std::clamp(1-l/p[3],0.,1.);
+                    const std::array<double,3> delta{tone,(-.2627+.0593)*tone/.678,-tone};
+                    double gain=1;for(int c=0;c<3;++c){if(delta[c]<0)gain=std::min(gain,double(p[c])/-delta[c]);else if(delta[c]>0)gain=std::min(gain,std::max(0.,double(p[3]-p[c]))/delta[c]);}
+                    for(int c=0;c<3;++c)p[c]+=float(delta[c]*gain);
+                }
+                else if(key=="teeth.light" || key=="eye.white"){
                     double gain=std::exp2(w*(key=="eye.white"?.4:.65));
                     if((key=="teeth.light" && settings["teethColorVersion"].toInt(1)>=2) || (key=="eye.white" && settings["eyeWhiteVersion"].toInt(1)>=2)){const double light=l/p[3];gain=light>=1?1:gain/(1+(gain-1)*std::max(0.,light));}
                     for(int c=0;c<3;++c)p[c]=float(p[c]*gain);
@@ -579,8 +603,13 @@ QImage portrait_repair_region(const QImage& source,const QJsonObject& recipe,QRe
                         p[2]+=float(correction);const double balance=correction*.0593/(.2627+.678);p[0]-=float(balance);p[1]-=float(balance);
                     }else for(int c=0;c<3;++c)p[c]=float(p[c]+(l-p[c])*w*.7);
                 }
+                else if(key=="eye.deRed"){
+                    const double excess=std::max(0.,double(p[0])-(double(p[1])+p[2])*.5);
+                    const double correction=std::min(excess*.8*w,std::max(0.,double(p[0])));
+                    p[0]-=float(correction);const double balance=correction*.2627/(.678+.0593);p[1]+=float(balance);p[2]+=float(balance);
+                }
                 else if(key=="eye.red"){
-                    if(settings["redEyeVersion"].toInt(1)>=2){const double neutral=(double(p[1])+p[2])*.5;for(int c=0;c<3;++c)p[c]=float(p[c]+(neutral-p[c])*w);}
+                    if(settings["redEyeVersion"].toInt(1)>=2){w*=std::clamp((double(p[0])-std::max(p[1],p[2])*1.4)/std::max(.01,double(p[3])*.08),0.,1.);const double neutral=(double(p[1])+p[2])*.5;for(int c=0;c<3;++c)p[c]=float(p[c]+(neutral-p[c])*w);}
                     else{const double excess=std::max(0.,double(p[0])-std::max(p[1],p[2])*1.4);p[0]-=float(excess*w);}
                 }
                 else if(key=="repair.conceal" && color.size()==3){const double target=.2627*color[0].toDouble()+.678*color[1].toDouble()+.0593*color[2].toDouble();if(target>.001){

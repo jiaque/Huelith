@@ -108,7 +108,7 @@ QImage contour_light(const QJsonArray& lm,QSize size,bool shadow,const QImage& s
 }
 // Eyelid-local pigment field: the lid is the lower boundary and the brow bounds the socket.
 // Re-evaluating those boundaries also fits a closed or rotated eye without an elliptical stamp.
-QImage eye_shadow(const QJsonArray& lm,int eye,int brow,QSize size,bool accent,bool left){
+QImage eye_shadow(const QJsonArray& lm,int eye,int brow,QSize size,bool accent,bool left,double feather){
     QImage mask(size,QImage::Format_Grayscale8);mask.fill(0);
     const auto origin=point(lm,eye,size),chord=point(lm,eye+3,size)-origin;const double width=std::hypot(chord.x(),chord.y());if(width<2)return mask;
     const auto axis=chord/width;QPointF up(axis.y(),-axis.x());if(up.y()>0)up=-up;
@@ -123,13 +123,13 @@ QImage eye_shadow(const QJsonArray& lm,int eye,int brow,QSize size,bool accent,b
         const double edge=interpolate(lid,u),browEdge=interpolate(browLine,u)-.09;
         const double height=std::min(.48,(browEdge-edge)*.78);if(height<=.015)continue;
         const double v=(q.y()-edge)/height;if(v<=0 || v>=1)continue;
-        double weight=smooth(u/.16)*smooth((1-u)/.16)*smooth(v/.10)*smooth((1-v)/.55);
+        double weight=smooth(u/.16)*smooth((1-u)/.16)*smooth(v/.10)*smooth((1-v)/(.55+feather*.0035));
         if(accent){const double outer=left?u:1-u;weight*=smooth((outer-.35)/.45)*smooth((.85-v)/.45);}
         mask.scanLine(y)[x]=uchar(std::lround(weight*255));
     }
     return mask;
 }
-QImage eye_liner(const QJsonArray& lm,int eye,QSize size,bool lower,bool left,const QString& style){
+QImage eye_liner(const QJsonArray& lm,int eye,QSize size,bool lower,bool left,const QString& style,double breadth,double tail){
     QImage image(size,QImage::Format_ARGB32);image.fill(Qt::black);
     const auto a=point(lm,eye,size),b=point(lm,eye+3,size),chord=b-a;const double width=std::hypot(chord.x(),chord.y());if(width<2)return image.convertToFormat(QImage::Format_Grayscale8);
     QPointF up(chord.y()/width,-chord.x()/width);if(up.y()>0)up=-up;
@@ -137,19 +137,19 @@ QImage eye_liner(const QJsonArray& lm,int eye,QSize size,bool lower,bool left,co
     const auto curve=[&](double t){const double q=std::clamp(t,0.,1.)*3;const int i=std::min(2,int(q));const double u=q-i;const auto p0=anchors[std::max(0,i-1)],p1=anchors[i],p2=anchors[i+1],p3=anchors[std::min(3,i+2)];return (p1*2+(p2-p0)*u+(p0*2-p1*5+p2*4-p3)*(u*u)+(-p0+p1*3-p2*3+p3)*(u*u*u))*.5;};
     QPolygonF shape;std::vector<QPointF> outside;
     for(int i=0;i<=80;++i){const double t=i/80.,outer=left?t:1-t;double thickness=width*(style=="round"?.012+.045*std::pow(std::sin(t*3.141592653589793),2):style=="wing"?.008+.05*outer*outer:.022);
-        thickness*=std::min(1.,std::min(t,1-t)*14);if(lower)thickness*=.48*std::clamp(outer*2,0.,1.);
+        thickness*=1+breadth*.006;thickness*=std::min(1.,std::min(t,1-t)*14);if(lower)thickness*=.48*std::clamp(outer*2,0.,1.);
         const auto root=curve(t);shape<<root;outside.push_back(root+up*(lower?-thickness:thickness));
     }
     for(auto it=outside.rbegin();it!=outside.rend();++it)shape<<*it;
     QPainter painter(&image);painter.setRenderHint(QPainter::Antialiasing);painter.setPen(Qt::NoPen);painter.setBrush(Qt::white);painter.drawPolygon(shape);
     if(!lower && style=="wing"){
-        const auto end=left?b:a,axis=chord/width*(left?1.:-1.);const auto root=curve(left?.88:.12),tip=end+axis*(width*.22)+up*(width*.10);
+        const auto end=left?b:a,axis=chord/width*(left?1.:-1.);const auto root=curve(left?.88:.12),tip=end+axis*(width*.22*(1+tail*.008))+up*(width*.10);
         QPainterPath wing;wing.moveTo(root);wing.quadTo(end+up*(width*.075),tip);wing.quadTo(end+axis*(width*.05),end);wing.closeSubpath();painter.drawPath(wing);
     }
     // The pigment stays on the lid skin, including near the inner corner.
     QPolygonF opening;for(int i=0;i<6;++i)opening<<point(lm,eye+i,size);painter.setBrush(Qt::black);painter.drawPolygon(opening);painter.end();return image.convertToFormat(QImage::Format_Grayscale8);
 }
-QImage eye_lashes(const QJsonArray& lm,int eye,QSize size,bool left,const QString& style){
+QImage eye_lashes(const QJsonArray& lm,int eye,QSize size,bool left,const QString& style,double lengthAmount,double curl){
     QImage image(size,QImage::Format_ARGB32);image.fill(Qt::black);
     std::array<QPointF,4> anchors;for(int i=0;i<4;++i)anchors[i]=point(lm,eye+i,size);
     const auto chord=anchors[3]-anchors[0];const double width=std::hypot(chord.x(),chord.y());if(width<2)return image.convertToFormat(QImage::Format_Grayscale8);
@@ -161,16 +161,16 @@ QImage eye_lashes(const QJsonArray& lm,int eye,QSize size,bool left,const QStrin
     const int clusters=style=="volume"?25:19,strands=style=="volume"?3:2;
     for(int n=0;n<clusters;++n){const double jitter=double((unsigned(n)*2654435761u)>>24)/255.,t=.06+.88*(n+.25+jitter*.5)/clusters,outer=left?t:1-t;
         const double envelope=.35+.65*std::pow(std::sin(t*3.141592653589793),.8);
-        const double length=width*(style=="long"?.23:style=="volume"?.18:.14)*envelope*projection*(.65+.6*jitter);
-        for(int strand=0;strand<strands;++strand){const double fan=(strand-(strands-1)*.5)*.28;const auto root=curve(t+fan*.012);const double sweep=(t-.5)*1.5+fan+(left?1:-1)*outer*.18+(jitter-.5)*.2;const auto tip=root+up*(length*.8)+axis*(length*sweep);
-            QPainterPath hair;hair.moveTo(root);hair.cubicTo(root+up*(length*.70),root+up*length+axis*(length*sweep*.7),tip);
+        const double length=width*(style=="long"?.23:style=="volume"?.18:.14)*envelope*projection*(.65+.6*jitter)*(1+lengthAmount*.006);
+        for(int strand=0;strand<strands;++strand){const double fan=(strand-(strands-1)*.5)*.28;const auto root=curve(t+fan*.012);const double sweep=(t-.5)*1.5+fan+(left?1:-1)*outer*.18+(jitter-.5)*.2;const auto tip=root+up*(length*(.8+curl*.002))+axis*(length*sweep);
+            QPainterPath hair;hair.moveTo(root);hair.cubicTo(root+up*(length*(.70+curl*.002)),root+up*(length*(1+curl*.002))+axis*(length*sweep*.7),tip);
             for(int segment=0;segment<12;++segment){const double u=segment/12.;painter.setPen(QPen(QColor(255,255,255,210),std::max(.16,width*.010*(1-u)*(.8+.2*jitter)),Qt::SolidLine,Qt::RoundCap));painter.drawLine(hair.pointAtPercent(u),hair.pointAtPercent((segment+1)/12.));}
         }
     }
     // Keep roots on the lid and avoid painting the eye surface after curved interpolation.
     painter.setPen(Qt::NoPen);painter.setBrush(Qt::black);QPolygonF eyeOpening;for(int i=0;i<6;++i)eyeOpening<<point(lm,eye+i,size);painter.drawPolygon(eyeOpening);painter.end();return image.convertToFormat(QImage::Format_Grayscale8);
 }
-QImage lower_lid_volume(const QJsonArray& lm,int eye,QSize size,bool shade){
+QImage lower_lid_volume(const QJsonArray& lm,int eye,QSize size,bool shade,double offset,double breadth){
     QImage mask(size,QImage::Format_Grayscale8);mask.fill(0);const auto a=point(lm,eye,size),chord=point(lm,eye+3,size)-a;const double width=std::hypot(chord.x(),chord.y());if(width<2)return mask;
     const auto axis=chord/width;QPointF down(-axis.y(),axis.x());if(down.y()<0)down=-down;
     const auto local=[&](QPointF p){p-=a;return QPointF(QPointF::dotProduct(p,axis)/width,QPointF::dotProduct(p,down)/width);};
@@ -179,7 +179,7 @@ QImage lower_lid_volume(const QJsonArray& lm,int eye,QSize size,bool shade){
     const QRect bounds=QRectF(a-QPointF(width,width),QSizeF(width*3,width*2)).toAlignedRect().intersected(mask.rect());
     for(int y=bounds.top();y<=bounds.bottom();++y)for(int x=bounds.left();x<=bounds.right();++x){const auto q=local(QPointF(x+.5,y+.5));const double u=q.x();if(u<=.08 || u>=.92)continue;double edge=0;
         for(int i=1;i<4;++i)if(u<=lid[i].x()){const double t=std::clamp((u-lid[i-1].x())/std::max(.0001,lid[i].x()-lid[i-1].x()),0.,1.);edge=lid[i-1].y()*(1-t)+lid[i].y()*t;break;}
-        const double v=q.y()-edge;if(v<=.04 || v>=.25)continue;
+        const double v=(q.y()-edge-offset*.0007)/(1+breadth*.005);if(v<=.04 || v>=.25)continue;
         const double taper=std::pow(std::sin((u-.08)/.84*3.141592653589793),2),fade=std::clamp((v-.04)/.025,0.,1.)*std::clamp((.25-v)/.035,0.,1.);
         const double field=taper*fade*(std::exp(-std::pow((v-.095)/.045,2))-.55*std::exp(-std::pow((v-.185)/.035,2)));
         mask.scanLine(y)[x]=uchar(std::lround(std::clamp(shade?std::max(0.,-field):std::abs(field),0.,1.)*255));
@@ -375,14 +375,14 @@ QImage portrait_style_mask(const QJsonObject& person,const QString& key,QSize si
         if(!materialSkin.isNull())for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x)result.scanLine(y)[x]=uchar(result.constScanLine(y)[x]*materialSkin.constScanLine(y)[x]/255);return result;
     }
     if((base=="makeup.shadow" || base=="makeup.shadowAccent") && portrait_side_value(settings,"eyeShadowVersion",left).toInt()>=2){
-        p.end();auto result=protectBrow(eye_shadow(lm,eye,brow,size,base=="makeup.shadowAccent",left));
+        p.end();auto result=protectBrow(eye_shadow(lm,eye,brow,size,base=="makeup.shadowAccent",left,params["makeup.shadowFeather"+(left?QString(".left"):QString(".right"))].toDouble()));
         const auto materialSkin=eyelidSkin();if(!materialSkin.isNull())for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x)result.scanLine(y)[x]=uchar(result.constScanLine(y)[x]*materialSkin.constScanLine(y)[x]/255);
         return result;
     }
-    if((base=="makeup.liner" || base=="makeup.linerLower") && portrait_side_value(settings,"eyeLinerVersion",left).toInt()>=2){p.end();return protectBrow(eye_liner(lm,eye,size,base=="makeup.linerLower",left,portrait_side_value(settings,"linerMaterial",left).toString("soft")));}
-    if(base=="makeup.lash" && portrait_side_value(settings,"eyeLashVersion",left).toInt()>=2){p.end();return protectBrow(eye_lashes(lm,eye,size,left,portrait_side_value(settings,"lashMaterial",left).toString("light")));}
+    if((base=="makeup.liner" || base=="makeup.linerLower") && portrait_side_value(settings,"eyeLinerVersion",left).toInt()>=2){p.end();return protectBrow(eye_liner(lm,eye,size,base=="makeup.linerLower",left,portrait_side_value(settings,"linerMaterial",left).toString("soft"),params["makeup.linerWidth"+(left?QString(".left"):QString(".right"))].toDouble(),params["makeup.linerTail"+(left?QString(".left"):QString(".right"))].toDouble()));}
+    if(base=="makeup.lash" && portrait_side_value(settings,"eyeLashVersion",left).toInt()>=2){p.end();return protectBrow(eye_lashes(lm,eye,size,left,portrait_side_value(settings,"lashMaterial",left).toString("light"),params["makeup.lashLength"+(left?QString(".left"):QString(".right"))].toDouble(),params["makeup.lashCurl"+(left?QString(".left"):QString(".right"))].toDouble()));}
     if(base=="makeup.aegyosal" || base=="makeup.aegyosalShade"){
-        p.end();auto result=protectBrow(lower_lid_volume(lm,eye,size,base=="makeup.aegyosalShade"));
+        p.end();auto result=protectBrow(lower_lid_volume(lm,eye,size,base=="makeup.aegyosalShade",params["makeup.aegyosalY"+(left?QString(".left"):QString(".right"))].toDouble(),params["makeup.aegyosalWidth"+(left?QString(".left"):QString(".right"))].toDouble()));
         const auto materialSkin=eyelidSkin();if(!materialSkin.isNull())for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x)result.scanLine(y)[x]=uchar(result.constScanLine(y)[x]*materialSkin.constScanLine(y)[x]/255);return result;
     }
     if(base=="makeup.crease"){
@@ -399,7 +399,21 @@ QImage portrait_style_mask(const QJsonObject& person,const QString& key,QSize si
         p.end();auto result=image.convertToFormat(QImage::Format_Grayscale8);const auto visible=decoded(materials,left?"cornea.left":"cornea.right").scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation),frame=decoded(automatic,"eyeglassFrame").scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
         for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x){double coverage=visible.isNull()?0:visible.constScanLine(y)[x]/255.;if(!frame.isNull())coverage*=1-frame.constScanLine(y)[x]/255.;result.scanLine(y)[x]=uchar(result.scanLine(y)[x]*coverage);}return result;
     }
-    if(base=="makeup.iris" && portrait_side_value(settings,"irisMaterialVersion",left).toInt()>=2){p.end();const auto mask=decoded(settings["irisMaterials"].toObject(),left?"iris.left":"iris.right");if(mask.isNull())return image.convertToFormat(QImage::Format_Grayscale8);auto result=mask.scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);const auto frame=decoded(automatic,"eyeglassFrame").scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);if(!frame.isNull())for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x)result.scanLine(y)[x]=uchar(result.scanLine(y)[x]*(255-frame.constScanLine(y)[x])/255);return result;}
+    if(base=="makeup.iris" && portrait_side_value(settings,"irisMaterialVersion",left).toInt()>=2){p.end();const auto mask=decoded(settings["irisMaterials"].toObject(),left?"iris.left":"iris.right");if(mask.isNull())return image.convertToFormat(QImage::Format_Grayscale8);auto result=mask.scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
+        const QString suffix=left?".left":".right";
+        const auto materials=settings["irisMaterials"].toObject();const auto ellipse=materials["geometry"+suffix].toObject()["ellipse"].toArray();
+        if(ellipse.size()==5){
+            const QPointF center(ellipse[0].toDouble()*size.width(),ellipse[1].toDouble()*size.height());
+            const double scale=1+params["makeup.irisSize"+suffix].toDouble()*.003;
+            QTransform transform;transform.translate(center.x()+fw*params["makeup.irisX"+suffix].toDouble()*.01,center.y()+fh*params["makeup.irisY"+suffix].toDouble()*.01);transform.scale(scale,scale);transform.translate(-center.x(),-center.y());
+            QImage moved(size,QImage::Format_ARGB32);moved.fill(Qt::black);QPainter painter(&moved);painter.setRenderHint(QPainter::SmoothPixmapTransform);painter.setTransform(transform);painter.drawImage(QPoint{},result);painter.end();result=moved.convertToFormat(QImage::Format_Grayscale8);
+            const double feather=params["makeup.irisFeather"+suffix].toDouble()*.01;
+            if(feather>0){const auto inverse=transform.inverted();const double rx=std::max(.5,ellipse[2].toDouble()*std::min(size.width(),size.height())),ry=std::max(.5,ellipse[3].toDouble()*std::min(size.width(),size.height()));const double angle=ellipse[4].toDouble()*3.141592653589793/180.;
+                for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x){const auto d=inverse.map(QPointF(x+.5,y+.5))-center;const double u=(d.x()*std::cos(angle)+d.y()*std::sin(angle))/rx,v=(-d.x()*std::sin(angle)+d.y()*std::cos(angle))/ry;const double w=std::clamp((1-std::hypot(u,v))/std::max(.01,feather*.4),0.,1.);result.scanLine(y)[x]=uchar(result.scanLine(y)[x]*w);}}
+        }
+        const auto visible=decoded(materials,left?"cornea.left":"cornea.right").scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
+        const auto frame=decoded(automatic,"eyeglassFrame").scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
+        for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x){double w=visible.isNull()?0:visible.constScanLine(y)[x]/255.;if(!frame.isNull())w*=1-frame.constScanLine(y)[x]/255.;result.scanLine(y)[x]=uchar(result.scanLine(y)[x]*w);}return result;}
     auto polygon=[&](int first,int last){QPolygonF shape;for(int i=first;i<=last;++i)shape<<point(lm,i,size);p.drawPolygon(shape);};
     double blur=std::max(.5,fw*.009);
     if(base=="makeup.lip"){
@@ -429,12 +443,12 @@ QImage portrait_style_mask(const QJsonObject& person,const QString& key,QSize si
         const auto center=(inner+outer)*.5+QPointF(fw*params["makeup.blushX"+suffix].toDouble()*.01,fh*params["makeup.blushY"+suffix].toDouble()*.01);
         const auto material=portrait_side_value(settings,"blushMaterial",left).toString("underEye");
         for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x){const auto d=QPointF(x+.5,y+.5)-center;const double u=QPointF::dotProduct(d,axis)/(width*scale),v=QPointF::dotProduct(d,down)/(width*scale);double field=0;
-            if(material=="horizontal"){const double a=std::abs(u)/.62,b=std::abs(v+.04)/.19;field=std::exp(-2*(a*a*a*a+b*b));}
-            else if(material=="diagonal"){const double a=u/.6,b=(v+.22*u+.03)/.16;field=std::exp(-2*(a*a+b*b))*std::clamp(1-.45*u,.5,1.3);}
-            else{const double a=u/.51,b=(v+.16-.24*u*u)/.16;field=std::exp(-2*(a*a+b*b));}
+            if(material=="horizontal"){const double a=std::abs(u)/.62,b=std::abs(v+.04)/.32;field=std::exp(-2*(a*a*a*a+b*b));}
+            else if(material=="diagonal"){const double a=u/.6,b=(v+.22*u+.03)/.29;field=std::exp(-2*(a*a+b*b))*std::clamp(1-.45*u,.5,1.3);}
+            else{const double a=u/.51,b=(v+.10-.24*u*u)/.28;field=std::exp(-2*(a*a+b*b));}
             result.scanLine(y)[x]=uchar(std::clamp(field,0.,1.)*255);
         }
-        result=protectBrow(result);if(!skin.isNull())for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x)result.scanLine(y)[x]=uchar(result.constScanLine(y)[x]*skin.constScanLine(y)[x]/255);return result;
+        result=protectBrow(result);const auto cheekSkin=eyelidSkin();if(!cheekSkin.isNull())for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x)result.scanLine(y)[x]=uchar(result.constScanLine(y)[x]*cheekSkin.constScanLine(y)[x]/255);return result;
     }
     else if(base=="makeup.blush"){const auto c=(point(lm,left?13:3,size)+point(lm,left?35:31,size))*.5;p.drawEllipse(c,fw*(.14+params["makeup.blushSpread"].toDouble()*.0009),fh*.085);blur=fw*.045;}
     else if(base=="makeup.shadow"){p.drawEllipse(ec-QPointF(0,ew*.18),ew*.6,ew*.3);p.setBrush(Qt::black);polygon(eye,eye+5);blur=fw*.018;}
@@ -504,7 +518,7 @@ QImage portrait_style_region(QImage base,QSize source_size,const QJsonObject& re
             // The automatic combination supplies the tonal component; retain
             // face.volume geometry but do not add its legacy cheek exposure again.
             if(descriptor.key=="face.volume" && (autoContourTone || settings["cheekVolumeVersion"].toInt()>=2))continue;
-            const QString root=descriptor.key;if(root.startsWith("paint.") || root.startsWith("makeup.tattoo") || root.startsWith("makeup.nails") || root.startsWith("head.") || root=="makeup.foundation" || root=="hair.detail" || root.contains("Size") || root.endsWith("X") || root.endsWith("Y") || root.endsWith("Angle") || root.endsWith("Width") || root.endsWith("Height") || root.endsWith("Feather") || root.endsWith("Spread") || (root.endsWith("Gloss") && !((root=="makeup.lipGloss" && settings["lipFinishVersion"].toInt()>=2) || root=="makeup.blushGloss")) || root.endsWith("Roughness") || root.endsWith("Coverage") || root.endsWith("Density") || root=="light.highlights")continue;
+            const QString root=descriptor.key;if(root=="makeup.linerTail" || root=="makeup.lashLength" || root=="makeup.lashCurl" || root.startsWith("paint.") || root.startsWith("makeup.tattoo") || root.startsWith("makeup.nails") || root.startsWith("head.") || root=="makeup.foundation" || root=="hair.detail" || root.contains("Size") || root.endsWith("X") || root.endsWith("Y") || root.endsWith("Angle") || root.endsWith("Width") || root.endsWith("Height") || root.endsWith("Feather") || root.endsWith("Spread") || (root.endsWith("Gloss") && !((root=="makeup.lipGloss" && settings["lipFinishVersion"].toInt()>=2) || root=="makeup.blushGloss")) || root.endsWith("Roughness") || root.endsWith("Coverage") || root.endsWith("Density") || root=="light.highlights")continue;
             if(!enabled[root.section('.',0,0)].toBool(true) || settings["disabledParameters"].toObject()[root].toBool())continue;
             for(int side=0;side<(descriptor.bilateral?2:1);++side){const QString key=root+(descriptor.bilateral?(side==0?".left":".right"):"");const double value=params[key].toDouble()*.01*amount*settings["strength"].toDouble(100)*.01;if(value==0)continue;
                 if(!base.isDetached()){auto detached=allocate_image(base.size(),base.format());detached.setColorSpace(base.colorSpace());for(int y=0;y<base.height();++y)std::memcpy(detached.scanLine(y),base.constScanLine(y),std::size_t(base.width())*16);base=std::move(detached);}
@@ -516,7 +530,8 @@ QImage portrait_style_region(QImage base,QSize source_size,const QJsonObject& re
                 const auto lowerField=root=="makeup.aegyosal"?portrait_style_mask(person,key,maskSize):QImage{};
                 const auto lowerShade=root=="makeup.aegyosal"?portrait_style_mask(person,QString("makeup.aegyosalShade")+(side==0?".left":".right"),maskSize):QImage{};
                 const auto accessoryInverse=portrait_accessory_transform(person,params,source_size).inverted();
-                const auto irisEllipse=settings["irisMaterials"].toObject()[side==0?"geometry.left":"geometry.right"].toObject()["ellipse"].toArray();
+                auto irisEllipse=settings["irisMaterials"].toObject()[side==0?"geometry.left":"geometry.right"].toObject()["ellipse"].toArray();
+                if(irisEllipse.size()==5){const QString suffix=side==0?".left":".right";const auto face=person["face"].toArray();irisEllipse[0]=irisEllipse[0].toDouble()+face[2].toDouble()*params["makeup.irisX"+suffix].toDouble()*.01;irisEllipse[1]=irisEllipse[1].toDouble()+face[3].toDouble()*params["makeup.irisY"+suffix].toDouble()*.01;const double factor=1+params["makeup.irisSize"+suffix].toDouble()*.003;irisEllipse[2]=irisEllipse[2].toDouble()*factor;irisEllipse[3]=irisEllipse[3].toDouble()*factor;}
                 for(int y=region.top();y<=region.bottom();++y){if(cancelled && cancelled->load())throw EditError("妆发光影已取消");auto* out=reinterpret_cast<float*>(base.scanLine(y-region.y()));for(int x=region.left();x<=region.right();++x){double w=value*coverage(mask,x,y,source_size);if(!effect_mask.isNull())w*=coverage(effect_mask,x,y,source_size);for(int other=0;other<people.size();++other)if(other!=index)w*=1-coverage(bodies[std::size_t(other)],x,y,source_size);if(w==0)continue;auto* pixel=out+(x-region.x())*4;if(pixel[3]<.00001F)continue;const double l=(.2627*pixel[0]+.678*pixel[1]+.0593*pixel[2])/pixel[3];
                     if(root=="makeup.sticker"){const double alpha=sticker.constScanLine(y-region.y())[x-region.x()]/255.*w*.85;for(int c=0;c<3;++c){const double pigment=std::min(1.,std::clamp(color[c].toDouble(),0.,1.)*std::pow(std::clamp(l/.25,0.,1.5),.5));pixel[c]+=float((pigment*pixel[3]-pixel[c])*alpha);}}
                     else if(root=="makeup.freckles"){const double pigment=freckles.constScanLine(y-region.y())[x-region.x()]/255.*w;for(int c=0;c<3;++c)pixel[c]*=float(1-pigment*.65*(1-std::clamp(color[c].toDouble(),0.,1.)));}

@@ -95,19 +95,19 @@ QJsonObject portrait_forehead_volume(const QImage& source,const QJsonObject& per
 }
 QJsonObject portrait_tear_volume(const QImage& source,const QJsonObject& person){
     const auto lm=person["landmarks"].toArray();if(source.isNull() || lm.size()<60)return {};
-    const QSize size=source.size().scaled(1024,1024,Qt::KeepAspectRatio);const auto image=source.scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation).convertToFormat(QImage::Format_RGBA32FPx4);
+    const QSize size=source.size();const auto image=source.scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation).convertToFormat(QImage::Format_RGBA32FPx4);
     const auto automatic=person["settings"].toObject()["automaticMasks"].toObject();const auto skin=decode(automatic,"faceSkin").convertToFormat(QImage::Format_Grayscale8).scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);if(skin.isNull())return {};
     const auto frame=decode(automatic,"eyeglassFrame").convertToFormat(QImage::Format_Grayscale8).scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
     const auto pt=[&](int i){const auto a=lm[i].toArray();return QPointF(a[0].toDouble()*size.width(),a[1].toDouble()*size.height());};
     cv::Mat weights(size.height(),size.width(),CV_32F,cv::Scalar(0)),logs(weights.size(),CV_32F,cv::Scalar(0));
-    for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x){const auto* p=reinterpret_cast<const float*>(image.constScanLine(y))+x*4;if(p[3]<.01F)continue;const double l=(.2627*p[0]+.678*p[1]+.0593*p[2])/p[3];if(!std::isfinite(l) || l<.003 || l>1.2)continue;const double w=smooth((skin.constScanLine(y)[x]/255.-.6)/.35)*(frame.isNull()?1:1-frame.constScanLine(y)[x]/255.);weights.at<float>(y,x)=float(w);logs.at<float>(y,x)=float(w*std::log2(l));}
+    for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x){const auto* p=reinterpret_cast<const float*>(image.constScanLine(y))+x*4;if(p[3]<.01F)continue;const double l=(.2627*p[0]+.678*p[1]+.0593*p[2])/p[3];if(!std::isfinite(l) || l<.003 || l>1.2)continue;const double w=smooth((skin.constScanLine(y)[x]/255.-.3)/.60)*(frame.isNull()?1:1-frame.constScanLine(y)[x]/255.);weights.at<float>(y,x)=float(w);logs.at<float>(y,x)=float(w*std::log2(l));}
     const auto read=[](const cv::Mat& m,QPointF p){const double x=std::clamp(p.x()-.5,0.,double(m.cols-1)),y=std::clamp(p.y()-.5,0.,double(m.rows-1));const int ix=int(x),iy=int(y),jx=std::min(ix+1,m.cols-1),jy=std::min(iy+1,m.rows-1);return (m.at<float>(iy,ix)*(1-x+ix)+m.at<float>(iy,jx)*(x-ix))*(1-y+iy)+(m.at<float>(jy,ix)*(1-x+ix)+m.at<float>(jy,jx)*(x-ix))*(y-iy);};
-    QJsonObject result{{"version",1}};bool any=false;
+    QJsonObject result{{"version",1},{"samplingVersion",2}};bool any=false;
     for(int side=0;side<2;++side){const QString suffix=side==0?".left":".right";const int inner=side==0?42:39,outer=side==0?45:36;
         bool reliable=true;for(int i:{inner,outer}){const auto a=lm[i].toArray();if(a.size()<2 || (a.size()>2 && a[2].toDouble()<.3))reliable=false;}
-        auto axis=pt(outer)-pt(inner);const double width=std::hypot(axis.x(),axis.y());if(!reliable || width<12){result["valid"+suffix]=false;continue;}axis/=width;QPointF down(-axis.y(),axis.x());if(QPointF::dotProduct(pt(8)-pt(27),down)<0)down=-down;
+        auto axis=pt(outer)-pt(inner);const double width=std::hypot(axis.x(),axis.y());if(!reliable || width<6){result["valid"+suffix]=false;continue;}axis/=width;QPointF down(-axis.y(),axis.x());if(QPointF::dotProduct(pt(8)-pt(27),down)<0)down=-down;
         const auto position=[&](double u,double v){return pt(inner)+(axis*u+down*v)*width;};cv::Mat light,weight;const double sigma=std::max(.7,width*.025);cv::GaussianBlur(logs,light,{0,0},sigma);cv::GaussianBlur(weights,weight,{0,0},sigma);
-        const auto luminance=[&](QPointF p,double& value){if(p.x()<1 || p.y()<1 || p.x()>=size.width()-1 || p.y()>=size.height()-1 || read(weight,p)<.65)return false;value=read(light,p)/read(weight,p);return true;};
+        const auto luminance=[&](QPointF p,double& value){if(p.x()<1 || p.y()<1 || p.x()>=size.width()-1 || p.y()>=size.height()-1 || read(weight,p)<.25)return false;value=read(light,p)/read(weight,p);return true;};
         constexpr int count=32;std::array<double,count> curve{},depth{},confidence{};int valid=0;
         // Search a narrow inner-orbital track, below the eyelid/pretarsal bulge.
         // A symmetric normal profile rejects a mere illumination gradient.
@@ -126,7 +126,7 @@ QJsonObject portrait_tear_volume(const QImage& source,const QJsonObject& person)
         QImage gain(size,QImage::Format_Grayscale16);gain.fill(0);const double radius=std::max(.8,width*.07);const QRect box=points.boundingRect().adjusted(-radius,-radius,radius,radius).toAlignedRect().intersected(QRect(QPoint{},size));
         for(int y=box.top();y<=box.bottom();++y)for(int x=box.left();x<=box.right();++x){const QPointF p(x+.5,y+.5);double correction=0;
             for(int i=0;i<count-1;++i){const auto delta=points[i+1]-points[i];const double t=std::clamp(QPointF::dotProduct(p-points[i],delta)/std::max(.001,QPointF::dotProduct(delta,delta)),0.,1.);const auto d=p-(points[i]+delta*t);const double distance=std::hypot(d.x(),d.y());if(distance>=radius)continue;const double edge=smooth((i+t)/3.)*smooth((count-1-i-t)/3.);correction=std::max(correction,((1-t)*depth[i]+t*depth[i+1])*smooth(1-distance/radius)*edge);}
-            correction*=smooth((QPointF::dotProduct(p-pt(inner),down)/width-.22)/.08)*smooth((skin.constScanLine(y)[x]/255.-.6)/.35)*(frame.isNull()?1:1-frame.constScanLine(y)[x]/255.);reinterpret_cast<quint16*>(gain.scanLine(y))[x]=quint16(std::lround(std::clamp(correction*2,0.,1.)*65535));
+            correction*=smooth((QPointF::dotProduct(p-pt(inner),down)/width-.22)/.08)*smooth((skin.constScanLine(y)[x]/255.-.3)/.60)*(frame.isNull()?1:1-frame.constScanLine(y)[x]/255.);reinterpret_cast<quint16*>(gain.scanLine(y))[x]=quint16(std::lround(std::clamp(correction*2,0.,1.)*65535));
         }
         const auto bounds=box.adjusted(-2,-2,2,2).intersected(QRect(QPoint{},size));result["bounds"+suffix]=QJsonArray{double(bounds.x())/size.width(),double(bounds.y())/size.height(),double(bounds.width())/size.width(),double(bounds.height())/size.height()};result["gain"+suffix]=portrait_mask_png(gain);result["curve"+suffix]=path;result["maxStops"+suffix]=maximum;
     }return any?result:QJsonObject{};
@@ -134,14 +134,14 @@ QJsonObject portrait_tear_volume(const QImage& source,const QJsonObject& person)
 static QJsonObject cheek_volume_analysis(const QImage& source,const QJsonObject& person,int regionKind){
     const bool lateral=regionKind==1,orbital=regionKind==2,oral=regionKind==3;
     const auto lm=person["landmarks"].toArray();if(source.isNull() || lm.size()<66)return {};
-    const QSize size=source.size().scaled(768,768,Qt::KeepAspectRatio);
+    const QSize size=source.size();
     const auto image=source.scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation).convertToFormat(QImage::Format_RGBA32FPx4);
     const auto masks=person["settings"].toObject()["automaticMasks"].toObject();
     const auto skin=decode(masks,"faceSkin").convertToFormat(QImage::Format_Grayscale8).scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);if(skin.isNull())return {};
     const auto frame=decode(masks,"eyeglassFrame").convertToFormat(QImage::Format_Grayscale8).scaled(size,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
     const auto pt=[&](int i){const auto a=lm[i].toArray();return QPointF(a[0].toDouble()*size.width(),a[1].toDouble()*size.height());};
-    const auto face=pt(16)-pt(0);const double scale=std::hypot(face.x(),face.y());if(scale<30)return {};
-    QJsonObject result{{"version",1},{"method",oral?"perioral-anatomical-log-basin":orbital?"orbital-anatomical-log-basin":lateral?"cheek-anatomical-log-basin":"malar-anatomical-log-basin"}};bool any=false;
+    const auto face=pt(16)-pt(0);const double scale=std::hypot(face.x(),face.y());if(scale<16)return {};
+    QJsonObject result{{"version",1},{"samplingVersion",2},{"method",oral?"perioral-anatomical-log-basin":orbital?"orbital-anatomical-log-basin":lateral?"cheek-anatomical-log-basin":"malar-anatomical-log-basin"}};bool any=false;
     for(int side=0;side<2;++side){
         const QString suffix=side==0?".left":".right";const int lower=lateral?(side==0?15:1):(side==0?46:41),alar=side==0?35:31,edge=side==0?13:3,lip=side==0?62:58;
         bool reliable=true;for(int i:{lower,alar,edge,lip}){const auto a=lm[i].toArray();if(a.size()<2 || (a.size()>2 && a[2].toDouble()<.3))reliable=false;}if(!reliable){result["valid"+suffix]=false;continue;}
@@ -166,7 +166,7 @@ static QJsonObject cheek_volume_analysis(const QImage& source,const QJsonObject&
             const double weight=smooth(distance/std::max(1.,scale*.035))*smooth((skin.constScanLine(y)[x]/255.-.65)/.30)*(frame.isNull()?1:1-frame.constScanLine(y)[x]/255.);
             region.at<float>(y,x)=float(weight);logs.at<float>(y,x)=float(weight*std::log2(light));visible+=weight;
         }
-        if(visible<std::max(24.,scale*scale*.002)){result["valid"+suffix]=false;continue;}
+        if(visible<std::max(4.,scale*scale*.002)){result["valid"+suffix]=false;continue;}
         cv::Mat weights;cv::GaussianBlur(region,weights,{0,0},std::max(.7,scale*.012));cv::GaussianBlur(logs,logs,{0,0},std::max(.7,scale*.012));
         cv::Vec3d plane(0,0,0);
         for(int iteration=0;iteration<5;++iteration){cv::Matx33d matrix=cv::Matx33d::zeros();cv::Vec3d rhs(0,0,0);

@@ -52,7 +52,10 @@ QImage portrait_nails_region(QImage base,QSize size,const QJsonObject& person,QR
                 const double l=(.2627*pixel[0]+.678*pixel[1]+.0593*pixel[2])/pixel[3];
                 // Original illumination supplies curvature and fine surface texture.
                 // Only existing bright reflections are retained; no painted fake light.
-                const double shade=std::pow(std::clamp(l/reference,0.,4.),.65),highlight=std::clamp((l/reference-1.05)/.35,0.,1.)*std::clamp(l,0.,1.)*std::clamp(params["makeup.nailsGloss"].toDouble()*.01,0.,1.);
+                const bool calibrated=nail["materialVersion"].toInt()>=2;
+                const double shade=std::pow(std::clamp(l/reference,0.,calibrated?1.45:4.),.65);
+                const double reflection=calibrated?std::clamp((l-reference)/std::max(.05,1-reference),0.,1.):std::clamp((l/reference-1.05)/.35,0.,1.)*std::clamp(l,0.,1.);
+                const double highlight=reflection*std::clamp(params["makeup.nailsGloss"].toDouble()*.01,0.,1.);
                 for(int c=0;c<3;++c){const double pigment=std::clamp(color[c].toDouble(),0.,1.)*shade;const double desired=std::min(1.,pigment*(1-highlight)+highlight);pixel[c]+=float((desired*pixel[3]-pixel[c])*a);}
             }
         }

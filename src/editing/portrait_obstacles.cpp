@@ -24,11 +24,11 @@ QJsonObject portrait_scalp_geometry(const QJsonObject& person) {
     QJsonArray line;double minimumX=1,maximumX=-1;
     for(int i=0;i<13;++i){const double x=-.30+i*.05;double last=-2;
         for(double y=-1.1;y<baseline-.04;y+=1./width){
-            if(sample(hair,pixel(x,y))>160 && sample(skinMask,pixel(x,y+.025))>140 && sample(skinMask,pixel(x,y+.05))>140)last=y;
+            if(sample(hair,pixel(x,y))>100 && sample(skinMask,pixel(x,y+.05))>100)last=y;
         }
         if(last>-1.1){line.append(normalized(pixel(x,last)));minimumX=std::min(minimumX,x);maximumX=std::max(maximumX,x);}
     }
-    if(line.size()<6 || maximumX-minimumX<.25)return {{"valid",false},{"reason",QStringLiteral("发际线被遮挡或边界不明确，暂不能自动调整")}};
+    const bool boundaryDetected=line.size()>=3 && maximumX-minimumX>=.15;
     double top=0;int count=0;bool clipped=false;
     for(int y=0;y<hair.height();++y)for(int x=0;x<hair.width();++x){
         if(hair.constScanLine(y)[x]<160)continue;const auto d=cv::Point2f(float(x),float(y))-origin;
@@ -37,7 +37,14 @@ QJsonObject portrait_scalp_geometry(const QJsonObject& person) {
         top=std::min(top,v);++count;clipped|=x<2 || y<2 || x>=hair.width()-2 || y>=hair.height()-2;
     }
     if(count<width*width*.02)return {{"valid",false},{"reason",QStringLiteral("没有足够可见头发，不能自动调整发际线或颅顶")}};
-    return {{"valid",true},{"hairline",line},{"baseline",normalized(pixel(0,baseline))},{"top",normalized(pixel(0,top))},{"cropped",clipped}};
+    if(!boundaryDetected){
+        // Crown/volume only need the visible hair extent. Keep the facial
+        // boundary stable even when fine blond hairs have a weak skin seam.
+        line={};
+        const double seam=baseline+(top-baseline)*.3;
+        for(int i=0;i<13;++i)line.append(normalized(pixel(-.30+i*.05,seam)));
+    }
+    return {{"version",3},{"hairlineDetected",boundaryDetected},{"valid",true},{"hairline",line},{"baseline",normalized(pixel(0,baseline))},{"top",normalized(pixel(0,top))},{"cropped",clipped}};
 }
 QPainterPath portrait_head_outline(const QJsonArray& points,QSize size){
     QPainterPath path;if(points.size()<3)return path;

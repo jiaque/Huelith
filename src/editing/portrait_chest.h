@@ -13,14 +13,15 @@ namespace huelith::editing {
 // or an isotropic inflation. Only the selected outer contour moves.
 class PortraitChest {
 public:
-    PortraitChest(QSize size,const QJsonObject& person,double amount):size_(size),amount_(std::clamp(amount,-1.,1.)){
+    PortraitChest(QSize size,const QJsonObject& person,double amount,int selectedSide=0):size_(size),amount_(std::clamp(amount,-1.,1.)){
         const auto settings=person["settings"].toObject();const auto pose=settings["pose"].toArray(),path=settings["chestContourPath"].toArray();
-        const auto target=path.size()==3?path[1].toArray():settings["chestContour"].toArray();
-        if(target.size()!=2)throw EditError("请先在照片上定位可见胸部衣物外轮廓");
+        auto target=path.size()==3?path[1].toArray():settings["chestContour"].toArray();
+        const bool automatic=target.size()!=2;
         if(person["bodyAmbiguous"].toBool() || pose.size()!=33)throw EditError("人物或肩髋定位不足，不能调整胸部轮廓");
-        const auto point=[&](int i){const auto p=pose[i].toArray();if(p.size()<3 || p[2].toDouble()<.6)throw EditError("肩髋或手臂定位不足，请修正定位");return QPointF(p[0].toDouble()*(size.width()-1),p[1].toDouble()*(size.height()-1));};
+        const auto point=[&](int i){const auto p=pose[i].toArray();if(p.size()<3 || p[2].toDouble()<.25)throw EditError("肩髋或手臂定位不足，请修正定位");return QPointF(p[0].toDouble()*(size.width()-1),p[1].toDouble()*(size.height()-1));};
         const auto left=point(11),right=point(12);origin_=(left+right)*.5;const auto delta=(point(23)+point(24))*.5-origin_;length_=std::hypot(delta.x(),delta.y());
         if(length_<30)throw EditError("可见躯干尺寸不足");axis_=delta/length_;normal_={-axis_.y(),axis_.x()};
+        if(automatic){const auto c=origin_+axis_*(length_*.28);const auto sidePoint=selectedSide==0?left:right;const double sign=QPointF::dotProduct(sidePoint-origin_,normal_)<0?-1:1;const auto q=c+normal_*(sign*QLineF(left,right).length()*.40);target=QJsonArray{q.x()/(size.width()-1),q.y()/(size.height()-1)};}
         const QPointF selected(target[0].toDouble()*(size.width()-1),target[1].toDouble()*(size.height()-1));const auto d=selected-origin_;
         center_=QPointF::dotProduct(d,axis_)/length_;const double n=QPointF::dotProduct(d,normal_);sign_=n<0?-1:1;
         if(center_<.12 || center_>.45 || std::abs(n)<length_*.08)throw EditError("请点选肩线下方、腰部上方的胸部外轮廓，不要点胸口中线");
@@ -42,18 +43,17 @@ public:
             double radius=0;
             if(path.size()==3){const double t=start_+(end_-start_)*i/(count-1);const int segment=t<center_?0:1;const double u=std::clamp((t-pathT[segment])/(pathT[segment+1]-pathT[segment]),0.,1.);radius=pathN[segment]+(pathN[segment+1]-pathN[segment])*u;}
             else for(double r=step;r<length_;r+=step)if(!inside(c+normal_*(sign_*r))){radius=r-step*.5;break;}
-            if(radius<length_*.1 || radius>shoulder*.8)throw EditError("胸部外轮廓与手臂或遮挡相连，请使用手动液化");
+            if(radius<length_*.1)throw EditError("胸部轮廓不可见，请修正位置");
+            radius=std::min(radius,shoulder*.65);
             radii_[i]=radius;maximum=std::max(maximum,radius);
         }
         const double pickedRadius=radius_at(center_);
-        if(std::abs(std::abs(n)-pickedRadius)>std::max(5.,pickedRadius*.15))throw EditError("点选位置不在可见胸部外轮廓上");
+        if(!automatic && std::abs(std::abs(n)-pickedRadius)>std::max(5.,pickedRadius*.15))throw EditError("点选位置不在可见胸部外轮廓上");
         // A connected silhouette can be an arm rather than the torso. Require
         // clearance from the full arm segments, not merely wrist endpoints.
         for(int side=0;side<2;++side){const auto shoulderPoint=point(11+side);if(QPointF::dotProduct(shoulderPoint-origin_,normal_)*sign_<0)continue;
-            for(int segment=0;segment<2;++segment){const auto a=point(11+side+segment*2),b=point(13+side+segment*2),v=b-a;arms_.push_back({a,b});
-                for(int i=0;i<count;++i){const double t=start_+(end_-start_)*i/(count-1);const auto edge=origin_+axis_*(length_*t)+normal_*(sign_*radii_[i]);const double u=std::clamp(QPointF::dotProduct(edge-a,v)/std::max(1.,QPointF::dotProduct(v,v)),0.,1.);
-                    if(QLineF(edge,a+v*u).length()<shoulder*.10)throw EditError("手臂遮挡所选胸部轮廓，请换可见区域或使用手动液化");
-                }
+            for(int segment=0;segment<2;++segment){const auto a=point(11+side+segment*2),b=point(13+side+segment*2);arms_.push_back({a,b});
+
             }
         }
         for(int pass=0;pass<3;++pass){const auto previous=radii_;for(int i=1;i<count-1;++i)radii_[i]=(previous[i-1]+2*previous[i]+previous[i+1])*.25;}

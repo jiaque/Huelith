@@ -83,6 +83,10 @@ private:
     void build_body_parameters();
     void build_hair_parameters();
     void build_makeup_parameters();
+    void build_teeth_parameters();
+    void activate_teeth_brush(int mode=1);
+    void build_eye_parameters();
+    void activate_eye_brush(int mode=1);
     void build_paint_parameters();
     void activate_paint_brush(int mode=1);
     void build_decals(const QString& category);
@@ -195,6 +199,7 @@ private:
     std::vector<QPointF> repair_points_;
     double repair_opacity_{.7};
     QJsonObject repair_live_;
+    QImage repair_input_;
     QPointF repair_offset_;
     QElapsedTimer overlay_clock_;
     QImage source_,preview_;

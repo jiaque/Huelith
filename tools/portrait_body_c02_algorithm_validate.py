@@ -19,8 +19,8 @@ try:
   settings['bodyMaterial']=material;call(op='portrait_geometry',size=size,recipe=base,source=str(source),render=str(OUT/f'line-{material}.png'));im=np.array(Image.open(OUT/f'line-{material}.png')).astype(float);images.append(im)
   delta=abs(im-original);assert delta.max()>1,material;assert delta[np.array(Image.fromarray((skin>0).astype('uint8')*255).filter(ImageFilter.MaxFilter(15)))==0].max()<=1,(material,'clothing changed')
  assert all(np.abs(images[i]-images[j]).sum()>100 for i,j in [(0,1),(1,2),(0,2)])
- # Shared natural combination skips unavailable waist, preserves previous head, then body/face/liquify can alternate.
- settings['parameters']={'head.size':-12};call(op='portrait_window',path=str(source),recipe=base);wait();call(op='portrait_state',workspaceTask=8,select=0,click='portraitBodyNatural');s=wait();params=s['recipe']['people'][0]['settings']['parameters'];assert params['head.size']==-12 and params.get('body.waist',0)==0
+ # Shared natural combination includes the visible waist, preserves previous head, then body/face/liquify can alternate.
+ settings['parameters']={'head.size':-12};call(op='portrait_window',path=str(source),recipe=base);wait();call(op='portrait_state',workspaceTask=8,select=0,click='portraitBodyNatural');s=wait();params=s['recipe']['people'][0]['settings']['parameters'];assert params['head.size']==-12 and params.get('body.waist',0)==9
  call(op='portrait_state',click='portraitPresetApply');wait();call(op='portrait_state',click='portraitBodyGroup4');wait();call(op='portrait_state',bodySide=1,parameter='body.legWidth',value=25);s=wait();assert s['recipe']['people'][0]['settings']['parameters']['body.legWidth.left']==25
  call(op='portrait_state',workspaceTask=3,parameter='face.width',value=12);s=wait();assert s['recipe']['people'][0]['settings']['parameters']['face.width']==12
  call(op='portrait_state',workspaceTask=9,slimMode=1,liquifyTool=0,brushSize=70,paintPath=[[.46,.19],[.465,.19]]);wait();call(op='portrait_state',workspaceTask=8,bodyMode=1,bodyTool=2,parameter='body.manualScale',value=10);s=wait();assert s['recipe']['people'][0]['settings']['parameters']['body.manualScale']==10

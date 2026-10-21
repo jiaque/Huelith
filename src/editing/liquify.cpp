@@ -92,7 +92,7 @@ void liquify_dab(QImage& mesh, QSize size, QPointF from, QPointF to, const Liqui
             if (distance >= 1)
                 continue;
             const double edge =
-                std::clamp((1 - distance) / std::max(.001, 1 - brush.density), 0., 1.);
+                std::clamp((1 - distance) / std::max(.25, 1 - brush.density), 0., 1.);
             const double strength =
                 std::clamp(edge * edge * (3 - 2 * edge) * brush.pressure * amount, 0., 1.);
             auto* p = row + 4 * x;

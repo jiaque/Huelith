@@ -1,5 +1,7 @@
 #include "portrait_dialog.h"
 #include "raw_preview_view.h"
+#include "portrait_controls.h"
+#include "raw_section_header.h"
 #include "huelith/editing/portrait_effects.h"
 #include "huelith/editing/ai_worker.h"
 #include "huelith/editing/healing.h"
@@ -21,10 +23,89 @@
 #include <QFileInfo>
 #include <QDoubleSpinBox>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QSignalBlocker>
 #include <QUuid>
+#include <QTimer>
 
 namespace huelith::desktop {
+void PortraitDialog::activate_eye_brush(int mode){
+    if(selected_<0)return;
+    auto& settings=people_[std::size_t(selected_)].settings;
+    const QString root=property("portraitEyeTarget").toString().isEmpty()?QString("eye.circles"):property("portraitEyeTarget").toString();
+    const QString key=root+(settings["linked"].toBool(true)?QString{}:settings["side"].toInt()==0?".left":".right");
+    activate_hair_brush(key,mode);range_visible_->setChecked(false);setProperty("portraitEyeBrush",mode);
+    const auto params=settings["parameters"].toObject();const QString side=settings["side"].toInt()==0?".left":".right";
+    if(mode==1 && params[root+side].toDouble(params[root].toDouble())==0)set_parameter(root,40);
+}
+void PortraitDialog::build_eye_parameters(){
+    const int panel=navigation_->currentRow();
+    if(panel==11){build_makeup_parameters();return;}
+    details_->hide();if(auto* scope=findChild<QToolButton*>("portraitScopeHeader"))scope->hide();if(auto* sides=findChild<QWidget*>("portraitSides"))sides->show();
+    if(selected_<0){parameter_layout_->addWidget(new QLabel(tr("请先选择人物"),parameter_host_));return;}
+    const auto settings=people_[std::size_t(selected_)].settings;
+    if(panel==1){
+        const QList<QStringList> keys{{"feature.eyeSize","feature.eyeAperture","feature.eyeLength"},{"feature.eyeSpace","feature.eyeHeight","feature.eyeTilt"},{"feature.eyeInnerCorner","feature.eyeOuterCorner","feature.eyeOuterLift","feature.eyeUpperLift","feature.eyeLowerLid"}};
+        const QStringList titles{tr("大小与比例"),tr("位置"),tr("眼角与眼睑")};
+        for(int g=0;g<3;++g){auto h=raw_section_header(parameter_host_,titles[g],QString("portraitEyeShapeGroup%1").arg(g),"portraitEyeShapeEye",g==0);h.enabled->hide();parameter_layout_->addLayout(h.layout);auto* host=new QWidget(parameter_host_);auto* rows=new QVBoxLayout(host);rows->setContentsMargins(0,0,0,0);for(const auto& key:keys[g])if(auto p=editing::portrait_parameter(key))add_parameter_row(rows,key,p->label);parameter_layout_->addWidget(host);host->setVisible(g==0);connect(h.expand,&QToolButton::toggled,host,&QWidget::setVisible);}parameter_layout_->addStretch();return;
+    }
+    const QString analysisKey=people_[std::size_t(selected_)].id.toString()+QString::fromUtf8(QJsonDocument(people_[std::size_t(selected_)].landmarks).toJson(QJsonDocument::Compact));
+    if(!settings["automaticMasks"].toObject().contains("eye.deRed") && !repair_analysis_busy_ && property("portraitEyeAnalysisRequested").toString()!=analysisKey){setProperty("portraitEyeAnalysisRequested",analysisKey);QTimer::singleShot(0,this,&PortraitDialog::analyze_repairs);}
+    const int mode=property("portraitEyeMode").toInt();auto* tabs=new QTabBar(parameter_host_);tabs->setObjectName("portraitEyeModes");tabs->addTab(tr("自动"));tabs->addTab(tr("手动修正"));tabs->setExpanding(true);tabs->setCurrentIndex(mode);parameter_layout_->addWidget(tabs);
+    connect(tabs,&QTabBar::currentChanged,this,[this](int i){finish_brush_gesture();finish_gesture();setProperty("portraitEyeMode",i);range_mode_=repair_mode_=0;range_visible_->setChecked(false);view_->set_tool(0);if(i==1)activate_eye_brush();build_parameters();});
+    if(!settings["automaticMasks"].toObject().contains("eye.deRed")){auto* retry=new QToolButton(parameter_host_);retry->setObjectName("portraitEyeRetry");retry->setText(tr("重新识别眼部范围"));retry->setEnabled(!repair_analysis_busy_);parameter_layout_->addWidget(retry);connect(retry,&QToolButton::clicked,this,&PortraitDialog::analyze_repairs);}
+    const QStringList keys{"eye.circles","eye.bags","eye.white","eye.deRed","eye.red"},labels{tr("黑眼圈"),tr("眼袋"),tr("眼白亮度"),tr("眼白去红"),tr("闪光红眼")};
+    if(mode==1){
+        auto* choose=new QComboBox(parameter_host_);choose->setObjectName("portraitEyeTarget");for(int i=0;i<keys.size();++i)choose->addItem(labels[i],keys[i]);choose->setCurrentIndex(std::max(0,int(keys.indexOf(property("portraitEyeTarget").toString()))));parameter_layout_->addWidget(choose);
+        const QString target=choose->currentData().toString()+(settings["linked"].toBool(true)?QString{}:settings["side"].toInt()==0?".left":".right");
+        if(range_mode_ && range_key_->currentData().toString()!=target){activate_hair_brush(target,range_mode_);range_visible_->setChecked(false);}
+        connect(choose,&QComboBox::activated,this,[this,choose](int i){finish_brush_gesture();setProperty("portraitEyeTarget",choose->itemData(i));activate_eye_brush();build_parameters();});
+        auto* host=new QWidget(parameter_host_);auto* row=new QHBoxLayout(host);row->setContentsMargins(0,8,0,8);for(int m:{1,2}){auto* b=new QPushButton(m==1?tr("补选"):tr("擦除"),host);b->setObjectName(m==1?"portraitEyePaint":"portraitEyeErase");b->setCheckable(true);b->setChecked(property("portraitEyeBrush").toInt()==m);b->setStyleSheet("QPushButton:checked{background:#2f80ed;color:white;}");b->setMinimumHeight(36);row->addWidget(b);connect(b,&QPushButton::clicked,this,[this,m]{activate_eye_brush(m);build_parameters();});}parameter_layout_->addWidget(host);
+        auto size=portrait_integer_row(parameter_host_,tr("大小"),"portraitEyeSize",1,500,brush_size_->value());parameter_layout_->addWidget(size.host);connect(size.slider,&QSlider::valueChanged,brush_size_,&QSlider::setValue);add_parameter_row(parameter_layout_,choose->currentData().toString(),tr("程度"));
+        auto* hint=new QLabel(choose->currentData().toString()=="eye.red"?tr("点击有闪光红眼的瞳孔；空格临时抓手"):tr("在当前部位涂抹；空格临时抓手"),parameter_host_);hint->setWordWrap(true);parameter_layout_->addWidget(hint);
+    }else{
+        const QStringList titles{tr("眼周"),tr("眼白"),tr("红眼")};
+        for(int g=0;g<3;++g){auto h=raw_section_header(parameter_host_,titles[g],QString("portraitEyeGroup%1").arg(g),"portraitEyeGroupEye",g==0);h.enabled->hide();parameter_layout_->addLayout(h.layout);auto* host=new QWidget(parameter_host_);auto* rows=new QVBoxLayout(host);rows->setContentsMargins(0,0,0,0);for(int i=g==0?0:g==1?2:4;i<(g==0?2:g==1?4:5);++i)add_parameter_row(rows,keys[i],labels[i]);
+            if(g==0){auto* b=new QToolButton(host);b->setText(tr("眼纹修复…"));b->setObjectName("portraitEyeWrinkles");rows->addWidget(b);connect(b,&QToolButton::clicked,this,[this]{setProperty("portraitWrinkleMode",0);if(auto* tasks=findChild<QListWidget*>("portraitTasks"))for(int i=0;i<tasks->count();++i)if(tasks->item(i)->data(Qt::UserRole).toInt()==6){tasks->setCurrentRow(i);break;}});}
+            if(g==2){auto* note=new QLabel(settings["redEyeStatus"].toString(tr("正在检查闪光红眼…")),host);note->setWordWrap(true);rows->addWidget(note);}parameter_layout_->addWidget(host);host->setVisible(g==0);connect(h.expand,&QToolButton::toggled,host,&QWidget::setVisible);
+        }
+    }
+    parameter_layout_->addStretch();
+}
+void PortraitDialog::activate_teeth_brush(int mode){
+    if(selected_<0)return;
+    activate_hair_brush("teeth.scope",mode);range_visible_->setChecked(false);
+    setProperty("portraitTeethBrush",mode);
+    auto& settings=people_[std::size_t(selected_)].settings;
+    if(mode==1 && settings["parameters"].toObject()["teeth.yellow"].toDouble()==0 && settings["parameters"].toObject()["teeth.light"].toDouble()==0 && settings["parameters"].toObject()["teeth.natural"].toDouble()==0){
+        finish_gesture();gesture_=true;set_parameter("teeth.yellow",25);set_parameter("teeth.light",15);finish_gesture();
+    }
+    settings["teethColorVersion"]=3;
+}
+void PortraitDialog::build_teeth_parameters(){
+    details_->hide();if(auto* scope=findChild<QToolButton*>("portraitScopeHeader"))scope->hide();
+    if(auto* sides=findChild<QWidget*>("portraitSides"))sides->hide();
+    const int mode=property("portraitTeethMode").toInt();
+    auto* tabs=new QTabBar(parameter_host_);tabs->setObjectName("portraitTeethTabs");tabs->addTab(tr("自动"));tabs->addTab(tr("手动"));tabs->setExpanding(true);tabs->setCurrentIndex(mode);parameter_layout_->addWidget(tabs);
+    connect(tabs,&QTabBar::currentChanged,this,[this](int i){finish_brush_gesture();finish_gesture();setProperty("portraitTeethMode",i);range_mode_=repair_mode_=0;range_visible_->setChecked(false);view_->set_tool(0);if(i==1)activate_teeth_brush();build_parameters();});
+    if(selected_<0){parameter_layout_->addWidget(new QLabel(tr("请先选择人物"),parameter_host_));return;}
+    const auto settings=people_[std::size_t(selected_)].settings;
+    const auto mask=editing::portrait_effect_mask(editing::portrait_person_json(people_[std::size_t(selected_)]),"teeth.yellow",{256,256});
+    bool found=false;for(int y=0;y<mask.height()&&!found;++y)for(int x=0;x<mask.width();++x)if(mask.constScanLine(y)[x]>20){found=true;break;}
+    auto manual=[this,tabs]{tabs->setCurrentIndex(1);};
+    if(mode==0){
+        auto* status=new QLabel(found?tr("已识别牙齿范围"):settings["teethStatus"].toString(tr("正在识别牙齿范围…")),parameter_host_);status->setWordWrap(true);status->setObjectName("portraitTeethStatus");parameter_layout_->addWidget(status);
+        if(!found){auto* b=new QToolButton(parameter_host_);b->setObjectName("portraitTeethManual");b->setText(tr("手动涂抹"));parameter_layout_->addWidget(b);connect(b,&QToolButton::clicked,this,manual);parameter_layout_->addStretch();return;}
+    }else{
+        auto* host=new QWidget(parameter_host_);auto* row=new QHBoxLayout(host);row->setContentsMargins(0,8,0,8);
+        for(int m:{1,2}){auto* b=new QPushButton(m==1?tr("涂抹"):tr("擦除"),host);b->setObjectName(m==1?"portraitTeethPaint":"portraitTeethErase");b->setCheckable(true);b->setChecked(property("portraitTeethBrush").toInt()==m);b->setMinimumHeight(36);b->setStyleSheet("QPushButton:checked{background:#2f80ed;color:white;}");row->addWidget(b);connect(b,&QPushButton::clicked,this,[this,m]{activate_teeth_brush(m);build_parameters();});}parameter_layout_->addWidget(host);
+        auto size=portrait_integer_row(parameter_host_,tr("大小"),"portraitTeethSize",1,500,brush_size_->value());parameter_layout_->addWidget(size.host);connect(size.slider,&QSlider::valueChanged,brush_size_,&QSlider::setValue);
+    }
+    add_parameter_row(parameter_layout_,"teeth.yellow",tr("去黄"));add_parameter_row(parameter_layout_,"teeth.light",tr("提亮"));
+    if(mode==0){add_parameter_row(parameter_layout_,"teeth.natural",tr("自然色"));auto* b=new QToolButton(parameter_host_);b->setText(tr("修正范围"));b->setObjectName("portraitTeethCorrect");parameter_layout_->addWidget(b);connect(b,&QToolButton::clicked,this,manual);}
+    else{auto* content=new QWidget(parameter_host_);auto* rows=new QVBoxLayout(content);rows->setContentsMargins(0,0,0,0);add_parameter_row(rows,"teeth.natural",tr("自然色"));auto feather=portrait_integer_row(content,tr("羽化"),"portraitTeethFeather",0,100,brush_feather_->value());rows->addWidget(feather.host);connect(feather.slider,&QSlider::valueChanged,brush_feather_,&QSlider::setValue);auto h=raw_section_header(parameter_host_,tr("自然色与羽化"),"portraitTeethDetails","portraitTeethDetailsEye",false);h.enabled->hide();parameter_layout_->addLayout(h.layout);parameter_layout_->addWidget(content);content->hide();connect(h.expand,&QToolButton::toggled,content,&QWidget::setVisible);}
+    parameter_layout_->addStretch();
+}
 QPointF PortraitDialog::source_position(QPointF scene) const {
     QPointF p(scene.x()/preview_.width(),scene.y()/preview_.height());const auto mesh=(nail_drawing_ || repair_drawing_ || repair_source_dragging_ || placement_key_=="head:outline" || placement_key_=="body:manualSlim" || placement_key_=="body:manualScale" || placement_key_=="body:manualDistort")?painting_mesh_:editing::portrait_deformation(source_.size(),recipe());
     if(!mesh.isNull()){const auto* row=reinterpret_cast<const float*>(mesh.constScanLine(std::clamp(int(p.y()*(mesh.height()-1)),0,mesh.height()-1)))+std::clamp(int(p.x()*(mesh.width()-1)),0,mesh.width()-1)*4;p+=QPointF(row[0],row[1]);}return {std::clamp(p.x(),0.,1.),std::clamp(p.y(),0.,1.)};
@@ -157,7 +238,7 @@ bool PortraitDialog::repair_event(QEvent* event) try {
     }
     if((repair_mode_>0 || repair_selected_>=0 || range_mode_>0) && type==QEvent::MouseButtonPress && mouse->button()==Qt::LeftButton && (mouse->modifiers().testFlag(Qt::AltModifier) || property("portraitConcealSampling").toBool())){
         setProperty("portraitConcealSampling",false);const auto p=source_position(scene);if(panel==7 && range_mode_>0 && range_key_->currentData().toString()=="repair.conceal"){const int x=std::min(source_.width()-1,int(p.x()*source_.width())),y=std::min(source_.height()-1,int(p.y()*source_.height()));const auto* pixel=reinterpret_cast<const float*>(source_.constScanLine(y))+x*4;if(pixel[3]>.00001F){people_[std::size_t(selected_)].settings["concealColor"]=QJsonArray{pixel[0]/pixel[3],pixel[1]/pixel[3],pixel[2]/pixel[3]};remember();build_parameters();status_->setText(tr("已取遮瑕颜色；涂选需要协调的范围"));}return true;}
-        repair_source_=p;repair_has_source_=true;setProperty("portraitCloneOffsetValid",false);if(repair_selected_>=0){auto& s=people_[std::size_t(selected_)].settings;auto a=s["repairs"].toArray();if(repair_selected_<a.size()){auto object=a[repair_selected_].toObject();auto healing=object;healing.remove("kind");healing.remove("id");healing.remove("wrinkleMethod");healing.remove("makeupPart");healing.remove("validatedCandidateCoverage");healing.remove("hairSourceAngle");healing.remove("hairSourceScale");auto stroke=editing::healing_from_json(healing);const auto offset=p-stroke.points.front();for(auto& value:stroke.source_offsets)value+=offset-stroke.offset;stroke.offset=offset;auto updated=object.contains("makeupPart")?editing::portrait_makeup_repair(linear_preview_,editing::portrait_person_json(people_[std::size_t(selected_)]),editing::healing_json(stroke),true):editing::healing_json(stroke);updated["kind"]=object["kind"];updated["id"]=object["id"];for(auto key:{"hairSourceAngle","hairSourceScale"})if(object.contains(key))updated[key]=object[key];if(object.contains("validatedCandidateCoverage"))updated["validatedCandidateCoverage"]=object["validatedCandidateCoverage"];a[repair_selected_]=updated;s["repairs"]=a;remember();update_repair_overlay();}}update_hair_source_toolbar();status_->setText(tr("取样来源已设置"));return true;
+        setProperty("portraitHairAutomaticSource",false);repair_source_=p;repair_has_source_=true;setProperty("portraitCloneOffsetValid",false);if(repair_selected_>=0){auto& s=people_[std::size_t(selected_)].settings;auto a=s["repairs"].toArray();if(repair_selected_<a.size()){auto object=a[repair_selected_].toObject();auto healing=object;healing.remove("kind");healing.remove("id");healing.remove("wrinkleMethod");healing.remove("makeupPart");healing.remove("validatedCandidateCoverage");healing.remove("hairSourceAngle");healing.remove("hairSourceScale");healing.remove("afterStyle");healing.remove("imageRepair");auto stroke=editing::healing_from_json(healing);const auto offset=p-stroke.points.front();for(auto& value:stroke.source_offsets)value+=offset-stroke.offset;stroke.offset=offset;auto updated=object.contains("makeupPart")?editing::portrait_makeup_repair(linear_preview_,editing::portrait_person_json(people_[std::size_t(selected_)]),editing::healing_json(stroke),true):editing::healing_json(stroke);updated["kind"]=object["kind"];updated["id"]=object["id"];for(auto key:{"hairSourceAngle","hairSourceScale","afterStyle","imageRepair"})if(object.contains(key))updated[key]=object[key];if(object.contains("validatedCandidateCoverage"))updated["validatedCandidateCoverage"]=object["validatedCandidateCoverage"];a[repair_selected_]=updated;s["repairs"]=a;remember();update_repair_overlay();}}update_hair_source_toolbar();status_->setText(tr("取样来源已设置"));return true;
     }
     if(panel==7 && range_mode_==1 && range_key_->currentData().toString()=="repair.conceal" && type==QEvent::MouseButtonPress && mouse->button()==Qt::LeftButton){
         auto& settings=people_[std::size_t(selected_)].settings;
@@ -166,20 +247,25 @@ bool PortraitDialog::repair_event(QEvent* event) try {
     }
     if(repair_mode_==0)return false;
     if(type==QEvent::MouseMove){QPainterPath path;path.addEllipse(scene,brush_size_->value()*.5*preview_.width()/source_.width(),brush_size_->value()*.5*preview_.width()/source_.width());if(repair_has_source_){const auto normalized=repair_mode_==5 && property("portraitCloneOffsetValid").toBool()?source_position(scene)+repair_offset_:repair_source_;const auto origin=repair_scene_position(normalized);const double r=5/view_->transform().m11();path.moveTo(origin-QPointF(r,0));path.lineTo(origin+QPointF(r,0));path.moveTo(origin-QPointF(0,r));path.lineTo(origin+QPointF(0,r));}overlay_->setPath(path);}
-    if(type==QEvent::MouseButtonPress && mouse->button()==Qt::LeftButton){if((repair_mode_==4 || repair_mode_==5) && !repair_has_source_){status_->setText(tr("请先 Alt 单击指定取样来源"));return true;}view_->setFocus();view_->viewport()->grabMouse();repair_drawing_=true;repair_live_=QJsonObject{};repair_points_.clear();repair_selected_=-1;painting_mesh_=editing::portrait_deformation(source_.size(),recipe());}
+    if(type==QEvent::MouseButtonPress && mouse->button()==Qt::LeftButton){if(repair_mode_==4 && !repair_has_source_){
+        const auto target=source_position(scene);const auto hair=editing::portrait_effect_mask(editing::portrait_person_json(people_[std::size_t(selected_)]),"hair.smooth",preview_.size());
+        double best=1e30;QPointF candidate;const double radius=brush_size_->value()*.5;
+        for(int y=1;y<hair.height()-1;y+=2)for(int x=1;x<hair.width()-1;x+=2){if(hair.constScanLine(y)[x]<220)continue;const QPointF q(double(x)/hair.width(),double(y)/hair.height());const double distance=std::hypot((q.x()-target.x())*source_.width(),(q.y()-target.y())*source_.height());if(distance<radius*.8 || distance>radius*6 || distance>=best)continue;const int rx=std::max(1,int(radius*.6*hair.width()/source_.width())),ry=std::max(1,int(radius*.6*hair.height()/source_.height()));if(x<rx || y<ry || x+rx>=hair.width() || y+ry>=hair.height())continue;if(hair.constScanLine(y-ry)[x]<180 || hair.constScanLine(y+ry)[x]<180 || hair.constScanLine(y)[x-rx]<180 || hair.constScanLine(y)[x+rx]<180)continue;best=distance;candidate=q;}
+        if(best<1e30){repair_source_=candidate;repair_has_source_=true;setProperty("portraitHairAutomaticSource",true);}
+    }if((repair_mode_==4 || repair_mode_==5) && !repair_has_source_){status_->setText(tr("请先 Alt 单击指定取样来源"));return true;}view_->setFocus();view_->viewport()->grabMouse();repair_input_=editing::portrait_color_region(linear_preview_,recipe(),linear_preview_.rect(),1);repair_drawing_=true;repair_live_=QJsonObject{};repair_points_.clear();repair_selected_=-1;painting_mesh_=editing::portrait_deformation(source_.size(),recipe());}
     if(!repair_drawing_)return false;
     const auto p=source_position(scene);if(repair_points_.empty() || QLineF(repair_points_.back(),p).length()>.0002)repair_points_.push_back(p);
     editing::HealingStroke stroke;stroke.clone=repair_mode_==4 || repair_mode_==5;stroke.points=repair_points_;stroke.radius=brush_size_->value()*.5/std::min(source_.width(),source_.height());stroke.feather=brush_feather_->value()*.01;stroke.opacity=repair_opacity_;
     if((repair_mode_==1 || repair_mode_==6) && !repair_has_source_){
-        const auto skin=editing::portrait_effect_mask(editing::portrait_person_json(people_[std::size_t(selected_)]),"skin",linear_preview_.size().scaled(768,768,Qt::KeepAspectRatio));
-        try{stroke=editing::automatic_healing_path(linear_preview_,stroke,skin,true);}
+        const auto skin=(property("portraitWorkspaceTask").toInt()==10?QImage{}:editing::portrait_effect_mask(editing::portrait_person_json(people_[std::size_t(selected_)]),"skin",linear_preview_.size().scaled(768,768,Qt::KeepAspectRatio)));
+        try{stroke=editing::automatic_healing_path(repair_input_,stroke,skin,true);}
         catch(const editing::EditError&){if(repair_mode_!=6)throw;
             // A narrow eye-corner path may have no smoothly drifting source.
             // Try one coherent source footprint for the complete stroke instead.
-            stroke.offset=editing::automatic_healing_offset(linear_preview_,stroke,0,skin,nullptr,true,true);
+            stroke.offset=editing::automatic_healing_offset(repair_input_,stroke,0,skin,nullptr,true,true);
         }repair_offset_=stroke.offset;
     }
-    else if(repair_live_.isEmpty() && !(repair_mode_==5 && property("portraitCloneOffsetValid").toBool()))repair_offset_=repair_has_source_?repair_source_-stroke.points.front():(repair_mode_==2 || repair_mode_==3)?QPointF{}:editing::automatic_healing_offset(linear_preview_,stroke,0,editing::portrait_effect_mask(editing::portrait_person_json(people_[std::size_t(selected_)]),"skin",linear_preview_.size().scaled(768,768,Qt::KeepAspectRatio)));
+    else if(repair_live_.isEmpty() && !(repair_mode_==5 && property("portraitCloneOffsetValid").toBool()))repair_offset_=repair_has_source_?repair_source_-stroke.points.front():(repair_mode_==2 || repair_mode_==3)?QPointF{}:editing::automatic_healing_offset(repair_input_,stroke,0,(property("portraitWorkspaceTask").toInt()==10?QImage{}:editing::portrait_effect_mask(editing::portrait_person_json(people_[std::size_t(selected_)]),"skin",linear_preview_.size().scaled(768,768,Qt::KeepAspectRatio))));
     if(repair_mode_==5){
         const auto origin=stroke.points.back()+repair_offset_;
         if(origin.x()<0 || origin.y()<0 || origin.x()>=1 || origin.y()>=1)throw editing::EditError("取样来源超出图像，请 Alt 重新取样");
@@ -187,8 +273,8 @@ bool PortraitDialog::repair_event(QEvent* event) try {
         if(pixel[3]<.001F)throw editing::EditError("取样来源透明，请 Alt 选择有内容的位置");
         setProperty("portraitCloneOffsetValid",true);
     }
-    stroke.offset=repair_offset_;auto input=editing::healing_json(stroke);if(repair_mode_==3 && property("portraitWorkspaceTask").toInt()==5)input["requestedPart"]=QStringList{"lip","brow","shadow"}[std::clamp(property("portraitMakeupRepairPart").toInt(),0,2)];auto object=repair_mode_==3?editing::portrait_makeup_repair(linear_preview_,editing::portrait_person_json(people_[std::size_t(selected_)]),input,repair_has_source_):input;if(repair_mode_==3 && repair_live_.isEmpty() && !repair_has_source_)brush_size_->setValue(std::max(1,int(std::round(object["radius"].toDouble()*std::min(source_.width(),source_.height())*2))));object["id"]=repair_live_.isEmpty()?QUuid::createUuid().toString(QUuid::WithoutBraces):repair_live_["id"].toString();object["kind"]=(repair_mode_==2 || repair_mode_==6)?"wrinkle":repair_mode_==3?"makeup":repair_mode_==4?"hairline":"heal";if(repair_mode_==2)object["wrinkleMethod"]="lighting-v2";if(repair_mode_==4){object["hairSourceAngle"]=property("portraitHairSourceAngle").toDouble();object["hairSourceScale"]=property("portraitHairSourceScale").isValid()?property("portraitHairSourceScale").toDouble()*.01:1.;}repair_live_=object;schedule_preview();
-    if(type==QEvent::MouseButtonRelease){repair_drawing_=false;view_->viewport()->releaseMouse();auto& settings=people_[std::size_t(selected_)].settings;auto repairs=settings["repairs"].toArray();repairs.append(object);settings["repairs"]=repairs;repair_selected_=-1;repair_live_=QJsonObject{};remember();build_parameters();refresh_ranges();status_->setText(repair_mode_==2?tr("已应用明暗淡化，可继续沿暗纹涂抹"):tr("已应用笔画；可继续涂抹，Alt 单击为下一笔重新取样"));}
+    stroke.offset=repair_offset_;auto input=editing::healing_json(stroke);if(repair_mode_==3 && property("portraitWorkspaceTask").toInt()==5)input["requestedPart"]=QStringList{"lip","brow","shadow"}[std::clamp(property("portraitMakeupRepairPart").toInt(),0,2)];auto object=repair_mode_==3?editing::portrait_makeup_repair(linear_preview_,editing::portrait_person_json(people_[std::size_t(selected_)]),input,repair_has_source_):input;if(repair_mode_==3 && repair_live_.isEmpty() && !repair_has_source_)brush_size_->setValue(std::max(1,int(std::round(object["radius"].toDouble()*std::min(source_.width(),source_.height())*2))));object["id"]=repair_live_.isEmpty()?QUuid::createUuid().toString(QUuid::WithoutBraces):repair_live_["id"].toString();object["afterStyle"]=repair_mode_!=4;object["imageRepair"]=property("portraitWorkspaceTask").toInt()==10;object["kind"]=(repair_mode_==2 || repair_mode_==6)?"wrinkle":repair_mode_==3?"makeup":repair_mode_==4?"hairline":"heal";if(repair_mode_==2)object["wrinkleMethod"]="lighting-v2";if(repair_mode_==4){object["hairSourceAngle"]=property("portraitHairSourceAngle").toDouble();object["hairSourceScale"]=property("portraitHairSourceScale").isValid()?property("portraitHairSourceScale").toDouble()*.01:1.;}repair_live_=object;schedule_preview();
+    if(type==QEvent::MouseButtonRelease){repair_drawing_=false;if(property("portraitHairAutomaticSource").toBool()){repair_has_source_=false;setProperty("portraitHairAutomaticSource",false);}view_->viewport()->releaseMouse();auto& settings=people_[std::size_t(selected_)].settings;auto repairs=settings["repairs"].toArray();repairs.append(object);settings["repairs"]=repairs;repair_selected_=-1;repair_live_=QJsonObject{};remember();build_parameters();refresh_ranges();status_->setText(repair_mode_==2?tr("已应用明暗淡化，可继续沿暗纹涂抹"):tr("已应用笔画；可继续涂抹，Alt 单击为下一笔重新取样"));}
     return true;
 }catch(const std::exception& error){if(repair_source_dragging_){repair_source_dragging_=false;remember();}repair_drawing_=false;repair_live_=QJsonObject{};view_->viewport()->releaseMouse();schedule_preview();status_->setText(QString::fromUtf8(error.what()));return true;}
 }

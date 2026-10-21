@@ -106,7 +106,7 @@ QJsonObject portrait_ui_command(const QJsonObject& o) {
         window->setProperty("modelDirectory",o["models"].toString());window->show();
     }
     if(!window)throw huelith::editing::EditError("portrait window missing");
-    if(o.contains("workspaceTask"))window->findChild<QListWidget*>("portraitTasks")->setCurrentRow(o["workspaceTask"].toInt());
+    if(o.contains("workspaceTask")){auto* tasks=window->findChild<QListWidget*>("portraitTasks");for(int i=0;i<tasks->count();++i)if(tasks->item(i)->data(Qt::UserRole).toInt()==o["workspaceTask"].toInt()){tasks->setCurrentRow(i);break;}}
     if(o.contains("resize")){const auto size=o["resize"].toArray();window->resize(size[0].toInt(),size[1].toInt());}
     if(o.contains("comparePressed")){auto* b=window->findChild<QToolButton*>("portraitCompare");QMetaObject::invokeMethod(b,o["comparePressed"].toBool()?"pressed":"released",Qt::DirectConnection);}
     if(o.contains("dragParameter")){
@@ -140,8 +140,9 @@ QJsonObject portrait_ui_command(const QJsonObject& o) {
     if(o.contains("wrinkleMode"))window->findChild<QTabBar*>("portraitWrinkleTabs")->setCurrentIndex(o["wrinkleMode"].toInt());
     if(o.contains("eraseMode"))window->findChild<QTabBar*>("portraitEraseTabs")->setCurrentIndex(o["eraseMode"].toInt());
     for(const auto& entry:QList<QPair<QString,QString>>{{"bodyMode","portraitBodyTabs"},{"bodyTool","portraitBodyManualTabs"},{"bodySide","portraitBodySide"}})if(o.contains(entry.first)){auto* tabs=window->findChild<QTabBar*>(entry.second);if(!tabs)throw huelith::editing::EditError("body tabs missing");tabs->setCurrentIndex(o[entry.first].toInt());}
-    for(const auto& entry:QList<QPair<QString,QString>>{{"makeupPage","portraitMakeupPages"},{"paintType","portraitPaintTabs"},{"paintLightMode","portraitPaintLightTabs"},{"hairColorFamily","portraitHairColorFamily"},{"hairPage","portraitHairTabs"},{"hairDyeMode","portraitHairDyeTabs"}})if(o.contains(entry.first)){auto* tabs=window->findChild<QTabBar*>(entry.second);if(!tabs)throw huelith::editing::EditError("hair tabs missing");tabs->setCurrentIndex(o[entry.first].toInt());}
+    for(const auto& entry:QList<QPair<QString,QString>>{{"eyeMode","portraitEyeModes"},{"teethMode","portraitTeethTabs"},{"makeupPage","portraitMakeupPages"},{"paintType","portraitPaintTabs"},{"paintLightMode","portraitPaintLightTabs"},{"hairColorFamily","portraitHairColorFamily"},{"hairPage","portraitHairTabs"},{"hairDyeMode","portraitHairDyeTabs"}})if(o.contains(entry.first)){auto* tabs=window->findChild<QTabBar*>(entry.second);if(!tabs)throw huelith::editing::EditError("hair tabs missing");tabs->setCurrentIndex(o[entry.first].toInt());}
     if(o.contains("oilMode"))window->findChild<QTabBar*>("portraitOilTabs")->setCurrentIndex(o["oilMode"].toInt());
+    if(o.contains("eyeTarget")){auto* box=window->findChild<QComboBox*>("portraitEyeTarget");box->setCurrentIndex(o["eyeTarget"].toInt());QMetaObject::invokeMethod(box,"activated",Q_ARG(int,box->currentIndex()));}
     if(o.contains("skinMode"))window->findChild<QTabBar*>("portraitSkinTabs")->setCurrentIndex(o["skinMode"].toInt());
     if(o.contains("smoothTarget"))window->findChild<QTabBar*>("portraitSmoothTarget")->setCurrentIndex(o["smoothTarget"].toInt());
     if(o.contains("smoothMode"))window->findChild<QTabBar*>("portraitSmoothMode")->setCurrentIndex(o["smoothMode"].toInt());
@@ -254,6 +255,13 @@ QJsonObject portrait_ui_command(const QJsonObject& o) {
         auto* view=window->findChild<QGraphicsView*>("portraitView");for(auto* item:view->scene()->items())if(item->data(0).toString()=="portraitCursor"){const auto rect=static_cast<QGraphicsPathItem*>(item)->path().boundingRect();state["brushCircleSceneDiameter"]=rect.width();state["brushCircleScreenDiameter"]=rect.width()*view->transform().m11();}state["previewWidth"]=view->scene()->sceneRect().width();
     }
     state["paintEventMilliseconds"]=window->property("paintEventMilliseconds").toJsonArray();state["paintFrames"]=window->property("paintFrames").toJsonArray();if(o["paletteState"].toBool())state["paletteEntries"]=QJsonDocument::fromJson(QSettings().value("portrait/colors").toByteArray()).array();state["visible"]=window->isVisible();state["result"]=window->result();state["dragFrames"]=window->property("dragFrames").toJsonArray();state["windowIcon"]=!window->windowIcon().isNull();state["modal"]=QApplication::activeModalWidget()!=nullptr;state["dpr"]=window->devicePixelRatioF();auto* accept=window->findChild<QPushButton*>("portraitAccept");const auto accept_rect=QRect(accept->mapTo(window,QPoint{}),accept->size());state["acceptVisible"]=accept->isVisible() && window->rect().contains(accept_rect);
+    if(o["cardLayout"].toBool()){
+        QJsonArray cards,headings;
+        for(auto* b:window->findChildren<QToolButton*>())if(b->isVisible()){
+            if(b->toolButtonStyle()==Qt::ToolButtonTextUnderIcon && !b->icon().isNull())cards.append(QJsonObject{{"name",b->objectName()},{"text",b->text()},{"width",b->width()},{"height",b->height()},{"requiredWidth",std::max(b->iconSize().width(),b->fontMetrics().horizontalAdvance(b->text()))+12},{"requiredHeight",b->iconSize().height()+b->fontMetrics().height()+16}});
+            if(b->objectName().startsWith("portraitMakeupGroup") && !b->objectName().contains("Eye"))headings.append(QJsonObject{{"name",b->objectName()},{"y",b->mapTo(window,QPoint{}).y()}});
+        }state["cards"]=cards;state["makeupHeadings"]=headings;
+    }
     if(o.contains("control")){auto* w=window->findChild<QWidget*>(o["control"].toString());if(w){QJsonObject c{{"visible",w->isVisible()},{"enabled",w->isEnabled()}};if(auto* b=qobject_cast<QAbstractButton*>(w))c["checked"]=b->isChecked();if(auto* spin=qobject_cast<QDoubleSpinBox*>(w))c["value"]=spin->value();state["control"]=c;}}
 
     if(o.contains("mask")){const auto person=state["recipe"].toObject()["people"].toArray()[state["selected"].toInt()].toObject();huelith::editing::portrait_effect_mask(person,o["maskKey"].toString("skin.smooth"),{768,768}).save(o["mask"].toString());}

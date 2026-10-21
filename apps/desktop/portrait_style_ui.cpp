@@ -183,15 +183,22 @@ void PortraitDialog::build_style(int panel) {
     }
     if(panel==11 && section==10){
         if(selected_>=0 && (people_[std::size_t(selected_)].unmatched || people_[std::size_t(selected_)].match_ambiguous)){parameter_layout_->addWidget(new QLabel(tr("请先确认当前照片的人物关联，再编辑甲面"),parameter_host_));return;}
-        auto* note=new QLabel(tr("自动识别可见甲面后逐个上色；漏检可直接圈选补充，边缘不准可重绘或擦除。"),parameter_host_);note->setWordWrap(true);parameter_layout_->addWidget(note);
+        const auto nails=settings["nails"].toArray();
+        auto* note=new QLabel(nails.isEmpty()?tr("未识别到甲面，可识别或圈选补充"):tr("点选画面中的甲面后选色"),parameter_host_);note->setWordWrap(true);parameter_layout_->addWidget(note);
         button(tr("识别甲面"),"portraitNailDetect",[this]{analyze_nails();});
-        button(tr("圈选一个甲面"),"portraitNailOutline",[this]{finish_brush_gesture();setProperty("portraitNailReplace",false);placement_key_="nail:outline";range_mode_=repair_mode_=0;locate_->setChecked(false);view_->set_tool(-1);update_overlay();status_->setText(tr("沿甲面边缘连续拖动一圈，松开完成；空格临时抓手"));});
-        auto* list=new QComboBox(parameter_host_);list->setObjectName("portraitNailSelection");const auto nails=settings["nails"].toArray();for(int i=0;i<nails.size();++i)list->addItem(tr("指甲 %1").arg(i+1),i);list->setCurrentIndex(std::clamp(property("portraitNailIndex").toInt(),0,std::max(0,int(nails.size())-1)));parameter_layout_->addWidget(list);connect(list,&QComboBox::activated,this,[this](int i){setProperty("portraitNailIndex",i);});
-        button(tr("重绘当前甲面"),"portraitNailRedraw",[this]{if(selected_<0 || people_[std::size_t(selected_)].settings.value("nails").toArray().isEmpty())return;finish_brush_gesture();setProperty("portraitNailReplace",true);placement_key_="nail:outline";range_mode_=repair_mode_=0;locate_->setChecked(false);view_->set_tool(-1);update_overlay();status_->setText(tr("重新圈选当前甲面，原颜色保留；松开完成，取消保留原范围"));});
-        button(tr("删除当前甲面"),"portraitNailRemove",[this]{if(selected_<0)return;auto& s=people_[std::size_t(selected_)].settings;auto nails=s["nails"].toArray();const int i=property("portraitNailIndex").toInt();if(i<0 || i>=nails.size())return;nails.removeAt(i);s["nails"]=nails;setProperty("portraitNailIndex",std::max(0,i-1));remember();build_parameters();update_overlay();});
+        if(placement_key_.isEmpty() && !range_mode_){placement_key_="nail:select";view_->set_tool(-1);}
+        button(tr("圈选甲面"),"portraitNailOutline",[this]{finish_brush_gesture();setProperty("portraitNailReplace",false);placement_key_="nail:outline";range_mode_=repair_mode_=0;locate_->setChecked(false);view_->set_tool(-1);update_overlay();status_->setText(tr("沿甲面边缘拖动一圈，松开完成；空格临时抓手"));});
+        if(nails.isEmpty())return;
+        auto* list=new QComboBox(parameter_host_);list->setObjectName("portraitNailSelection");for(int i=0;i<nails.size();++i)list->addItem(tr("指甲 %1").arg(i+1),i);list->setCurrentIndex(std::clamp(property("portraitNailIndex").toInt(),0,std::max(0,int(nails.size())-1)));parameter_layout_->addWidget(list);connect(list,&QComboBox::activated,this,[this](int i){setProperty("portraitNailIndex",i);placement_key_="nail:select";range_mode_=repair_mode_=0;view_->set_tool(-1);update_overlay();});
+        auto* nailActions=new QWidget(parameter_host_);auto* actionLayout=new QHBoxLayout(nailActions);actionLayout->setContentsMargins(0,0,0,0);parameter_layout_->addWidget(nailActions);
+        auto action=[&](QString text,QString name,auto fn){auto* b=new QToolButton(nailActions);b->setText(text);b->setObjectName(name);actionLayout->addWidget(b);connect(b,&QToolButton::clicked,this,fn);};
+        action(tr("选择"),"portraitNailSelect",[this]{finish_brush_gesture();placement_key_="nail:select";range_mode_=repair_mode_=0;view_->set_tool(-1);update_overlay();});
+        action(tr("重绘"),"portraitNailRedraw",[this]{if(selected_<0 || people_[std::size_t(selected_)].settings.value("nails").toArray().isEmpty())return;finish_brush_gesture();setProperty("portraitNailReplace",true);placement_key_="nail:outline";range_mode_=repair_mode_=0;locate_->setChecked(false);view_->set_tool(-1);update_overlay();status_->setText(tr("重新圈选当前甲面，原颜色保留；松开完成，取消保留原范围"));});
+        action(tr("删除"),"portraitNailRemove",[this]{if(selected_<0)return;auto& s=people_[std::size_t(selected_)].settings;auto nails=s["nails"].toArray();const int i=property("portraitNailIndex").toInt();if(i<0 || i>=nails.size())return;nails.removeAt(i);s["nails"]=nails;setProperty("portraitNailIndex",std::max(0,i-1));remember();build_parameters();update_overlay();});
         auto* palette=new QWidget(parameter_host_);auto* row=new QHBoxLayout(palette);row->setContentsMargins(0,0,0,0);
         for(const auto& hex:QStringList{"#a92239","#e5a3aa","#c59b7d","#416179","#eee4d5"}){auto* chip=new QPushButton(palette);chip->setObjectName("portraitNailColor_"+hex.mid(1));chip->setFixedSize(32,32);chip->setToolTip(hex);chip->setStyleSheet("background:"+hex+";border:1px solid #888;border-radius:5px");row->addWidget(chip);chip->setEnabled(!nails.isEmpty());connect(chip,&QPushButton::clicked,this,[this,hex]{if(selected_<0)return;auto& s=people_[std::size_t(selected_)].settings;auto nails=s["nails"].toArray();const int i=property("portraitNailIndex").toInt();if(i<0 || i>=nails.size())return;QImage image(1,1,QImage::Format_RGBA8888);image.setColorSpace(QColorSpace::SRgb);image.fill(QColor(hex));const auto linear=editing::to_working(image);const auto* p=reinterpret_cast<const float*>(linear.constBits());auto nail=nails[i].toObject();nail["color"]=QJsonArray{p[0],p[1],p[2]};nails[i]=nail;s["nails"]=nails;remember();});}row->addStretch();parameter_layout_->addWidget(palette);
-        button(tr("擦除越界部分"),"portraitNailErase",[this]{finish_brush_gesture();placement_key_.clear();refresh_ranges();range_key_->setCurrentIndex(range_key_->findData("makeup.nails"));range_mode_=2;range_visible_->setChecked(true);view_->set_tool(-1);inspector_tabs_->setCurrentIndex(1);update_overlay();});
+        action(tr("擦除"),"portraitNailErase",[this]{finish_brush_gesture();placement_key_.clear();refresh_ranges();range_key_->setCurrentIndex(range_key_->findData("makeup.nails"));range_mode_=2;range_visible_->setChecked(true);view_->set_tool(-1);inspector_tabs_->setCurrentIndex(1);update_overlay();});
+        return;
     }
     if(panel==11 && section==9){
         auto* cards=new QWidget(parameter_host_);auto* row=new QHBoxLayout(cards);row->setContentsMargins(0,0,0,0);
@@ -296,7 +303,18 @@ void PortraitDialog::build_style(int panel) {
 
 namespace huelith::desktop {
 bool PortraitDialog::nail_event(QEvent* event){
-    if(placement_key_!="nail:outline" || view_->temporary_pan())return false;
+    if(view_->temporary_pan())return false;
+    if(placement_key_=="nail:select"){
+        if(event->type()!=QEvent::MouseButtonPress)return event->type()==QEvent::MouseButtonRelease;
+        auto* mouse=static_cast<QMouseEvent*>(event);if(mouse->button()!=Qt::LeftButton)return false;
+        const auto q=source_position(view_->mapToScene(mouse->position().toPoint()));
+        const auto nails=people_[std::size_t(selected_)].settings["nails"].toArray();
+        for(int i=nails.size()-1;i>=0;--i){const auto n=nails[i].toObject();const auto mask=QImage::fromData(QByteArray::fromBase64(n["mask"].toString().toLatin1()),"PNG").convertToFormat(QImage::Format_Grayscale8);
+            const bool hit=mask.isNull()?editing::portrait_nail_path(n,{1000,1000}).contains(q*1000.):mask.constScanLine(std::clamp(int(q.y()*mask.height()),0,mask.height()-1))[std::clamp(int(q.x()*mask.width()),0,mask.width()-1)]>127;
+            if(hit){setProperty("portraitNailIndex",i);build_parameters();update_overlay();status_->setText(tr("已选择指甲 %1").arg(i+1));break;}}
+        return true;
+    }
+    if(placement_key_!="nail:outline")return false;
     if(people_[std::size_t(selected_)].unmatched || people_[std::size_t(selected_)].match_ambiguous)return true;
     const auto type=event->type();if(type!=QEvent::MouseButtonPress && type!=QEvent::MouseMove && type!=QEvent::MouseButtonRelease)return false;
     auto* mouse=static_cast<QMouseEvent*>(event);const auto p=view_->mapToScene(mouse->position().toPoint());
@@ -305,12 +323,15 @@ bool PortraitDialog::nail_event(QEvent* event){
     return true;
 }
 void PortraitDialog::finish_nail_outline(bool commit){
-    if(!nail_drawing_)return;nail_drawing_=false;view_->viewport()->releaseMouse();
+    if(!nail_drawing_)return;
+    QJsonArray outline;
+    if(commit)for(const auto& p:nail_outline_){const auto q=source_position(p);outline.append(QJsonArray{q.x(),q.y()});}
+    nail_drawing_=false;view_->viewport()->releaseMouse();
     if(commit && selected_>=0 && nail_outline_.size()>=3){
-        QJsonArray outline;for(const auto& p:nail_outline_){const auto q=source_position(p);outline.append(QJsonArray{q.x(),q.y()});}QJsonObject nail{{"outline",outline},{"color",QJsonArray{.32,.018,.035}},{"enabled",true},{"origin","manual"}};
+        QJsonObject nail{{"outline",outline},{"materialVersion",2},{"color",QJsonArray{.24,.09,.12}},{"enabled",true},{"origin","manual"}};
         const auto path=editing::portrait_nail_path(nail,linear_preview_.size());const auto box=path.boundingRect().toAlignedRect().intersected(linear_preview_.rect());std::vector<double> light;
         for(int y=box.top();y<=box.bottom();y+=2){const auto* row=reinterpret_cast<const float*>(linear_preview_.constScanLine(y));for(int x=box.left();x<=box.right();x+=2)if(path.contains(QPointF(x+.5,y+.5)) && row[x*4+3]>.001)light.push_back((.2627*row[x*4]+.678*row[x*4+1]+.0593*row[x*4+2])/row[x*4+3]);}
-        auto& s=people_[std::size_t(selected_)].settings;auto nails=s["nails"].toArray();if(light.size()>=3 && nails.size()<40){std::nth_element(light.begin(),light.begin()+light.size()/2,light.end());nail["referenceLuminance"]=light[light.size()/2];const int replacement=property("portraitNailIndex").toInt();const bool replace=property("portraitNailReplace").toBool() && replacement>=0 && replacement<nails.size();if(replace){nail["color"]=nails[replacement].toObject()["color"];nails[replacement]=nail;}else nails.append(nail);s["nails"]=nails;auto params=s["parameters"].toObject();if(params["makeup.nails"].toDouble()==0)params["makeup.nails"]=85;if(!params.contains("makeup.nailsGloss"))params["makeup.nailsGloss"]=70;s["parameters"]=params;auto enabled=s["enabled"].toObject();enabled["makeup"]=true;s["enabled"]=enabled;auto disabled=s["disabledParameters"].toObject();disabled.remove("makeup.nails");s["disabledParameters"]=disabled;setProperty("portraitNailIndex",replace?replacement:nails.size()-1);setProperty("portraitNailReplace",false);remember();build_parameters();status_->setText(tr("甲面已添加，可继续圈选下一个或单独选色"));}else status_->setText(tr("甲面过小或已达到 40 个甲面，请放大后重新圈选"));
+        auto& s=people_[std::size_t(selected_)].settings;auto nails=s["nails"].toArray();if(light.size()>=3 && (nails.size()<40 || property("portraitNailReplace").toBool())){std::nth_element(light.begin(),light.begin()+light.size()/2,light.end());nail["referenceLuminance"]=light[light.size()/2];const int replacement=property("portraitNailIndex").toInt();const bool replace=property("portraitNailReplace").toBool() && replacement>=0 && replacement<nails.size();if(replace){nail["color"]=nails[replacement].toObject()["color"];nails[replacement]=nail;}else nails.append(nail);s["nails"]=nails;auto params=s["parameters"].toObject();if(params["makeup.nails"].toDouble()==0)params["makeup.nails"]=85;if(!params.contains("makeup.nailsGloss"))params["makeup.nailsGloss"]=70;s["parameters"]=params;auto enabled=s["enabled"].toObject();enabled["makeup"]=true;s["enabled"]=enabled;auto disabled=s["disabledParameters"].toObject();disabled.remove("makeup.nails");s["disabledParameters"]=disabled;setProperty("portraitNailIndex",replace?replacement:nails.size()-1);setProperty("portraitNailReplace",false);remember();build_parameters();status_->setText(tr("甲面已添加，可继续圈选下一个或单独选色"));}else status_->setText(tr("甲面过小或已达到 40 个甲面，请放大后重新圈选"));
     }nail_outline_.clear();update_overlay();
 }
 }

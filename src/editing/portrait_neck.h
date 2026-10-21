@@ -69,7 +69,10 @@ public:
             else if(entered){skinEnd=r-axialStep*.5;closed=true;break;}
             else if(r>faceWidth*.12)break;
         }
-        if(!closed || skinEnd<8)throw EditError("无法确定可见颈部与衣领边界，请修正皮肤范围");
+        // Bare shoulders have no collar/skin boundary. Use the clavicle
+        // intersection already obtained from the face axis and shoulders.
+        if(!closed && entered)skinEnd=std::min(skinEnd,length_);
+        if(skinEnd<8)throw EditError("可见颈部范围不足，请修正位置");
         a_=chin+downAxis*skinEnd;length_=skinEnd;axis_=-downAxis;normal_={-axis_.y(),axis_.x()};
         std::array<bool,count> valid{};int bestStart=0,bestCount=0,runStart=0,runCount=0;
         for(int i=0;i<count;++i){const double t=.15+.70*i/(count-1);const auto p=a_+axis_*(length_*t);valid[i]=inside(p);

@@ -1,6 +1,8 @@
 #pragma once
 #include "color_band_slider.h"
 #include <QHBoxLayout>
+#include <QEvent>
+#include <algorithm>
 #include <QLabel>
 #include <QSpinBox>
 #include <QPushButton>
@@ -11,6 +13,8 @@ namespace huelith::desktop {
 inline QPushButton* portrait_color_swatch(QWidget* parent, const QColor& color) {
     auto* button = new QPushButton(parent);
     button->setCheckable(true);
+    button->setAutoExclusive(true);
+    QObject::connect(button,&QPushButton::toggled,button,[button](bool selected){button->setText(selected?QString::fromUtf8("✓"):QString{});});
     button->setFixedSize(36, 36);
     button->setAccessibleName(color.name());
     button->setToolTip(color.name());
@@ -18,8 +22,27 @@ inline QPushButton* portrait_color_swatch(QWidget* parent, const QColor& color) 
         "QPushButton:checked{border:3px solid #70b6ff;}QPushButton:focus{border:3px solid white;}").arg(color.name()));
     return button;
 }
+// Reserve the complete icon and text even with a larger UI font or DPI scale.
+class PortraitStyleCard final : public QToolButton {
+public:
+    using QToolButton::QToolButton;
+    QSize sizeHint() const override {
+        const auto base=QToolButton::sizeHint();
+        return base.expandedTo(QSize(std::max(iconSize().width(),fontMetrics().horizontalAdvance(text()))+16,
+                                    iconSize().height()+fontMetrics().height()+20));
+    }
+    QSize minimumSizeHint() const override {return sizeHint();}
+protected:
+    bool event(QEvent* event) override {
+        if(event->type()==QEvent::Show || event->type()==QEvent::FontChange || event->type()==QEvent::StyleChange){
+            setMinimumSize(std::max(80,std::max(iconSize().width(),fontMetrics().horizontalAdvance(text()))+16),
+                           std::max(80,iconSize().height()+fontMetrics().height()+20));
+        }
+        return QToolButton::event(event);
+    }
+};
 inline QToolButton* portrait_style_card(QWidget* parent, const QString& label) {
-    auto* button = new QToolButton(parent);
+    auto* button = new PortraitStyleCard(parent);
     button->setText(label);
     button->setAccessibleName(label);
     button->setCheckable(true);

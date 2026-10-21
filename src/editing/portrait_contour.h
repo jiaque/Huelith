@@ -42,6 +42,8 @@ private:
     QPointF local(QPointF normalized) const;
     QPointF origin_, axis_, vertical_;
     QSize size_;
+    std::array<QPointF,2> browPivot_{},browAxis_{};
+    std::array<double,2> browAngle_{},browLength_{};
     double scale_{1};
     double support_{.65};
     double edge_fade_{.08};

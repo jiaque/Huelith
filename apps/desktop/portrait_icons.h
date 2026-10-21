@@ -14,6 +14,7 @@ public:
         QStyleOptionViewItem item(option);initStyleOption(&item,index);
         const bool selected=item.state & QStyle::State_Selected;
         painter->save();painter->setRenderHint(QPainter::Antialiasing);
+        if(index.data(Qt::UserRole+1).toBool()){painter->fillRect(item.rect,QColor("#252a2e"));painter->setPen(QColor("#3c4349"));painter->drawLine(item.rect.left()+20,item.rect.top()+3,item.rect.right()-20,item.rect.top()+3);item.rect.adjust(0,8,0,0);}
         painter->setPen(Qt::NoPen);
         painter->setBrush(selected?QColor("#2f80ed"):QColor("#252a2e"));
         painter->drawRoundedRect(item.rect,selected?4:0,selected?4:0);
