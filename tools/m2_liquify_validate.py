@@ -1,5 +1,5 @@
 """Production liquify: geometry/alpha/HDR, protection, persistence and actual Qt transactions."""
-import base64,ctypes,json,os,tempfile,traceback
+import base64,ctypes,json,os,sys,tempfile,traceback
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -10,6 +10,7 @@ def main():
     qt=Path('D:/Program Files/Qt/6.10.3/msvc2022_64')
     handles=[os.add_dll_directory(str(qt/'bin')),os.add_dll_directory(str(ROOT/'build/windows-release'))]
     os.environ['QT_PLUGIN_PATH']=str(qt/'plugins')
+    os.environ['QT_QPA_PLATFORM']='offscreen'
     dll=ctypes.CDLL(str(ROOT/'build/windows-release/huelith_python_driver.dll'))
     fn=dll.huelith_python_command;fn.argtypes=[ctypes.c_char_p];fn.restype=ctypes.c_char_p
     def raw(op,**kw):return json.loads(fn(json.dumps(dict(op=op,**kw)).encode()))
@@ -20,10 +21,11 @@ def main():
         r=call('brush_probe',**request(image,**kw));return np.frombuffer(base64.b64decode(r['data']),dtype='<f4').reshape(image.shape),r
     records=[]
     def test(name,body):
+        if len(sys.argv)>1 and name not in sys.argv[1:]:return
         try:body();records.append(dict(name=name,passed=True))
         except Exception:records.append(dict(name=name,passed=False,error=traceback.format_exc()))
         print(records[-1],flush=True)
-    with tempfile.TemporaryDirectory(prefix='huelith-liquify-') as folder:
+    with tempfile.TemporaryDirectory(prefix='huelith-liquify-',dir=ROOT/'build',ignore_cleanup_errors=True) as folder:
         call('init',settings=folder)
         try:
             y,x=np.mgrid[:128,:160];base=np.ones((128,160,4),np.float32);base[:,:,0]=x/160;base[:,:,1]=y/128;base[:,:,2]=2
@@ -54,8 +56,11 @@ def main():
                 brush=dict(tool=1,size=150,density=1,pressure=1,**{'from':[80,64],'to':[80,64]})
                 restored,_=probe(base,dabs=[warp,brush]);assert np.array_equal(restored,base)
                 outputs=[]
+                # The full-strength single dab above folds its boundary; start the
+                # distinct-tool comparison from a gentle, orientation-preserving warp.
+                gentle=dict(warp,pressure=.2)
                 for tool in [2,3,4,5,6]:
-                    moved,_=probe(base,dabs=[warp,dict(warp,tool=tool)]);assert np.isfinite(moved).all();outputs.append(moved)
+                    moved,_=probe(base,dabs=[gentle,dict(gentle,tool=tool)]);assert np.isfinite(moved).all();outputs.append(moved)
                 assert all(not np.array_equal(outputs[i],outputs[j]) for i in range(5) for j in range(i))
             test('reconstruction_and_distinct_smooth_twirl_pucker_bloat_push',reconstruct)
             def alpha():
@@ -129,6 +134,46 @@ def main():
                     hashes.append(r['hash'])
                 assert hashes[0]==before and hashes[1]!=hashes[2] and hashes[2]==hashes[3]
             test('actual_tablet_zero_quarter_full_and_pressure_preference',tablet)
+            def brush_size_and_tools():
+                scene()
+                r=call('window_brush',liquifyDialog=True,actions=[dict(liquifySize=10349)],
+                       accept=False,capture=str(OUT/'brush-size-limit.png'))
+                status=r['content']
+                assert status['ready'] and status['brushSize']==420 and status['brushSizeMaximum']==420,status
+                assert [tool['label'] for tool in status['tools']]==[
+                    '推动','重建','平滑','旋转','收缩','膨胀','左推','冻结','解冻','抓手','缩放']
+                assert all(tool['icon'] for tool in status['tools'])
+                assert status['tools'][0]['checked']
+                r=call('window_brush',liquifyDialog=True,actions=[dict(liquifySize=36)],
+                       accept=False,capture=str(OUT/'brush-size-small.png'))
+                assert r['content']['brushSize']==36 and r['content']['tools'][0]['checked']
+            test('image_relative_size_limit_visible_named_tools_keep_active_brush',brush_size_and_tools)
+            def gentle_stroke():
+                gradient=np.zeros((320,420,3),np.uint8)
+                gradient[:,:,0]=np.linspace(0,255,420,dtype=np.uint8)
+                gradient[:,:,1]=np.linspace(0,255,320,dtype=np.uint8)[:,None]
+                gradient[:,:,2]=100
+                gradient_path=Path(folder)/'gradient.png';Image.fromarray(gradient).save(gradient_path)
+                def fresh():
+                    call('window_scene',width=420,height=320,layers=[dict(name='gradient',path=str(gradient_path))])
+                fresh();baseline=OUT/'gentle-original.png';call('window_brush',pixels=str(baseline))
+                original=np.asarray(Image.open(baseline)).astype(float)
+                outputs=[]
+                for steps,pressure in [(1,50),(12,50),(128,50),(12,100)]:
+                    fresh();output=OUT/f'gentle-{steps}-{pressure}.png'
+                    r=call('window_brush',liquifyDialog=True,actions=[
+                        dict(liquifySize=130,liquifyPressure=pressure),
+                        dict(steps=steps,**{'from':[.4,.5],'to':[.6,.5]})],accept=True,pixels=str(output))
+                    assert r['content']['ready']
+                    outputs.append(np.asarray(Image.open(output)).astype(float))
+                # A monotonic horizontal ramp converts colour differences into source displacement.
+                differences=[np.abs(out-original).max() for out in outputs]
+                assert 0<differences[1]<10,differences
+                assert differences[1]<differences[3]<20,differences
+                assert np.abs(outputs[0]-outputs[2]).max()<=2
+                assert np.array_equal(outputs[1][:90],original[:90])
+                print(dict(gentle_stroke_peak_channel_delta=differences),flush=True)
+            test('gentle_push_high_pressure_and_sparse_dense_mouse_events',gentle_stroke)
             def large():
                 yy,xx=np.mgrid[:800,:1200];image=np.ones((800,1200,4),np.float32);image[:,:,0]=xx/1200;image[:,:,1]=yy/800;image[:,:,2]=2
                 out,r=probe(image,dabs=[dict(tool=0,size=360,density=.8,pressure=1,**{'from':[510,400],'to':[600,400]})])

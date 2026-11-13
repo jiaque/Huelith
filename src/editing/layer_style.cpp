@@ -1,5 +1,8 @@
+#include <QCoreApplication>
 #include "huelith/editing/layer_style.h"
 #include "huelith/editing/project.h"
+#include <QBuffer>
+#include <QImageReader>
 #include <QJsonArray>
 #include <algorithm>
 #include <cmath>
@@ -7,27 +10,36 @@
 
 namespace huelith::editing {
 LayerStyles::LayerStyles() {
+    for (int i = 0; i < 10; ++i)
+        entries[i].kind = i;
     entries[0].opacity = 1;
     entries[1].blend = entries[2].blend = Blend::multiply;
     entries[3].color = entries[4].color = QColor("#ffffbe");
     entries[3].blend = entries[4].blend = Blend::screen;
     entries[5].opacity = 1;
+    entries[6].size = entries[7].size = 100;
+    entries[6].global_light = entries[7].global_light = false;
+    entries[9].blend = Blend::multiply;
 }
 bool LayerStyles::active() const {
     return enabled &&
            std::any_of(entries.begin(), entries.end(), [](const auto& s) { return s.enabled; });
 }
 void validate_styles(const LayerStyles& value) {
+    if (value.entries.size() < 6 || value.entries.size() > 32 || !std::isfinite(value.scale) ||
+        value.scale < .01 || value.scale > 10)
+        throw EditError(QCoreApplication::translate("Huelith", "样式数量或缩放无效"));
     if (!std::isfinite(value.global_angle) || std::abs(value.global_angle) > 360)
-        throw EditError(QStringLiteral("样式全局光角度无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "样式全局光角度无效"));
     for (const auto& s : value.entries)
-        if (!s.color.isValid() || !std::isfinite(s.opacity) || s.opacity < 0 || s.opacity > 1 ||
-            int(s.blend) < 0 || int(s.blend) > 23 || !std::isfinite(s.size) || s.size < 0 ||
-            s.size > 250 || !std::isfinite(s.angle) || std::abs(s.angle) > 360 ||
-            !std::isfinite(s.distance) || s.distance < 0 || s.distance > 1000 ||
-            !std::isfinite(s.spread) || s.spread < 0 || s.spread > 1 || s.position < 0 ||
-            s.position > 2)
-            throw EditError(QStringLiteral("图层样式参数无效"));
+        if (s.kind < 0 || s.kind > 9 || s.contour < 0 || s.contour > 3 || !s.color.isValid() ||
+            !s.color2.isValid() || s.pattern.width() > 512 || s.pattern.height() > 512 ||
+            !std::isfinite(s.opacity) || s.opacity < 0 || s.opacity > 1 || int(s.blend) < 0 ||
+            int(s.blend) > 23 || !std::isfinite(s.size) || s.size < 0 || s.size > 250 ||
+            !std::isfinite(s.angle) || std::abs(s.angle) > 360 || !std::isfinite(s.distance) ||
+            s.distance < 0 || s.distance > 1000 || !std::isfinite(s.spread) || s.spread < 0 ||
+            s.spread > 1 || s.position < 0 || s.position > 2)
+            throw EditError(QCoreApplication::translate("Huelith", "图层样式参数无效"));
 }
 namespace {
 // Exact squared Euclidean distance transform (lower envelope of parabolas), O(width*height).
@@ -129,7 +141,7 @@ std::vector<float> style_coverage(const QImage& source, StyleKind kind, const La
     validate_styles(settings);
     if (source.format() != QImage::Format_RGBA32FPx4_Premultiplied || !std::isfinite(pixel_scale) ||
         pixel_scale <= 0 || pixel_scale > 64)
-        throw EditError(QStringLiteral("图层样式输入无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "图层样式输入无效"));
     const int width = source.width(), height = source.height();
     std::vector<float> alpha(std::size_t(width) * height);
     for (int y = 0; y < height; ++y) {
@@ -137,10 +149,66 @@ std::vector<float> style_coverage(const QImage& source, StyleKind kind, const La
         for (int x = 0; x < width; ++x)
             alpha[std::size_t(y) * width + x] = std::clamp(row[x * 4 + 3], 0.F, 1.F);
     }
-    if (kind == StyleKind::color_overlay)
+    if (kind == StyleKind::color_overlay || kind == StyleKind::gradient_overlay ||
+        kind == StyleKind::pattern_overlay)
         return alpha;
     auto result = alpha;
     const double size = style.size * pixel_scale;
+    if (kind == StyleKind::bevel) {
+        auto height_map = distances(alpha, width, height, false);
+        const double radius = std::max(1., size);
+        for (auto& h : height_map) {
+            h = float(std::clamp(h / radius, 0., 1.));
+            if (style.contour == 1)
+                h = h * h * (3 - 2 * h);
+            else if (style.contour == 2)
+                h *= h;
+            else if (style.contour == 3)
+                h = std::sqrt(h);
+        }
+        const double theta =
+            (style.global_light ? global_angle : style.angle) * std::numbers::pi / 180;
+        const double lx = -std::cos(theta), ly = std::sin(theta);
+        auto sample = [&](int x, int y) {
+            return x < 0 || y < 0 || x >= width || y >= height
+                       ? 0.F
+                       : height_map[std::size_t(y) * width + x];
+        };
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x) {
+                const double dx = (sample(x + 1, y) - sample(x - 1, y)) * .5,
+                             dy = (sample(x, y + 1) - sample(x, y - 1)) * .5;
+                const double shade = std::clamp(
+                    (-dx * lx - dy * ly) * std::max(1., style.distance) * radius, -1., 1.);
+                result[std::size_t(y) * width + x] =
+                    float(shade) * alpha[std::size_t(y) * width + x];
+            }
+        return result;
+    }
+    if (kind == StyleKind::satin) {
+        blur(result, width, height, size, 0);
+        const auto blurred = result;
+        const double theta = style.angle * std::numbers::pi / 180;
+        const int dx = qRound(std::cos(theta) * style.distance * pixel_scale),
+                  dy = qRound(std::sin(theta) * style.distance * pixel_scale);
+        auto sample = [&](int x, int y) {
+            return x < 0 || y < 0 || x >= width || y >= height
+                       ? 0.F
+                       : blurred[std::size_t(y) * width + x];
+        };
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x) {
+                float value = std::abs(sample(x + dx, y + dy) - sample(x - dx, y - dy));
+                if (style.contour == 1)
+                    value = value * value * (3 - 2 * value);
+                else if (style.contour == 2)
+                    value *= value;
+                else if (style.contour == 3)
+                    value = std::sqrt(value);
+                result[std::size_t(y) * width + x] = value * alpha[std::size_t(y) * width + x];
+            }
+        return result;
+    }
     if (kind == StyleKind::stroke) {
         const auto outer = distances(alpha, width, height, true);
         const auto inner = distances(alpha, width, height, false);
@@ -187,6 +255,13 @@ std::vector<float> style_coverage(const QImage& source, StyleKind kind, const La
             const auto i = std::size_t(y) * width + x;
             if (kind == StyleKind::inner_glow && style.position == 1)
                 value = 1 - value;
+            value = std::clamp(value, 0.F, 1.F);
+            if (style.contour == 1)
+                value = value * value * (3 - 2 * value);
+            else if (style.contour == 2)
+                value *= value;
+            else if (style.contour == 3)
+                value = std::sqrt(value);
             result[i] = std::clamp(value, 0.F, 1.F) * (interior ? alpha[i] : 1);
         }
     return result;
@@ -194,9 +269,20 @@ std::vector<float> style_coverage(const QImage& source, StyleKind kind, const La
 QJsonObject styles_json(const LayerStyles& value) {
     validate_styles(value);
     QJsonArray entries;
-    for (const auto& s : value.entries)
-        entries.append(QJsonObject{{"enabled", s.enabled},
+    for (const auto& s : value.entries) {
+        QByteArray pattern;
+        if (!s.pattern.isNull()) {
+            QBuffer buffer(&pattern);
+            buffer.open(QIODevice::WriteOnly);
+            if (!s.pattern.save(&buffer, "PNG"))
+                throw EditError(QCoreApplication::translate("Huelith", "图案编码失败"));
+        }
+        entries.append(QJsonObject{{"kind", s.kind},
+                                   {"contour", s.contour},
+                                   {"enabled", s.enabled},
                                    {"color", s.color.name(QColor::HexArgb)},
+                                   {"color2", s.color2.name(QColor::HexArgb)},
+                                   {"pattern", QString::fromLatin1(pattern.toBase64())},
                                    {"opacity", s.opacity},
                                    {"blend", int(s.blend)},
                                    {"size", s.size},
@@ -205,23 +291,46 @@ QJsonObject styles_json(const LayerStyles& value) {
                                    {"spread", s.spread},
                                    {"position", s.position},
                                    {"globalLight", s.global_light}});
-    return {{"version", 1},
+    }
+    return {{"version", 3},
+            {"scale", value.scale},
             {"enabled", value.enabled},
             {"globalAngle", value.global_angle},
             {"entries", entries}};
 }
 LayerStyles styles_from_json(const QJsonObject& json) {
-    if (json.value("version").toInt() != 1 || json.value("entries").toArray().size() != 6)
-        throw EditError(QStringLiteral("图层样式版本或数量无效"));
+    if (json.value("version").toInt() < 1 || json.value("version").toInt() > 3 ||
+        json.value("entries").toArray().size() < 6 || json.value("entries").toArray().size() > 32)
+        throw EditError(QCoreApplication::translate("Huelith", "图层样式版本或数量无效"));
     LayerStyles value;
     value.enabled = json.value("enabled").toBool(true);
     value.global_angle = json.value("globalAngle").toDouble(120);
     const auto entries = json.value("entries").toArray();
-    for (int i = 0; i < 6; ++i) {
+    value.scale = json.value("scale").toDouble(1);
+    value.entries.resize(entries.size());
+    for (int i = 0; i < entries.size(); ++i) {
         const auto o = entries[i].toObject();
         auto& s = value.entries[i];
+        s.kind = o.value("kind").toInt(i);
+        s.contour = o.value("contour").toInt();
         s.enabled = o.value("enabled").toBool();
         s.color = QColor(o.value("color").toString("#ff000000"));
+        s.color2 = QColor(o.value("color2").toString("#ffffffff"));
+        const auto encoded = o.value("pattern").toString();
+        if (encoded.size() > 2 * 1024 * 1024)
+            throw EditError(QCoreApplication::translate("Huelith", "样式图案过大"));
+        if (!encoded.isEmpty()) {
+            auto bytes = QByteArray::fromBase64(encoded.toLatin1());
+            QBuffer buffer(&bytes);
+            buffer.open(QIODevice::ReadOnly);
+            QImageReader reader(&buffer, "PNG");
+            const auto size = reader.size();
+            if (size.isEmpty() || size.width() > 512 || size.height() > 512)
+                throw EditError(QCoreApplication::translate("Huelith", "样式图案尺寸无效"));
+            s.pattern = reader.read();
+            if (s.pattern.isNull())
+                throw EditError(QCoreApplication::translate("Huelith", "样式图案损坏"));
+        }
         s.opacity = o.value("opacity").toDouble(.75);
         s.blend = static_cast<Blend>(o.value("blend").toInt());
         s.size = o.value("size").toDouble(5);

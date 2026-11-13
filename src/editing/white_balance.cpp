@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/white_balance.h"
 #include "huelith/editing/project.h"
 #include <QJsonArray>
@@ -21,11 +22,11 @@ constexpr TemperatureLine temperatures[] = {
 Matrix matrix(const QJsonObject& metadata, const char* name) {
     const auto values = metadata.value(name).toArray();
     if (values.size() != 9)
-        throw EditError(QStringLiteral("RAW 白平衡相机矩阵缺失，请重新显影源文件"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 白平衡相机矩阵缺失，请重新显影源文件"));
     Matrix result;
     for (int i = 0; i < 9; ++i) {
         if (!values[i].isDouble() || !std::isfinite(values[i].toDouble()))
-            throw EditError(QStringLiteral("RAW 白平衡相机矩阵无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW 白平衡相机矩阵无效"));
         result[i] = values[i].toDouble();
     }
     return result;
@@ -34,7 +35,7 @@ Matrix inverse(const Matrix& m) {
     const double d = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) +
                      m[2] * (m[3] * m[7] - m[4] * m[6]);
     if (!std::isfinite(d) || std::abs(d) < 1e-12)
-        throw EditError(QStringLiteral("RAW 白平衡相机矩阵不可逆"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 白平衡相机矩阵不可逆"));
     Matrix r{m[4] * m[8] - m[5] * m[7], m[2] * m[7] - m[1] * m[8], m[1] * m[5] - m[2] * m[4],
              m[5] * m[6] - m[3] * m[8], m[0] * m[8] - m[2] * m[6], m[2] * m[3] - m[0] * m[5],
              m[3] * m[7] - m[4] * m[6], m[1] * m[6] - m[0] * m[7], m[0] * m[4] - m[1] * m[3]};
@@ -49,12 +50,12 @@ Vector transform(const Matrix& m, const Vector& v) {
 Vector shot_gains(const QJsonObject& metadata) {
     const auto values = metadata.value("asShotGains").toArray();
     if (values.size() != 3)
-        throw EditError(QStringLiteral("RAW 拍摄白平衡缺失"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 拍摄白平衡缺失"));
     Vector gains;
     for (int i = 0; i < 3; ++i) {
         gains[i] = values[i].toDouble(-1);
         if (!std::isfinite(gains[i]) || gains[i] <= 0)
-            throw EditError(QStringLiteral("RAW 拍摄白平衡无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW 拍摄白平衡无效"));
     }
     return gains;
 }
@@ -62,14 +63,14 @@ WhiteBalance from_neutral(const QJsonObject& metadata, const Vector& neutral) {
     const auto xyz = transform(inverse(matrix(metadata, "xyzToCamera")), neutral);
     const double sum = xyz[0] + xyz[1] + xyz[2];
     if (!std::isfinite(sum) || sum <= 1e-12)
-        throw EditError(QStringLiteral("无法从该区域估计白平衡"));
+        throw EditError(QCoreApplication::translate("Huelith", "无法从该区域估计白平衡"));
     return white_balance_temperature({xyz[0] / sum, xyz[1] / sum});
 }
 } // namespace
 QPointF white_balance_xy(double temperature, double tint) {
     if (!std::isfinite(temperature) || temperature < 2000 || temperature > 50000 ||
         !std::isfinite(tint) || std::abs(tint) > 150)
-        throw EditError(QStringLiteral("白平衡参数超出范围"));
+        throw EditError(QCoreApplication::translate("Huelith", "白平衡参数超出范围"));
     const double reciprocal = 1e6 / temperature;
     int i = 0;
     while (i < 29 && reciprocal >= temperatures[i + 1].reciprocal)
@@ -88,7 +89,7 @@ QPointF white_balance_xy(double temperature, double tint) {
 WhiteBalance white_balance_temperature(QPointF xy) {
     if (!std::isfinite(xy.x()) || !std::isfinite(xy.y()) || xy.x() <= 0 || xy.y() <= 0 ||
         std::abs(1.5 - xy.x() + 6 * xy.y()) < 1e-12)
-        throw EditError(QStringLiteral("白点色度无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "白点色度无效"));
     const double u = 2 * xy.x() / (1.5 - xy.x() + 6 * xy.y()),
                  v = 3 * xy.y() / (1.5 - xy.x() + 6 * xy.y());
     double last_distance = 0, last_du = 0, last_dv = 0;
@@ -110,23 +111,23 @@ WhiteBalance white_balance_temperature(QPointF xy) {
         last_du = du;
         last_dv = dv;
     }
-    throw EditError(QStringLiteral("无法估计白平衡"));
+    throw EditError(QCoreApplication::translate("Huelith", "无法估计白平衡"));
 }
 WhiteBalance white_balance_from_json(const QJsonObject& o) {
     if (o.isEmpty())
         return {};
     if (o.value("version").toInt() != 1)
-        throw EditError(QStringLiteral("白平衡配方版本无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "白平衡配方版本无效"));
     const QStringList modes{"as-shot", "auto",     "custom",      "daylight", "cloudy",
                             "shade",   "tungsten", "fluorescent", "flash"};
     WhiteBalance s{o.value("mode").toString(), o.value("temperature").toDouble(-1),
                    o.value("tint").toDouble(999)};
     if (!modes.contains(s.mode))
-        throw EditError(QStringLiteral("白平衡模式无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "白平衡模式无效"));
     for (auto it = o.begin(); it != o.end(); ++it)
         if (it.key() != "version" && it.key() != "mode" && it.key() != "temperature" &&
             it.key() != "tint")
-            throw EditError(QStringLiteral("未知白平衡参数"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知白平衡参数"));
     (void)white_balance_xy(s.temperature, s.tint);
     return s;
 }
@@ -146,7 +147,7 @@ WhiteBalance white_balance_as_shot(const QJsonObject& metadata) {
 }
 WhiteBalance white_balance_sample(const QImage& image, const QJsonObject& metadata, QRect region) {
     if (image.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("白平衡需要线性 RAW 预览"));
+        throw EditError(QCoreApplication::translate("Huelith", "白平衡需要线性 RAW 预览"));
     const auto to_camera = inverse(matrix(metadata, "cameraToWorking"));
     region = region.intersected(image.rect());
     Vector sum{};
@@ -167,7 +168,7 @@ WhiteBalance white_balance_sample(const QImage& image, const QJsonObject& metada
         }
     }
     if (!count)
-        throw EditError(QStringLiteral("请在未过曝的中性灰区域取样"));
+        throw EditError(QCoreApplication::translate("Huelith", "请在未过曝的中性灰区域取样"));
     return from_neutral(metadata, sum);
 }
 QImage apply_white_balance(const QImage& source, const QJsonObject& recipe,
@@ -176,7 +177,7 @@ QImage apply_white_balance(const QImage& source, const QJsonObject& recipe,
     if (settings.mode == "as-shot")
         return source;
     if (source.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("白平衡需要线性 RAW 图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "白平衡需要线性 RAW 图像"));
     const auto metadata = recipe.value("metadata").toObject();
     const auto camera = matrix(metadata, "cameraToWorking"), back = inverse(camera);
     const auto xy = white_balance_xy(settings.temperature, settings.tint);
@@ -185,7 +186,7 @@ QImage apply_white_balance(const QImage& source, const QJsonObject& recipe,
     const auto shot = shot_gains(metadata);
     const double maximum = *std::max_element(neutral.begin(), neutral.end());
     if (!std::isfinite(maximum) || maximum <= 0)
-        throw EditError(QStringLiteral("相机白点无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "相机白点无效"));
     // DNG SDK bounds normalized camera neutral values to positive sensor responses.
     // Extreme tint settings can otherwise cross outside the camera gamut.
     for (auto& value : neutral)
@@ -202,7 +203,7 @@ QImage apply_white_balance(const QImage& source, const QJsonObject& recipe,
     QImage result = source;
     for (int y = 0; y < result.height(); ++y) {
         if (cancelled && cancelled->load())
-            throw EditError(QStringLiteral("白平衡已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "白平衡已取消"));
         auto* row = reinterpret_cast<float*>(result.scanLine(y));
         for (int x = 0; x < result.width(); ++x) {
             auto* p = row + x * 4;

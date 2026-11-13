@@ -6,22 +6,23 @@
 #include "new_document_dialog.h"
 #include "window_header.h"
 #include "window_icons.h"
+#include "workspace_layout.h"
 #include <QApplication>
 #include <QCloseEvent>
-#include <QDockWidget>
 #include <QDialog>
-#include <QPointer>
-#include <QKeyEvent>
-#include <QSignalBlocker>
+#include <QDockWidget>
 #include <QFile>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLibraryInfo>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPalette>
+#include <QPointer>
 #include <QProxyStyle>
 #include <QPushButton>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyleFactory>
@@ -109,6 +110,22 @@ void apply_dark_theme() {
         QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #202428; border: 1px solid #464d54; border-radius: 3px; padding: 5px; }
         QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border: 1px solid #2684ff; }
     )");
+    const int theme = read_canvas_preferences().interface_theme;
+    if (theme) {
+        const QString bg = theme == 1 ? "#181a1c" : "#454545";
+        const QString base = theme == 1 ? "#101214" : "#383838";
+        const QString button = theme == 1 ? "#222426" : "#505050";
+        stylesheet.replace("#252a2e", bg)
+            .replace("#202428", base)
+            .replace("#2b3035", button)
+            .replace("#292e33", bg)
+            .replace("#22272b", base);
+        palette.setColor(QPalette::Window, QColor(bg));
+        palette.setColor(QPalette::Base, QColor(base));
+        palette.setColor(QPalette::Button, QColor(button));
+        QApplication::setPalette(palette);
+    }
+    qApp->setProperty("interfaceTheme", theme);
     const int font_index = read_canvas_preferences().interface_font;
     const int sizes[]{10, 11, 13, 15};
     stylesheet.replace("font-size: 13px", QString("font-size: %1px").arg(sizes[font_index]));
@@ -161,6 +178,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     build_menus();
     build_panels();
     editor_ = new EditorController(this);
+    QList<QWidget*> collapsiblePanels;
+    for (auto* dock : findChildren<QDockWidget*>())
+        collapsiblePanels.append(dock);
+    statusBar()->addPermanentWidget(workspace_panel_toggle(this, collapsiblePanels));
     setMenuWidget(new WindowHeader(menus_, this));
     default_layout_ = saveState(1);
     if (read_canvas_preferences().restore_workspace) {
@@ -168,10 +189,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (!layout.isEmpty() && !restoreState(layout, 1))
             restoreState(default_layout_, 1);
     }
+    restore_workspace_window(this, "workspace/mainWindow");
     apply_workspace_preferences();
     connect(documents_, &QTabWidget::currentChanged, this, [this] {
         refresh_document_state();
-        if(auto* c=active_canvas();c && c->window()!=this) {c->window()->show();c->window()->raise();}
+        if (auto* c = active_canvas(); c && c->window() != window()) {
+            c->window()->show();
+            c->window()->raise();
+        }
     });
     connect(documents_, &QTabWidget::tabCloseRequested, this,
             [this](int index) { request_close_document(index); });
@@ -181,17 +206,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 void MainWindow::build_menus() {
     auto* file = menus_->addMenu(tr("文件(&F)"));
     auto* create = file->addAction(tr("新建图片…"));
+    create->setProperty("shortcutKey", QStringLiteral("新建图片…"));
     create->setShortcut(QKeySequence::New);
     connect(create, &QAction::triggered, this, [this] { request_new_document(); });
     auto* close = file->addAction(tr("关闭图片"));
+    close->setProperty("shortcutKey", QStringLiteral("关闭图片"));
     close->setShortcuts({QKeySequence("Ctrl+W"), QKeySequence("Ctrl+F4")});
     connect(close, &QAction::triggered, this,
             [this] { request_close_document(documents_->currentIndex()); });
     file->addSeparator();
     auto* quit = file->addAction(tr("退出"));
+    quit->setProperty("shortcutKey", QStringLiteral("退出"));
     connect(quit, &QAction::triggered, this, &QWidget::close);
     auto* view = menus_->addMenu(tr("视图(&V)"));
     auto* fit = view->addAction(tr("适合窗口"));
+    fit->setProperty("shortcutKey", QStringLiteral("适合窗口"));
     fit->setShortcut(QKeySequence("Ctrl+0"));
     connect(fit, &QAction::triggered, this, [this] {
         if (auto* canvas = active_canvas()) {
@@ -206,9 +235,11 @@ void MainWindow::build_menus() {
         }
     });
     auto* zoom_in = view->addAction(tr("放大"));
+    zoom_in->setProperty("shortcutKey", QStringLiteral("放大"));
     zoom_in->setShortcut(QKeySequence::ZoomIn);
     connect(zoom_in, &QAction::triggered, this, [this] { change_zoom(1.25); });
     auto* zoom_out = view->addAction(tr("缩小"));
+    zoom_out->setProperty("shortcutKey", QStringLiteral("缩小"));
     zoom_out->setShortcut(QKeySequence::ZoomOut);
     connect(zoom_out, &QAction::triggered, this, [this] { change_zoom(0.8); });
 }
@@ -221,7 +252,7 @@ void MainWindow::build_panels() {
     auto* properties_dock = new QDockWidget(tr("属性"), this);
     properties_dock->setObjectName("propertiesDock");
     properties_dock->setMinimumWidth(280);
-    properties_dock->setMaximumWidth(480);
+    properties_dock->setMaximumWidth(900);
     properties_ = new QLabel(properties_dock);
     properties_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
     properties_->setMargin(16);
@@ -407,6 +438,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         settings.setValue("workspace/lastLayout", saveState(1));
         settings.sync();
     }
+    QSettings().setValue("workspace/mainWindow/geometry", saveGeometry());
     event->accept();
 }
 

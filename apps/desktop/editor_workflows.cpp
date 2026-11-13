@@ -117,7 +117,7 @@ void EditorController::copy_pixels(bool merged, bool cut) {
             current->linked_hash.clear();
         });
 }
-void EditorController::paste_pixels(bool in_place, bool into_selection) {
+void EditorController::paste_pixels(bool in_place, bool into_selection, bool outside) {
     auto* c = canvas();
     if (!c)
         return;
@@ -153,6 +153,8 @@ void EditorController::paste_pixels(bool in_place, bool into_selection) {
             return;
         origin = bounds.center() - QPointF(image.width() / 2., image.height() / 2.);
         layer.mask = state.selection;
+        if (outside)
+            layer.mask.invertPixels();
         layer.mask_linked = false;
     }
     layer.transform.translate(origin.x(), origin.y());

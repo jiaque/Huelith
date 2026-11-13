@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "huelith.inpaint",
+  "name": "局部重绘",
+  "version": "1",
+  "workflow": "inpaint.json",
+  "geometry": {
+    "mode": "sameAsInput",
+    "align": 8
+  },
+  "inputs": [
+    {
+      "role": "primary",
+      "node": "2",
+      "input": "image",
+      "kind": "image"
+    },
+    {
+      "role": "editMask",
+      "node": "3",
+      "input": "image",
+      "kind": "mask",
+      "whiteMeans": "edit"
+    }
+  ],
+  "parameters": [
+    {
+      "node": "4",
+      "input": "text",
+      "label": "正向提示词"
+    },
+    {
+      "node": "5",
+      "input": "text",
+      "label": "负向提示词"
+    },
+    {
+      "node": "1",
+      "input": "ckpt_name",
+      "label": "模型"
+    }
+  ],
+  "outputs": [
+    {
+      "node": "9",
+      "kind": "image",
+      "role": "final"
+    }
+  ]
+}

@@ -146,7 +146,7 @@ struct SelectionRefineDialog::Impl {
           background(std::move(backdrop)) {
         if (source.isNull() || original.size() != source.size() ||
             original.format() != QImage::Format_Grayscale8)
-            throw editing::EditError(QStringLiteral("需要有效图像和选区"));
+            throw editing::EditError(QObject::tr("需要有效图像和选区"));
         owner->setObjectName("selectionRefineDialog");
         owner->setWindowTitle(QObject::tr("选择并遮住"));
         owner->resize(1180, 800);
@@ -458,7 +458,7 @@ struct SelectionRefineDialog::Impl {
             const auto settings = parameters(edit.settings);
             for (const auto& stroke : edit.strokes) {
                 if (token->load())
-                    throw editing::EditError(QStringLiteral("选区细化已取消"));
+                    throw editing::EditError(QObject::tr("选区细化已取消"));
                 if (stroke.tool == 0) {
                     if (area.isNull()) {
                         area = QImage(size, QImage::Format_Grayscale8);

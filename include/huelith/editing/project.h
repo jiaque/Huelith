@@ -5,6 +5,7 @@
 #include "huelith/editing/layer_style.h"
 #include "huelith/editing/tone.h"
 #include <QColorSpace>
+#include <QCoreApplication>
 #include <QImage>
 #include <QJsonObject>
 #include <QMap>
@@ -22,7 +23,7 @@ namespace huelith::editing {
 class EditError : public std::runtime_error {
   public:
     explicit EditError(const QString& message)
-        : std::runtime_error(message.toUtf8().toStdString()) {}
+        : std::runtime_error(QCoreApplication::translate("Huelith", message.toUtf8().constData()).toUtf8().toStdString()) {}
 };
 enum class LayerKind { pixels, source, repair, adjustment, fill, group, composition, text, shape };
 
@@ -35,6 +36,7 @@ struct Layer {
     ShapeContent shape;
     LayerStyles styles;
     std::optional<QRectF> frame; // Editable layout frame in the group's local coordinate system.
+    bool artboard{}; // A clipped group with its own export bounds.
     QImage pixels; // Immutable source, linear Rec.2020 floating-point premultiplied RGBA.
     QImage mask;   // Grayscale coverage in canvas coordinates before mask_transform.
     QTransform transform;
@@ -59,15 +61,23 @@ struct Layer {
     QColor fill_end{Qt::black};
     bool gradient{};
     QString linked_path;
+    QUuid source_id; // Shared source content; transforms, masks and filters remain per instance.
     QByteArray linked_hash;
     QByteArray raw_source;  // Original camera bytes; re-development survives a missing linked file.
     QJsonObject raw_recipe; // Versioned source-level parameters, separate from layer effects.
     QJsonObject source_metadata; // Imported once, retained even if original files disappear.
+    QMap<QString, QImage> generation_inputs; // Frozen input pixels/masks for offline generation records.
     ToneSettings tone;
     std::vector<Effect> effects;
     std::vector<Layer> children; // Bottom to top, also editable nested composition content.
 };
+struct Slice {
+    QUuid id{QUuid::createUuid()};
+    QString name;
+    QRect bounds;
+};
 struct State {
+    std::vector<Slice> slices;
     QJsonObject metadata;
     QSize size;
     QString name;
@@ -145,7 +155,7 @@ class Project final {
         return {state_, revision_};
     }
     [[nodiscard]] QStringList history_names() const;
-    void set_history_limit(std::size_t count);
+    void set_history_limit(std::size_t count, qint64 bytes = -1);
     void edit(const QString& name, const std::function<void(State&)>& operation);
     bool undo();
     bool redo();
@@ -168,6 +178,7 @@ class Project final {
     std::vector<Entry> history_;
     std::size_t position_{};
     std::size_t history_limit_{100};
+    qint64 history_bytes_limit_{2048LL<<20};
     quint64 revision_{1};
     quint64 next_revision_{2};
     quint64 saved_revision_{};
@@ -175,6 +186,7 @@ class Project final {
 // Atomic snapshot writes. Saving a snapshot never marks newer edits as saved.
 void save_project(const Snapshot& snapshot, const QString& path, bool simulate_failure = false);
 [[nodiscard]] State load_project(const QString& path);
+void synchronize_source(State& state, const Layer& source);
 [[nodiscard]] std::optional<QPointF> warp_point(const Layer& layer, QSize size, QPointF point,
                                                 bool inverse);
 } // namespace huelith::editing

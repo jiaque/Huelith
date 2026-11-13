@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/raw_profile.h"
 #include "huelith/editing/project.h"
 #include "huelith/editing/white_balance.h"
@@ -20,7 +21,7 @@ Matrix inverse(const Matrix& a) {
     const double d = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) +
                      a[2] * (a[3] * a[7] - a[4] * a[6]);
     if (!std::isfinite(d) || std::abs(d) < 1e-10)
-        throw EditError(QStringLiteral("描述文件相机矩阵不可逆"));
+        throw EditError(QCoreApplication::translate("Huelith", "描述文件相机矩阵不可逆"));
     Matrix result{a[4] * a[8] - a[5] * a[7], a[2] * a[7] - a[1] * a[8], a[1] * a[5] - a[2] * a[4],
                   a[5] * a[6] - a[3] * a[8], a[0] * a[8] - a[2] * a[6], a[2] * a[3] - a[0] * a[5],
                   a[3] * a[7] - a[4] * a[6], a[1] * a[6] - a[0] * a[7], a[0] * a[4] - a[1] * a[3]};
@@ -31,12 +32,12 @@ Matrix inverse(const Matrix& a) {
 Matrix matrix(const QJsonObject& object, const char* field) {
     const auto values = object.value(QLatin1String(field)).toArray();
     if (values.size() != 9)
-        throw EditError(QStringLiteral("描述文件需要3×3相机矩阵"));
+        throw EditError(QCoreApplication::translate("Huelith", "描述文件需要3×3相机矩阵"));
     Matrix result;
     for (int i = 0; i < 9; ++i) {
         if (!values[i].isDouble() || !std::isfinite(values[i].toDouble()) ||
             std::abs(values[i].toDouble()) > 100)
-            throw EditError(QStringLiteral("描述文件相机矩阵数值无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "描述文件相机矩阵数值无效"));
         result[i] = values[i].toDouble();
     }
     (void)inverse(result);
@@ -44,16 +45,16 @@ Matrix matrix(const QJsonObject& object, const char* field) {
 }
 void check(const std::atomic_bool* cancelled) {
     if (cancelled && cancelled->load())
-        throw EditError(QStringLiteral("描述文件处理已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "描述文件处理已取消"));
 }
 } // namespace
 QJsonArray builtin_raw_profiles() {
     QJsonArray profiles;
     const QStringList ids{"color",    "monochrome", "neutral",  "vivid",
                           "portrait", "landscape",  "standard", "vintage"};
-    const QStringList names{QStringLiteral("色彩"), QStringLiteral("单色"), QStringLiteral("中性"),
-                            QStringLiteral("鲜艳"), QStringLiteral("人像"), QStringLiteral("风景"),
-                            QStringLiteral("标准"), QStringLiteral("复古")};
+    const QStringList names{QCoreApplication::translate("Huelith", "色彩"), QCoreApplication::translate("Huelith", "单色"), QCoreApplication::translate("Huelith", "中性"),
+                            QCoreApplication::translate("Huelith", "鲜艳"), QCoreApplication::translate("Huelith", "人像"), QCoreApplication::translate("Huelith", "风景"),
+                            QCoreApplication::translate("Huelith", "标准"), QCoreApplication::translate("Huelith", "复古")};
     for (int i = 0; i < ids.size(); ++i) {
         ToneSettings tone;
         if (i == 1)
@@ -108,28 +109,28 @@ QJsonObject validate_raw_profile(const QJsonObject& input) {
                 break;
             }
         if (!found)
-            throw EditError(QStringLiteral("未知内置RAW描述文件"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知内置RAW描述文件"));
         profile.insert("amount", input.value("amount").toDouble(100));
     }
     if (profile.value("version").toInt() != 1 ||
         profile.value("name").toString().trimmed().isEmpty() ||
         profile.value("name").toString().size() > 120 || id.isEmpty() || id.size() > 160)
-        throw EditError(QStringLiteral("RAW描述文件标识或版本无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW描述文件标识或版本无效"));
     const double amount = profile.value("amount").toDouble(100);
     if (!std::isfinite(amount) || amount < 0 || amount > 200)
-        throw EditError(QStringLiteral("描述文件数量必须为0–200"));
+        throw EditError(QCoreApplication::translate("Huelith", "描述文件数量必须为0–200"));
     if (!profile.value("adjustable").toBool())
         profile.insert("amount", 100);
     if (profile.contains("matrix1")) {
         (void)matrix(profile, "matrix1");
         if (profile.value("camera").toString().trimmed().isEmpty())
-            throw EditError(QStringLiteral("相机描述文件必须指定相机型号"));
+            throw EditError(QCoreApplication::translate("Huelith", "相机描述文件必须指定相机型号"));
         if (profile.contains("matrix2")) {
             (void)matrix(profile, "matrix2");
             const double a = profile.value("temperature1").toDouble(),
                          b = profile.value("temperature2").toDouble();
             if (!(a >= 1500 && a <= 50000 && b > a && b <= 50000))
-                throw EditError(QStringLiteral("双光源描述文件色温无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "双光源描述文件色温无效"));
         }
     }
     (void)tone_from_json(profile.value("tone").toObject());
@@ -137,15 +138,15 @@ QJsonObject validate_raw_profile(const QJsonObject& input) {
 }
 QJsonObject read_raw_profile(const QByteArray& bytes) {
     if (bytes.size() > 1024 * 1024)
-        throw EditError(QStringLiteral("RAW描述文件过大"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW描述文件过大"));
     QJsonParseError error;
     const auto document = QJsonDocument::fromJson(bytes, &error);
     if (error.error != QJsonParseError::NoError ||
         document.object().value("type") != "huelith.raw-profile")
-        throw EditError(QStringLiteral("不是Huelith RAW描述文件"));
+        throw EditError(QCoreApplication::translate("Huelith", "不是Huelith RAW描述文件"));
     auto profile = validate_raw_profile(document.object());
     if (profile.value("id").toString().startsWith("huelith."))
-        throw EditError(QStringLiteral("自定义描述文件不能替换内置标识"));
+        throw EditError(QCoreApplication::translate("Huelith", "自定义描述文件不能替换内置标识"));
     return profile;
 }
 QImage apply_raw_profile(const QImage& source, const QJsonObject& recipe,
@@ -155,13 +156,13 @@ QImage apply_raw_profile(const QImage& source, const QJsonObject& recipe,
         return source;
     check(cancelled);
     if (source.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("RAW描述文件需要线性浮点图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW描述文件需要线性浮点图像"));
     QImage result = source;
     if (profile.contains("matrix1")) {
         const auto metadata = recipe.value("metadata").toObject();
         if (profile.value("camera").toString().compare(metadata.value("camera").toString(),
                                                        Qt::CaseInsensitive) != 0)
-            throw EditError(QStringLiteral("描述文件与当前相机型号不匹配"));
+            throw EditError(QCoreApplication::translate("Huelith", "描述文件与当前相机型号不匹配"));
         auto camera = matrix(profile, "matrix1");
         if (profile.contains("matrix2")) {
             const auto second = matrix(profile, "matrix2");
@@ -182,18 +183,18 @@ QImage apply_raw_profile(const QImage& source, const QJsonObject& recipe,
         for (int y = 0; y < 3; ++y) {
             const double sum = normalized[y * 3] + normalized[y * 3 + 1] + normalized[y * 3 + 2];
             if (!std::isfinite(sum) || std::abs(sum) < 1e-10)
-                throw EditError(QStringLiteral("描述文件中性轴无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "描述文件中性轴无效"));
             for (int x = 0; x < 3; ++x)
                 normalized[y * 3 + x] /= sum;
         }
         const auto gains = metadata.value("asShotGains").toArray();
         if (gains.size() != 3)
-            throw EditError(QStringLiteral("RAW缺少相机白平衡元数据"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW缺少相机白平衡元数据"));
         Matrix balance{};
         for (int c = 0; c < 3; ++c) {
             const double v = gains[c].toDouble();
             if (!std::isfinite(v) || v <= 0 || v > 100)
-                throw EditError(QStringLiteral("相机白平衡无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "相机白平衡无效"));
             balance[c * 3 + c] = v;
         }
         const auto correction = multiply(
@@ -235,7 +236,7 @@ QImage apply_raw_profile(const QImage& source, const QJsonObject& recipe,
 }
 ToneSettings automatic_raw_tone(const QImage& source, ToneSettings existing) {
     if (source.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("自动调整需要线性浮点图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "自动调整需要线性浮点图像"));
     std::vector<double> values;
     const int stride =
         std::max(1, int(std::sqrt(double(source.width()) * source.height() / 100000.)));

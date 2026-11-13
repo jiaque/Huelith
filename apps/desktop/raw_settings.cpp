@@ -42,7 +42,7 @@ void write_presets(const QJsonArray& values) {
     settings.setValue("raw/presets", QJsonDocument(values).toJson(QJsonDocument::Compact));
     settings.sync();
     if (settings.status() != QSettings::NoError)
-        throw editing::EditError(QStringLiteral("无法保存 RAW 预设库"));
+        throw editing::EditError(QObject::tr("无法保存 RAW 预设库"));
 }
 } // namespace
 void RawDialog::setup_settings_menu(QMenuBar* bar) {

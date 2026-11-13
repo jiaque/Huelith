@@ -36,12 +36,12 @@ bool insert_enhanced_layer(std::vector<editing::Layer>& layers, const QUuid& id,
 }
 QImage layer_depth_selection(const editing::State& source, const QUuid& id, const QImage& depth, const std::atomic_bool* cancelled) {
     using namespace editing;
-    if(depth.isNull())throw EditError(QStringLiteral("请先计算图层深度"));
+    if(depth.isNull())throw EditError(QObject::tr("请先计算图层深度"));
     const auto* selected=find_layer(source.layers,id);
     auto pixels=allocate_image(selected->pixels.size(),QImage::Format_RGBA32FPx4_Premultiplied);
     pixels.setColorSpace(working_space());
     for(int y=0;y<pixels.height();++y) {
-        if(cancelled && cancelled->load())throw EditError(QStringLiteral("已取消"));
+        if(cancelled && cancelled->load())throw EditError(QObject::tr("已取消"));
         const auto* input=reinterpret_cast<const float*>(selected->pixels.constScanLine(y));
         auto* row=reinterpret_cast<float*>(pixels.scanLine(y));
         const auto* mask=depth.constScanLine(y);
@@ -67,7 +67,7 @@ QImage layer_depth_selection(const editing::State& source, const QUuid& id, cons
     RenderOptions options;options.cancelled=cancelled;
     const auto projected=render(state,options);
     auto mask=allocate_image(state.size,QImage::Format_Grayscale8);
-    for(int y=0;y<mask.height();++y){if(cancelled && cancelled->load())throw EditError(QStringLiteral("已取消"));const auto* row=reinterpret_cast<const float*>(projected.constScanLine(y));
+    for(int y=0;y<mask.height();++y){if(cancelled && cancelled->load())throw EditError(QObject::tr("已取消"));const auto* row=reinterpret_cast<const float*>(projected.constScanLine(y));
         auto* output=mask.scanLine(y);for(int x=0;x<mask.width();++x)output[x]=uchar(qRound(std::clamp(row[x*4+3],0.F,1.F)*255));}
     return mask;
 }

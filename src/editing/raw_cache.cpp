@@ -1,8 +1,10 @@
+#include <QCoreApplication>
 #include "huelith/editing/raw_cache.h"
 #include <QCryptographicHash>
 #include <QFile>
 #include <QJsonDocument>
 #include <QSaveFile>
+#include <QStorageInfo>
 #include <QUuid>
 #include <algorithm>
 
@@ -11,17 +13,17 @@ RawCache::RawCache(qint64 memory_budget, qint64 disk_budget)
     : memory_budget_(std::max(qint64(0), memory_budget)),
       disk_budget_(std::max(qint64(0), disk_budget)) {
     if (!directory_.isValid())
-        throw EditError(QStringLiteral("无法建立 RAW 临时缓存目录"));
+        throw EditError(QCoreApplication::translate("Huelith", "无法建立 RAW 临时缓存目录"));
 }
 QString raw_cache_key(const QByteArray& source, const RawOptions& options) {
     QByteArray model_hash;
     if (options.denoise) {
         QFile model(options.model_path);
         if (!model.open(QIODevice::ReadOnly))
-            throw EditError(QStringLiteral("AI RAW 模型缺失，请指定已验证的 Bayer ONNX 模型"));
+            throw EditError(QCoreApplication::translate("Huelith", "AI RAW 模型缺失，请指定已验证的 Bayer ONNX 模型"));
         QCryptographicHash hash(QCryptographicHash::Sha256);
         if (!hash.addData(&model))
-            throw EditError(QStringLiteral("无法读取 AI RAW 模型"));
+            throw EditError(QCoreApplication::translate("Huelith", "无法读取 AI RAW 模型"));
         model_hash = hash.result().toHex();
     }
     const QJsonObject identity{
@@ -47,7 +49,7 @@ bool RawCache::contains(const QString& key) const {
 }
 std::function<RawResult()> RawCache::read_task(const QString& key) const {
     const auto found=std::find_if(entries_.begin(),entries_.end(),[&](const Entry& entry){return entry.key==key;});
-    if(found==entries_.end())throw EditError(QStringLiteral("RAW缓存已失效，请更新全部预览"));
+    if(found==entries_.end())throw EditError(QCoreApplication::translate("Huelith", "RAW缓存已失效，请更新全部预览"));
     return [entry=*found]{
         auto result=entry.result;
         if(!result.image.isNull())return result;
@@ -55,7 +57,7 @@ std::function<RawResult()> RawCache::read_task(const QString& key) const {
         QImage image(entry.size,entry.format),reference=entry.has_reference?QImage(entry.size,entry.format):QImage{};
         if(image.isNull()||!file.open(QIODevice::ReadOnly)||file.size()!=entry.bytes||file.read(reinterpret_cast<char*>(image.bits()),image.sizeInBytes())!=image.sizeInBytes()||
            (entry.has_reference && (reference.isNull()||file.read(reinterpret_cast<char*>(reference.bits()),reference.sizeInBytes())!=reference.sizeInBytes())))
-            throw EditError(QStringLiteral("RAW临时缓存读取失败，请更新预览"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW临时缓存读取失败，请更新预览"));
         image.setColorSpace(entry.color_space);reference.setColorSpace(entry.color_space);
         result.image=std::move(image);result.reference=std::move(reference);return result;
     };
@@ -77,7 +79,7 @@ std::optional<RawResult> RawCache::get(const QString& key) {
             (entry.has_reference &&
              (reference.isNull() || file.read(reinterpret_cast<char*>(reference.bits()),
                                               reference.sizeInBytes()) != reference.sizeInBytes())))
-            throw EditError(QStringLiteral("RAW 临时缓存读取失败，请重新计算"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW 临时缓存读取失败，请重新计算"));
         image.setColorSpace(entry.color_space);
         reference.setColorSpace(entry.color_space);
         entry.result.image = std::move(image);
@@ -94,11 +96,14 @@ void RawCache::put(const QString& key, const RawResult& result) {
     if (!reference.isNull() &&
         (reference.size() != image.size() || reference.format() != image.format() ||
          reference.colorSpace() != image.colorSpace()))
-        throw EditError(QStringLiteral("RAW 缓存对照尺寸或色彩空间不一致"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 缓存对照尺寸或色彩空间不一致"));
     const auto bytes = image.sizeInBytes() + reference.sizeInBytes();
     if (key.isEmpty() || image.isNull() || bytes > disk_budget_)
-        throw EditError(QStringLiteral("RAW 结果超出会话缓存预算"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 结果超出会话缓存预算"));
     const auto path = directory_.filePath(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    const QStorageInfo volume(directory_.path());
+    if (volume.isReady() && volume.bytesAvailable() >= 0 && volume.bytesAvailable() < bytes)
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 缓存空间不足：需要 %1 MiB，可用 %2 MiB").arg((bytes + 1048575) / 1048576).arg(volume.bytesAvailable() / 1048576));
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly) ||
         file.write(reinterpret_cast<const char*>(image.constBits()), image.sizeInBytes()) !=
@@ -106,7 +111,7 @@ void RawCache::put(const QString& key, const RawResult& result) {
         (!reference.isNull() && file.write(reinterpret_cast<const char*>(reference.constBits()),
                                            reference.sizeInBytes()) != reference.sizeInBytes()) ||
         !file.commit())
-        throw EditError(QStringLiteral("RAW 缓存写入失败，请检查磁盘空间"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 缓存写入失败，请检查磁盘空间"));
     for (auto it = entries_.begin(); it != entries_.end();) {
         if (it->key == key) {
             memory_bytes_ -= it->result.image.isNull() ? 0 : it->bytes;
@@ -145,13 +150,13 @@ qint64 RawCache::memory_bytes() const noexcept {
 }
 void RawCache::configure(qint64 memory_budget, qint64 disk_budget) {
     if (memory_budget < 0 || disk_budget < 1)
-        throw EditError(QStringLiteral("RAW缓存预算无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW缓存预算无效"));
     memory_budget_ = memory_budget;
     disk_budget_ = disk_budget;
     while (!entries_.empty() && disk_bytes_ > disk_budget_) {
         const auto& entry = entries_.back();
         if (QFile::exists(entry.path) && !QFile::remove(entry.path))
-            throw EditError(QStringLiteral("无法清除RAW缓存文件"));
+            throw EditError(QCoreApplication::translate("Huelith", "无法清除RAW缓存文件"));
         memory_bytes_ -= entry.result.image.isNull() ? 0 : entry.bytes;
         disk_bytes_ -= entry.bytes;
         entries_.pop_back();
@@ -162,7 +167,7 @@ void RawCache::clear() {
     while (!entries_.empty()) {
         const auto& entry = entries_.back();
         if (QFile::exists(entry.path) && !QFile::remove(entry.path))
-            throw EditError(QStringLiteral("无法清除RAW缓存文件"));
+            throw EditError(QCoreApplication::translate("Huelith", "无法清除RAW缓存文件"));
         memory_bytes_ -= entry.result.image.isNull() ? 0 : entry.bytes;
         disk_bytes_ -= entry.bytes;
         entries_.pop_back();

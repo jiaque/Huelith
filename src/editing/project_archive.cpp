@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "project_archive.h"
 #include "huelith/editing/project.h"
 #include <QDataStream>
@@ -15,7 +16,7 @@ quint32 update_crc(quint32 crc,const QByteArray& bytes) {
     for(const auto c:bytes) crc=table[(crc^static_cast<uchar>(c))&255]^(crc>>8);
     return crc;
 }
-void check(bool value) { if(!value)throw EditError(QStringLiteral("工程容器读写失败或校验不匹配")); }
+void check(bool value) { if(!value)throw EditError(QCoreApplication::translate("Huelith", "工程容器读写失败或校验不匹配")); }
 struct Entry {QByteArray name;quint64 offset{},length{};quint32 crc{};};
 void local(QDataStream& out,const Entry& e) {
     out<<quint32(0x04034b50)<<quint16(45)<<quint16(0)<<quint16(0)<<quint16(0)<<quint16(0)

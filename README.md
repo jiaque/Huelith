@@ -2,6 +2,8 @@
 
 Huelith 是一款面向 Windows 的桌面照片编辑器，提供 RAW 显影、图层合成、AI 图像增强和人像精修，可用于摄影后期、人像修饰、产品图片处理与创意合成。
 
+支持简体中文和英文。安装时选择语言，也可在「首选项 → 界面与工作区 → 界面语言」中更改，重启后生效。
+
 项目原创代码采用 [GNU GPL v3.0（GPL-3.0-only）](LICENSE)。分发基于这些代码的修改版或衍生软件时，须按 GPL-3.0 提供对应源码。第三方代码、模型和素材沿用各自许可。
 
 ## 功能
@@ -45,7 +47,7 @@ Huelith 是一款面向 Windows 的桌面照片编辑器，提供 RAW 显影、�
 | 系统 | Windows x64 |
 | 编译器 | Visual Studio 2022 C++ 工具链，支持 C++20 |
 | 构建工具 | CMake 3.25+、Ninja |
-| Qt | 6.10.3，包含 Widgets、Svg 和 MSVC x64 组件 |
+| Qt | 6.10.3，MSVC x64，包含 Widgets、Svg、PrintSupport、Network、Concurrent、WebSockets |
 | vcpkg | 依赖及固定基线见 `vcpkg.json` |
 | Python | Python 3，用于准备原生推理 SDK |
 | 推理运行时 | ONNX Runtime DirectML 1.24.4、DirectML 1.15.4 |

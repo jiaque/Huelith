@@ -6,7 +6,7 @@
 
 namespace huelith {
 
-enum class CanvasBackground { transparent, white };
+enum class CanvasBackground { transparent, white, custom };
 // Explicit prototype working space. Storage precision is independent of primaries.
 enum class WorkingSpace { linear_rec2020 };
 
@@ -17,6 +17,12 @@ struct CanvasSpec {
     double resolution_ppi{300.0};
     CanvasBackground background{CanvasBackground::transparent};
     WorkingSpace working_space{WorkingSpace::linear_rec2020};
+    std::uint32_t background_rgb{0xffffff}; // sRGB, converted when the background layer is created.
+    bool artboard{};
+    int color_mode{};
+    int color_bits{32};
+    int color_profile{};
+    std::string icc_profile;
 };
 
 enum class CanvasSpecError { empty_name, invalid_dimensions, invalid_resolution, invalid_enum };

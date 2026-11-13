@@ -69,6 +69,9 @@ class CanvasView final : public QWidget {
     void load_state(editing::State state, bool saved);
     void edit(const QString& name, const std::function<void(editing::State&)>& operation);
     void refresh(bool update_pixels = true);
+    QColorSpace proof_space; // View-only simulation; never passed to export or source sampling.
+    bool gamut_warning{};
+    QColor gamut_color{Qt::gray};
     void preview(const editing::State& state);
     [[nodiscard]] bool preview_pending() const;
     [[nodiscard]] const QImage& rendered_preview() const {
@@ -91,6 +94,8 @@ class CanvasView final : public QWidget {
     void create_shape(QRectF box, bool reverse_line = false);
     editing::ShapeContent shape_options;
     QTextCharFormat text_defaults;
+    int text_layout{};
+    bool text_ligatures{true};
     int pen_mode{}; // Draw, insert anchor, delete anchor, convert anchor.
     void bind_shape_path();
     void apply_preferences();
@@ -267,6 +272,7 @@ class CanvasView final : public QWidget {
     int guide_index_{-1};
     QPointF cursor_position_;
     double pressure_{1};
+    QPointF pen_tilt_;
     QImage stroke_coverage_;
     editing::BrushSettings advanced_brush_;
     editing::BrushStroke brush_stroke_;

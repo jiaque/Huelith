@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #pragma once
 #include "huelith/editing/project.h"
 #include <QJsonArray>
@@ -19,7 +20,7 @@ public:
         if(yaw==0 && pitch==0)return;
         const auto points=surface["points"].toArray();
         if(surface["version"].toInt()!=1 || points.size()!=468 || surface["confidence"].toDouble()<.9)
-            throw EditError(QStringLiteral("朝向定位不足，请重新识别；其他面部调整仍可使用"));
+            throw EditError(QCoreApplication::translate("Huelith", "朝向定位不足，请重新识别；其他面部调整仍可使用"));
         const double aspect=double(size.height()-1)/std::max(1,size.width()-1);
         std::vector<cv::Vec3d> xyz;
         for(const auto& value:points){const auto a=value.toArray();
@@ -135,7 +136,7 @@ public:
             const double before=cross(a1-a0,a2-a0),after=cross(b1-b0,b2-b0);
             if(std::abs(before)<.001)continue;
             if(after/before<.12 || after/before>8)
-                throw EditError(QStringLiteral("该朝向会露出原片没有的区域，请减小幅度；已保留上一结果"));
+                throw EditError(QCoreApplication::translate("Huelith", "该朝向会露出原片没有的区域，请减小幅度；已保留上一结果"));
             const int x0=std::max(0,int(std::floor(std::min({b0.x,b1.x,b2.x})))),x1=std::min(255,int(std::ceil(std::max({b0.x,b1.x,b2.x}))));
             const int y0=std::max(0,int(std::floor(std::min({b0.y,b1.y,b2.y})))),y1=std::min(255,int(std::ceil(std::max({b0.y,b1.y,b2.y}))));
             for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x){const cv::Point2f q{float(x),float(y)};

@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/detail.h"
 #include "huelith/editing/project.h"
 #include <algorithm>
@@ -22,10 +23,10 @@ void validate_detail(const DetailSettings& s) {
     for (const auto& [name, member] : fields) {
         Q_UNUSED(name);
         if (!std::isfinite(s.*member) || s.*member < 0 || s.*member > 100)
-            throw EditError(QStringLiteral("细节参数无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "细节参数无效"));
     }
     if (s.radius < .5 || s.radius > 3)
-        throw EditError(QStringLiteral("锐化半径必须在 0.5 至 3.0 像素之间"));
+        throw EditError(QCoreApplication::translate("Huelith", "锐化半径必须在 0.5 至 3.0 像素之间"));
 }
 QJsonObject detail_json(const DetailSettings& s) {
     validate_detail(s);
@@ -39,22 +40,22 @@ DetailSettings detail_from_json(const QJsonObject& json) {
     if (json.isEmpty())
         return s;
     if (json.value("version").toInt() != 1)
-        throw EditError(QStringLiteral("未知细节配方版本"));
+        throw EditError(QCoreApplication::translate("Huelith", "未知细节配方版本"));
     const auto defaults = detail_json(s);
     for (auto it = json.begin(); it != json.end(); ++it)
         if (!defaults.contains(it.key()))
-            throw EditError(QStringLiteral("未知细节参数"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知细节参数"));
     for (const auto& [name, member] : fields) {
         const auto key = QLatin1String(name);
         if (json.contains(key)) {
             if (!json.value(key).isDouble())
-                throw EditError(QStringLiteral("细节参数必须为数值"));
+                throw EditError(QCoreApplication::translate("Huelith", "细节参数必须为数值"));
             s.*member = json.value(key).toDouble();
         }
     }
     if (json.contains("legacySharpening")) {
         if (!json.value("legacySharpening").isBool())
-            throw EditError(QStringLiteral("旧锐化标记无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "旧锐化标记无效"));
         s.legacy_sharpening = json.value("legacySharpening").toBool();
     }
     validate_detail(s);
@@ -65,16 +66,16 @@ QImage apply_detail(const QImage& input, const DetailSettings& s, double amount,
     validate_detail(s);
     if (!std::isfinite(amount) || amount < 0 || amount > 150 || !std::isfinite(pixel_scale) ||
         pixel_scale <= 0 || pixel_scale > 1)
-        throw EditError(QStringLiteral("细节处理参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "细节处理参数无效"));
     const auto check = [cancelled] {
         if (cancelled && cancelled->load())
-            throw EditError(QStringLiteral("细节处理已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "细节处理已取消"));
     };
     check();
     if (preview == 0 && (amount == 0 || s.legacy_sharpening) && s.luminance == 0 && s.color == 0)
         return input;
     if (input.format() != QImage::Format_RGBA32FPx4_Premultiplied || input.isNull())
-        throw EditError(QStringLiteral("细节处理需要 FP32 图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "细节处理需要 FP32 图像"));
     const int w = input.width(), h = input.height();
     const auto size = std::size_t(w) * h;
     std::vector<float> alpha(size), luminance(size), red(size), blue(size);
@@ -195,7 +196,7 @@ QImage apply_detail(const QImage& input, const DetailSettings& s, double amount,
             p[1] = (light[i] - (.2126F * red[i] + .0722F * blue[i]) / .7152F) * alpha[i];
             for (int c = 0; c < 3; ++c)
                 if (!std::isfinite(p[c]))
-                    throw EditError(QStringLiteral("细节结果超出浮点范围"));
+                    throw EditError(QCoreApplication::translate("Huelith", "细节结果超出浮点范围"));
         }
     }
     return result;

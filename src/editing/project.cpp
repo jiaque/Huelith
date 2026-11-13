@@ -1,14 +1,18 @@
-#include <cstring>
-#include "huelith/editing/image_storage.h"
+#include <QCoreApplication>
 #include "huelith/editing/project.h"
+#include "huelith/editing/document_color.h"
+#include "huelith/editing/image_storage.h"
 #include "huelith/editing/tiff_io.h"
 #include <QImageReader>
 #include <QImageWriter>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QPainter>
 #include <QSet>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <numbers>
 #include <utility>
 
 namespace huelith::editing {
@@ -18,6 +22,7 @@ void persist_state(State& state) {
     std::function<void(std::vector<Layer>&)> visit=[&](auto& layers) {
         for(auto& layer:layers) {
             persist_image(layer.pixels);persist_image(layer.mask);
+            for(auto& image:layer.generation_inputs)persist_image(image);
             for(auto& effect:layer.effects){persist_image(effect.mask);persist_image(effect.liquify);}
             visit(layer.children);
         }
@@ -28,12 +33,12 @@ void persist_state(State& state) {
 }
 void check_cancelled(const std::atomic_bool* cancelled) {
     if (cancelled && cancelled->load(std::memory_order_relaxed))
-        throw EditError(QStringLiteral("渲染已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "渲染已取消"));
 }
 QImage blank(QSize size) {
     auto image = allocate_image(size, QImage::Format_RGBA32FPx4_Premultiplied);
     if (image.isNull())
-        throw EditError(QStringLiteral("无法分配图像内存"));
+        throw EditError(QCoreApplication::translate("Huelith", "无法分配图像内存"));
     image.fill(Qt::transparent);
     image.setColorSpace(working_space());
     return image;
@@ -41,7 +46,7 @@ QImage blank(QSize size) {
 void check_size(QSize size) {
     if (size.isEmpty() || size.width() > 65536 || size.height() > 65536 ||
         qint64(size.width()) * size.height() > max_pixels)
-        throw EditError(QStringLiteral("图片尺寸超出当前 5.12 亿像素预算"));
+        throw EditError(QCoreApplication::translate("Huelith", "图片尺寸超出当前 5.12 亿像素预算"));
 }
 float coverage(const Layer& layer, int x, int y) {
     float value = layer.opacity;
@@ -176,30 +181,93 @@ QImage style_image(const QImage& content, const std::vector<float>& mask, const 
     }
     return result;
 }
-void style_interior(QImage& content, const std::vector<float>& mask, const LayerStyle& style) {
+void style_interior(QImage& content, const std::vector<float>& mask, const LayerStyle& style,
+                    double pixel_scale) {
     const bool artistic = style.blend != Blend::normal;
     QImage working = artistic
                          ? content.convertedToColorSpace(QColorSpace::SRgbLinear,
                                                          QImage::Format_RGBA32FPx4_Premultiplied)
                          : content;
-    QImage swatch(1, 1, QImage::Format_RGBA8888);
-    swatch.fill(style.color);
+    QImage swatch(2, 1, QImage::Format_RGBA8888);
+    swatch.setPixelColor(0, 0, style.color);
+    swatch.setPixelColor(1, 0, style.color2);
     swatch.setColorSpace(QColorSpace::SRgb);
     swatch =
         swatch.convertedToColorSpace(working.colorSpace(), QImage::Format_RGBA32FPx4_Premultiplied);
     const auto* pixel = reinterpret_cast<const float*>(swatch.constBits());
-    if (pixel[3] == 0)
-        return;
-    Color color{pixel[0] / pixel[3], pixel[1] / pixel[3], pixel[2] / pixel[3]};
+    const auto swatch_color = [&](int i) {
+        const auto* p = pixel + 4 * i;
+        return p[3] > 0 ? Color{p[0] / p[3], p[1] / p[3], p[2] / p[3]} : Color{};
+    };
+    const Color first = swatch_color(0), second = swatch_color(1);
+    QImage pattern;
+    if (style.kind == 7) {
+        if (style.pattern.isNull())
+            return;
+        pattern = style.pattern;
+        if (!pattern.colorSpace().isValid())
+            pattern.setColorSpace(QColorSpace::SRgb);
+        pattern = pattern.convertedToColorSpace(working.colorSpace(),
+                                                QImage::Format_RGBA32FPx4_Premultiplied);
+        if (pattern.isNull())
+            throw EditError(QCoreApplication::translate("Huelith", "样式图案颜色转换失败"));
+    }
+    QRect bounds;
+    if (style.kind == 6 || style.kind == 7) {
+        int left = working.width(), top = working.height(), right = -1, bottom = -1;
+        for (int y = 0; y < working.height(); ++y) {
+            const auto* row = reinterpret_cast<const float*>(working.constScanLine(y));
+            for (int x = 0; x < working.width(); ++x)
+                if (row[x * 4 + 3] > 0) {
+                    left = std::min(left, x);
+                    right = std::max(right, x);
+                    top = std::min(top, y);
+                    bottom = std::max(bottom, y);
+                }
+        }
+        bounds = QRect(QPoint(left, top), QPoint(right, bottom));
+    }
+    const double theta = style.angle * std::numbers::pi / 180.;
+    const double gradient_span = std::max(1., (std::abs(std::cos(theta)) * bounds.width() +
+                                               std::abs(std::sin(theta)) * bounds.height()) *
+                                                  style.size / 100.);
     for (int y = 0; y < working.height(); ++y) {
         auto* row = reinterpret_cast<float*>(working.scanLine(y));
         for (int x = 0; x < working.width(); ++x) {
             auto* p = row + x * 4;
             if (p[3] <= 0)
                 continue;
+            const auto coverage = mask[std::size_t(y) * working.width() + x];
+            Color color = first;
+            float opacity = pixel[3];
+            if (style.kind == 8 && coverage > 0) {
+                color = second;
+                opacity = pixel[7];
+            }
+            if (style.kind == 6) {
+                const double dx = x - bounds.center().x(), dy = y - bounds.center().y();
+                const double position =
+                    style.position == 1
+                        ? std::hypot(dx, dy) * 2 / gradient_span
+                        : .5 + (dx * std::cos(theta) + dy * std::sin(theta)) / gradient_span;
+                const float t = float(std::clamp(position, 0., 1.));
+                for (int c = 0; c < 3; ++c)
+                    color[c] = std::lerp(first[c], second[c], t);
+                opacity = std::lerp(pixel[3], pixel[7], t);
+            } else if (style.kind == 7) {
+                const double tile_scale = std::max(.01, style.size / 100. * pixel_scale);
+                const int px = int((x - bounds.left()) / tile_scale) % pattern.width(),
+                          py = int((y - bounds.top()) / tile_scale) % pattern.height();
+                const auto* sample =
+                    reinterpret_cast<const float*>(pattern.constScanLine(py)) + px * 4;
+                opacity = sample[3];
+                if (opacity > 0)
+                    for (int c = 0; c < 3; ++c)
+                        color[c] = sample[c] / opacity;
+            }
             const float k =
-                std::clamp(mask[std::size_t(y) * working.width() + x] / p[3], 0.F, 1.F) *
-                float(style.opacity) * pixel[3];
+                std::clamp((style.kind == 8 ? std::abs(coverage) : coverage) / p[3], 0.F, 1.F) *
+                float(style.opacity) * opacity;
             Color term = color;
             if (artistic) {
                 term = artistic_term(
@@ -221,22 +289,28 @@ void styled_composite(QImage& target, QImage content, const Layer& layer, const 
     const auto& styles = layer.styles;
     const auto original = content;
     for (const int index : {1, 3, 0}) {
-        const auto& style = styles.entries[index];
-        if (!style.enabled || (index == 0 && style.position == 1))
-            continue;
-        const auto mask =
-            style_coverage(original, static_cast<StyleKind>(index), style, global_angle, scale);
-        auto effect_layer = layer;
-        effect_layer.blend = style.blend;
-        composite(target, style_image(original, mask, style), effect_layer, clip, cancelled);
+        for (const auto& style : styles.entries) {
+            if (style.kind != index)
+                continue;
+            if (!style.enabled || (index == 0 && style.position == 1))
+                continue;
+            const auto mask = style_coverage(original, static_cast<StyleKind>(index), style,
+                                             global_angle, scale * styles.scale);
+            auto effect_layer = layer;
+            effect_layer.blend = style.blend;
+            composite(target, style_image(original, mask, style), effect_layer, clip, cancelled);
+        }
     }
-    for (const int index : {5, 2, 4, 0}) {
-        const auto& style = styles.entries[index];
-        if (!style.enabled || (index == 0 && style.position == 0))
-            continue;
-        const auto mask =
-            style_coverage(original, static_cast<StyleKind>(index), style, global_angle, scale);
-        style_interior(content, mask, style);
+    for (const int index : {5, 6, 7, 9, 2, 4, 8, 0}) {
+        for (const auto& style : styles.entries) {
+            if (style.kind != index)
+                continue;
+            if (!style.enabled || (index == 0 && style.position == 0))
+                continue;
+            const auto mask = style_coverage(original, static_cast<StyleKind>(index), style,
+                                             global_angle, scale * styles.scale);
+            style_interior(content, mask, style, scale * styles.scale);
+        }
     }
     composite(target, content, layer, clip, cancelled);
 }
@@ -393,16 +467,23 @@ void render_layers(QImage& target, const std::vector<Layer>& layers, const Rende
 }
 void validate_layers(const std::vector<Layer>& layers, QSet<QUuid>& ids, int depth) {
     if (depth > 32)
-        throw EditError(QStringLiteral("图层嵌套超过 32 层"));
+        throw EditError(QCoreApplication::translate("Huelith", "图层嵌套超过 32 层"));
     for (const auto& layer : layers) {
         validate_tone(layer.tone);
         validate_effects(layer.effects);
         validate_styles(layer.styles);
+        if (layer.generation_inputs.size() > 32)
+            throw EditError(QCoreApplication::translate("Huelith", "生成输入快照超过 32 个"));
+        for (const auto& image : layer.generation_inputs)
+            if (image.isNull() || qint64(image.width()) * image.height() > max_pixels)
+                throw EditError(QCoreApplication::translate("Huelith", "生成输入快照尺寸无效"));
+        if (layer.artboard && (!layer.frame || layer.kind != LayerKind::group))
+            throw EditError(QCoreApplication::translate("Huelith", "画板需要有效的组和边界"));
         if (layer.frame &&
             (layer.kind != LayerKind::group || layer.frame->isEmpty() ||
              !std::isfinite(layer.frame->x()) || !std::isfinite(layer.frame->y()) ||
              !std::isfinite(layer.frame->width()) || !std::isfinite(layer.frame->height())))
-            throw EditError(QStringLiteral("相框参数无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "相框参数无效"));
         if (layer.kind == LayerKind::text)
             validate_text(layer.text);
         if (layer.kind == LayerKind::shape)
@@ -413,32 +494,32 @@ void validate_layers(const std::vector<Layer>& layers, QSet<QUuid>& ids, int dep
              layer.blend != Blend::normal || layer.clipped || !layer.mask.isNull() ||
              layer.vector_enabled || !layer.children.empty()))
             throw EditError(
-                QStringLiteral("背景图层固定在底部；请先转换为普通图层再变换或添加透明度"));
+                QCoreApplication::translate("Huelith", "背景图层固定在底部；请先转换为普通图层再变换或添加透明度"));
         if (int(layer.kind) < 0 || int(layer.kind) > int(LayerKind::shape) ||
             int(layer.blend) < 0 || int(layer.blend) > 23)
-            throw EditError(QStringLiteral("未知图层类型或混合模式"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知图层类型或混合模式"));
         if (layer.id.isNull() || ids.contains(layer.id) || ids.size() >= 4096)
-            throw EditError(QStringLiteral("图层标识重复或数量过多"));
+            throw EditError(QCoreApplication::translate("Huelith", "图层标识重复或数量过多"));
         ids.insert(layer.id);
         for (const auto& matrix : {layer.transform, layer.mask_transform})
             for (double value :
                  {matrix.m11(), matrix.m12(), matrix.m13(), matrix.m21(), matrix.m22(),
                   matrix.m23(), matrix.m31(), matrix.m32(), matrix.m33()})
                 if (!std::isfinite(value))
-                    throw EditError(QStringLiteral("变换含非有限数值"));
+                    throw EditError(QCoreApplication::translate("Huelith", "变换含非有限数值"));
         for (const auto& point : layer.warp_grid)
             if (!std::isfinite(point.x()) || !std::isfinite(point.y()) ||
                 std::abs(point.x()) > 100 || std::abs(point.y()) > 100)
-                throw EditError(QStringLiteral("无效网格变形坐标"));
+                throw EditError(QCoreApplication::translate("Huelith", "无效网格变形坐标"));
         if (layer.name.trimmed().isEmpty() || !std::isfinite(layer.opacity) || layer.opacity < 0 ||
             layer.opacity > 1 || !std::isfinite(layer.exposure) || std::abs(layer.exposure) > 16 ||
             !layer.transform.isInvertible() || !layer.mask_transform.isInvertible())
-            throw EditError(QStringLiteral("无效图层参数或变换"));
+            throw EditError(QCoreApplication::translate("Huelith", "无效图层参数或变换"));
         if (!layer.pixels.isNull() &&
             layer.pixels.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-            throw EditError(QStringLiteral("图层需要 FP32 像素"));
+            throw EditError(QCoreApplication::translate("Huelith", "图层需要 FP32 像素"));
         if (!layer.mask.isNull() && layer.mask.format() != QImage::Format_Grayscale8)
-            throw EditError(QStringLiteral("蒙版格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "蒙版格式无效"));
         validate_layers(layer.children, ids, depth + 1);
     }
 }
@@ -480,7 +561,7 @@ QImage convert_linear_rgb(const QImage& source, const QColorSpace& destination,
     result.setColorSpace(destination);
     for (int y = 0; y < result.height(); ++y) {
         if (cancelled && cancelled->load())
-            throw EditError(QStringLiteral("颜色转换已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "颜色转换已取消"));
         auto* row = reinterpret_cast<float*>(result.scanLine(y));
         for (int x = 0; x < result.width(); ++x) {
             auto* p = row + x * 4;
@@ -498,7 +579,7 @@ QImage to_working(QImage image) {
     auto result =
         convert_linear_rgb(image, working_space());
     if (result.isNull())
-        throw EditError(QStringLiteral("颜色转换失败"));
+        throw EditError(QCoreApplication::translate("Huelith", "颜色转换失败"));
     return result;
 }
 QImage import_image(const QString& path) {
@@ -508,7 +589,7 @@ QImage import_image(const QString& path) {
     reader.setAutoTransform(true);
     if (reader.format().toLower() != "png" && reader.format().toLower() != "jpeg" &&
         reader.format().toLower() != "jpg")
-        throw EditError(QStringLiteral("支持 JPEG / PNG / TIFF；RAW 请通过显影窗口打开"));
+        throw EditError(QCoreApplication::translate("Huelith", "支持 JPEG / PNG / TIFF；RAW 请通过显影窗口打开"));
     check_size(reader.size());
     // The decoder's default 256 MiB guard is smaller than a valid large PNG.
     // Dimensions are checked above; decoded pixels are migrated to scratch storage.
@@ -520,7 +601,7 @@ QImage import_image(const QString& path) {
 }
 QImage display_image(const QImage& image, const QColorSpace& output) {
     if (!output.isValid())
-        throw EditError(QStringLiteral("显示配置文件无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "显示配置文件无效"));
     // Qt 6.10's combined FP32-premultiplied/color-space conversion can retain
     // associated RGB values in the straight-alpha result. Unassociate first so
     // translucent pixels have the same displayed color as their opaque peers.
@@ -532,7 +613,7 @@ QImage render(const State& state, const RenderOptions& options) {
     check_cancelled(options.cancelled);
     validate_state(state);
     if (!std::isfinite(state.global_light_angle) || std::abs(state.global_light_angle) > 360)
-        throw EditError(QStringLiteral("全局光角度无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "全局光角度无效"));
     auto result = blank(state.size);
     auto rendering = options;
     rendering.global_light_angle = state.global_light_angle;
@@ -556,15 +637,15 @@ QImage render(const State& state, const RenderOptions& options) {
             for(int row=0;row<tile.height();++row)
                 std::memcpy(result.scanLine(y+row)+qint64(x)*16,tile.constScanLine(row),std::size_t(tile.width())*16);
         }
-        return result;
+        return constrain_document_color(result, state);
     }
     render_layers(result, state.layers, rendering);
     check_cancelled(options.cancelled);
-    return result;
+    return constrain_document_color(result, state);
 }
 State preview_state(const State& state, int maximum_edge) {
     if (maximum_edge < 1)
-        throw EditError(QStringLiteral("预览尺寸无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "预览尺寸无效"));
     auto preview = state;
     const double scale =
         std::min(1., double(maximum_edge) / std::max(state.size.width(), state.size.height()));
@@ -592,6 +673,12 @@ State preview_state(const State& state, int maximum_edge) {
             for (auto& effect : layer.effects) {
                 resize(effect.mask);
                 effect.blur_radius *= scale;
+                if (effect.filter == 1 || effect.filter == 2 || effect.filter == 3 ||
+                    effect.filter == 9 || effect.filter == 11 || effect.filter == 13 ||
+                    effect.filter == 15 || effect.filter == 16)
+                    effect.filter_radius = std::max(.1, effect.filter_radius * scale);
+                if (effect.filter == 13)
+                    effect.filter_angle *= scale;
             }
             visit(layer.children);
         }
@@ -601,7 +688,10 @@ State preview_state(const State& state, int maximum_edge) {
     resize(preview.selection);
     visit(preview.layers);
     preview.snapshots.clear();
-    preview.saved_selections.clear();
+    for (auto& mask : preview.saved_selections)
+        resize(mask);
+    for (auto& slice : preview.slices)
+        slice.bounds = shrink.mapRect(slice.bounds);
     return preview;
 }
 Layer* find_layer(std::vector<Layer>& layers, const QUuid& id) {
@@ -624,18 +714,30 @@ const Layer* find_layer(const std::vector<Layer>& layers, const QUuid& id) {
 }
 void validate_state(const State& state) {
     check_size(state.size);
+    (void)document_color(state);
+    QSet<QUuid> slice_ids;
+    if (state.slices.size() > 4096)
+        throw EditError(QCoreApplication::translate("Huelith", "切片数量过多"));
+    for (const auto& slice : state.slices) {
+        if (slice.id.isNull() || slice_ids.contains(slice.id) || slice.name.trimmed().isEmpty() ||
+            slice.bounds.isEmpty() || slice.bounds.width() > 65536 ||
+            slice.bounds.height() > 65536 || std::abs(qint64(slice.bounds.x())) > 1000000 ||
+            std::abs(qint64(slice.bounds.y())) > 1000000)
+            throw EditError(QCoreApplication::translate("Huelith", "切片名称、标识或边界无效"));
+        slice_ids.insert(slice.id);
+    }
     qint64 metadata_bytes=QJsonDocument(state.metadata).toJson(QJsonDocument::Compact).size();
     std::function<void(const std::vector<Layer>&)> count_metadata=[&](const auto& layers){
         for(const auto& layer:layers){metadata_bytes+=QJsonDocument(layer.source_metadata).toJson(QJsonDocument::Compact).size();count_metadata(layer.children);}
     };
     count_metadata(state.layers);
-    if(metadata_bytes>32*1024*1024)throw EditError(QStringLiteral("工程元数据超过 32 MiB"));
+    if(metadata_bytes>32*1024*1024)throw EditError(QCoreApplication::translate("Huelith", "工程元数据超过 32 MiB"));
     if (state.name.trimmed().isEmpty() || !std::isfinite(state.ppi) || state.ppi <= 0 ||
         !std::isfinite(state.global_light_angle) || std::abs(state.global_light_angle) > 360)
-        throw EditError(QStringLiteral("无效文档参数"));
+        throw EditError(QCoreApplication::translate("Huelith", "无效文档参数"));
     if (!state.selection.isNull() && (state.selection.size() != state.size ||
                                       state.selection.format() != QImage::Format_Grayscale8))
-        throw EditError(QStringLiteral("选区尺寸或格式无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "选区尺寸或格式无效"));
     QSet<QUuid> ids;
     validate_layers(state.layers, ids, 0);
 }
@@ -666,24 +768,24 @@ void shift_layer(State& state, const QUuid& id, int direction) {
         return false;
     };
     if (!locate(state.layers, {}))
-        throw EditError(QStringLiteral("图层不存在"));
+        throw EditError(QCoreApplication::translate("Huelith", "图层不存在"));
 }
 void remove_layer(State& state, const QUuid& id) {
     const auto* layer = find_layer(state.layers, id);
     if (!layer || layer_locked(state.layers, id))
-        throw EditError(QStringLiteral("图层不存在或已锁定"));
+        throw EditError(QCoreApplication::translate("Huelith", "图层不存在或已锁定"));
     erase(state.layers, id);
 }
 void move_layer(State& state, const QUuid& id, const QUuid& parent, int position) {
     const auto* source = find_layer(state.layers, id);
     if (!source || layer_position_locked(state.layers, id) || id == parent ||
         find_layer(source->children, parent))
-        throw EditError(QStringLiteral("禁止循环引用或移动锁定图层"));
+        throw EditError(QCoreApplication::translate("Huelith", "禁止循环引用或移动锁定图层"));
     if (!parent.isNull()) {
         const auto* destination = find_layer(state.layers, parent);
         if (!destination || layer_locked(state.layers, parent) ||
             (destination->kind != LayerKind::group && destination->kind != LayerKind::composition))
-            throw EditError(QStringLiteral("目标不是可编辑组"));
+            throw EditError(QCoreApplication::translate("Huelith", "目标不是可编辑组"));
     }
     const auto& previous_target =
         parent.isNull() ? state.layers : find_layer(state.layers, parent)->children;
@@ -718,7 +820,7 @@ QImage path_range(QSize size, const QPainterPath& path) {
 }
 void combine_range(State& state, const QImage& range, RangeOp operation) {
     if (range.size() != state.size || range.format() != QImage::Format_Grayscale8)
-        throw EditError(QStringLiteral("选区格式不匹配"));
+        throw EditError(QCoreApplication::translate("Huelith", "选区格式不匹配"));
     if (operation == RangeOp::replace || state.selection.isNull()) {
         state.selection = range;
         return;
@@ -736,7 +838,7 @@ void combine_range(State& state, const QImage& range, RangeOp operation) {
 }
 void modify_range(State& state, int radius, int operation) {
     if (state.selection.isNull() || radius < 1 || radius > 64)
-        throw EditError(QStringLiteral("需要选区；半径为 1–64"));
+        throw EditError(QCoreApplication::translate("Huelith", "需要选区；半径为 1–64"));
     // Separable bounded kernel retains soft coverage; no thresholded binary conversion.
     for (int axis = 0; axis < 2; ++axis) {
         const QImage before = state.selection;
@@ -760,7 +862,7 @@ void export_image(const State& state, const QString& path, QColor matte, int qua
     auto image = display_image(render(state));
     const auto suffix = path.section('.', -1).toLower();
     if (suffix != "png" && suffix != "jpg" && suffix != "jpeg")
-        throw EditError(QStringLiteral("导出请选择 PNG 或 JPEG"));
+        throw EditError(QCoreApplication::translate("Huelith", "导出请选择 PNG 或 JPEG"));
     if (suffix != "png") {
         QImage opaque(image.size(), QImage::Format_RGB888);
         opaque.fill(matte);
@@ -780,7 +882,31 @@ void export_image(const State& state, const QString& path, QColor matte, int qua
 Project::Project(State state) : state_(std::move(state)) {
     validate_state(state_);
     persist_state(state_);
-    history_.push_back({state_, QStringLiteral("初始状态"), revision_});
+    history_.push_back({state_, QCoreApplication::translate("Huelith", "初始状态"), revision_});
+}
+void synchronize_source(State& state, const Layer& source) {
+    if (source.source_id.isNull())
+        return;
+    const auto content = source;
+    const auto visit = [&](auto&& self, std::vector<Layer>& layers) -> void {
+        for (auto& layer : layers) {
+            if (layer.source_id == content.source_id && layer.id != content.id) {
+                layer.pixels = content.pixels;
+                layer.raw_source = content.raw_source;
+                layer.raw_recipe = content.raw_recipe;
+                layer.linked_path = content.linked_path;
+                layer.linked_hash = content.linked_hash;
+                layer.source_metadata = content.source_metadata;
+                // Nested layer IDs belong to their instance, not to the shared source.
+                layer.children.clear();
+                for (const auto& child : content.children)
+                    layer.children.push_back(duplicate_layer(child));
+                continue;
+            }
+            self(self, layer.children);
+        }
+    };
+    visit(visit, state.layers);
 }
 void Project::edit(const QString& name, const std::function<void(State&)>& operation) {
     State draft = state_;
@@ -795,12 +921,21 @@ void Project::edit(const QString& name, const std::function<void(State&)>& opera
     ++position_;
     set_history_limit(history_limit_);
 }
-void Project::set_history_limit(std::size_t count) {
+void Project::set_history_limit(std::size_t count,qint64 bytes) {
+    if(bytes>0)history_bytes_limit_=bytes;
     history_limit_ = std::clamp(count, std::size_t(2), std::size_t(1000));
-    if (history_.size() <= history_limit_)
-        return;
-    const auto first = position_ >= history_limit_ ? position_ - history_limit_ + 1 : 0;
-    const auto last = std::min(history_.size(), first + history_limit_);
+    QSet<const void*> seen;qint64 extra=0;
+    const auto add=[&](const State& s){
+        auto image=[&](const QImage& im){if(!im.isNull()&&!seen.contains(im.constBits())){seen.insert(im.constBits());extra+=im.sizeInBytes();}};
+        const auto visit=[&](auto&& self,const auto& layers)->void{for(const auto& l:layers){
+            image(l.pixels);image(l.mask);for(const auto& e:l.effects){image(e.mask);image(e.liquify);}
+            for(const auto& im:l.generation_inputs)image(im);
+            for(const auto& e:l.styles.entries)image(e.pattern);
+            self(self,l.children);}};visit(visit,s.layers);image(s.selection);for(const auto& im:s.saved_selections)image(im);for(const auto& im:s.snapshots)image(im);
+    };
+    add(state_);extra=0;auto first=position_,last=position_+1;
+    while(first>0&&last-first<history_limit_){add(history_[first-1].state);if(extra>history_bytes_limit_)break;--first;}
+    while(last<history_.size()&&last-first<history_limit_){add(history_[last].state);if(extra>history_bytes_limit_)break;++last;}
     history_.erase(history_.begin() + last, history_.end());
     history_.erase(history_.begin(), history_.begin() + first);
     position_ -= first;
@@ -838,7 +973,7 @@ bool Project::seek_history(std::size_t position) {
 }
 State Project::history_state(std::size_t position) const {
     if (position >= history_.size())
-        throw EditError(QStringLiteral("无效历史位置"));
+        throw EditError(QCoreApplication::translate("Huelith", "无效历史位置"));
     return history_[position].state;
 }
 QTransform parent_matrix(const State& state, const QUuid& id) {
@@ -897,13 +1032,29 @@ std::vector<QUuid> root_targets(const State& state, const std::vector<QUuid>& id
 }
 void transform_targets(State& state, const std::vector<QUuid>& ids, const QTransform& delta,
                        bool mask) {
+    auto targets = ids;
+    if (!mask)
+        for (const auto& record : state.metadata["layerLinks"].toArray()) {
+            const auto group = record.toArray();
+            bool linked = false;
+            for (const auto& value : group)
+                if (std::find(ids.begin(), ids.end(), QUuid(value.toString())) != ids.end())
+                    linked = true;
+            if (linked)
+                for (const auto& value : group) {
+                    const QUuid id(value.toString());
+                    if (find_layer(state.layers, id) &&
+                        std::find(targets.begin(), targets.end(), id) == targets.end())
+                        targets.push_back(id);
+                }
+        }
     // Validate the whole selection before mutating any member.
-    for (const auto& id : root_targets(state, ids))
+    for (const auto& id : root_targets(state, targets))
         if (layer_position_locked(state.layers, id))
-            throw EditError(QStringLiteral("选择包含背景或锁定图层；请先转换背景为普通图层"));
-    for (const auto& id : root_targets(state, ids)) {
+            throw EditError(QCoreApplication::translate("Huelith", "选择包含背景或锁定图层；请先转换背景为普通图层"));
+    for (const auto& id : root_targets(state, targets)) {
         if (layer_locked(state.layers, id))
-            throw EditError(QStringLiteral("选择包含锁定图层"));
+            throw EditError(QCoreApplication::translate("Huelith", "选择包含锁定图层"));
         const auto parent = parent_matrix(state, id);
         auto* layer = find_layer(state.layers, id);
         const auto local = parent * delta * parent.inverted();

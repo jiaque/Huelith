@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/optics.h"
 #include "huelith/editing/point_color.h"
 #include "huelith/editing/project.h"
@@ -13,11 +14,11 @@ namespace huelith::editing {
 namespace {
 void check_cancel(const std::atomic_bool* cancelled) {
     if (cancelled && cancelled->load())
-        throw EditError(QStringLiteral("光学校正已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "光学校正已取消"));
 }
 void bounded(double value, double low, double high) {
     if (!std::isfinite(value) || value < low || value > high)
-        throw EditError(QStringLiteral("光学校正参数超出范围"));
+        throw EditError(QCoreApplication::translate("Huelith", "光学校正参数超出范围"));
 }
 float sample(const QImage& image, double x, double y, int channel) {
     if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x > image.width() - 1 ||
@@ -80,7 +81,7 @@ double estimate_ca(const QImage& source, int channel, const std::atomic_bool* ca
 std::vector<LensProfile> lens_profiles(const QString& directory) {
     lfDatabase db;
     if (!db.LoadDirectory(QDir::toNativeSeparators(directory).toUtf8().constData()))
-        throw EditError(QStringLiteral("镜头数据库不可用"));
+        throw EditError(QCoreApplication::translate("Huelith", "镜头数据库不可用"));
     std::vector<LensProfile> result;
     const auto* lenses = db.GetLenses();
     for (int i = 0; lenses && lenses[i]; ++i) {
@@ -159,12 +160,12 @@ void validate_optics(const OpticsSettings& s) {
         bounded(range[0], 0, 90);
         bounded(range[1], 10, 100);
         if (range[1] - range[0] < 10)
-            throw EditError(QStringLiteral("去边色相范围至少相隔10"));
+            throw EditError(QCoreApplication::translate("Huelith", "去边色相范围至少相隔10"));
     }
     if (s.profile_xml.size() > 2'000'000)
-        throw EditError(QStringLiteral("镜头配置过大"));
+        throw EditError(QCoreApplication::translate("Huelith", "镜头配置过大"));
     if (s.profile_enabled && s.profile_xml.isEmpty())
-        throw EditError(QStringLiteral("请先选择镜头配置"));
+        throw EditError(QCoreApplication::translate("Huelith", "请先选择镜头配置"));
 }
 QJsonObject optics_json(const OpticsSettings& s) {
     validate_optics(s);
@@ -193,11 +194,11 @@ OpticsSettings optics_from_json(const QJsonObject& json) {
     if (json.isEmpty())
         return s;
     if (json.value("version").toInt() != 1)
-        throw EditError(QStringLiteral("未知光学配方版本"));
+        throw EditError(QCoreApplication::translate("Huelith", "未知光学配方版本"));
     const auto defaults = optics_json(s);
     for (auto it = json.begin(); it != json.end(); ++it)
         if (!defaults.contains(it.key()))
-            throw EditError(QStringLiteral("未知光学参数"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知光学参数"));
     for (auto [key, value] : {std::pair{"cropFactor", &s.crop_factor},
                               {"focal", &s.focal},
                               {"aperture", &s.aperture},
@@ -211,7 +212,7 @@ OpticsSettings optics_from_json(const QJsonObject& json) {
                               {"green", &s.green}}) {
         if (json.contains(QLatin1String(key))) {
             if (!json.value(QLatin1String(key)).isDouble())
-                throw EditError(QStringLiteral("光学数值格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "光学数值格式无效"));
             *value = json.value(QLatin1String(key)).toDouble();
         }
     }
@@ -220,21 +221,21 @@ OpticsSettings optics_from_json(const QJsonObject& json) {
                               {"removeCA", &s.remove_ca}})
         if (json.contains(QLatin1String(key))) {
             if (!json.value(QLatin1String(key)).isBool())
-                throw EditError(QStringLiteral("光学开关格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "光学开关格式无效"));
             *value = json.value(QLatin1String(key)).toBool();
         }
     for (auto [key, value] :
          {std::pair{"profileXML", &s.profile_xml}, {"profileName", &s.profile_name}})
         if (json.contains(QLatin1String(key))) {
             if (!json.value(QLatin1String(key)).isString())
-                throw EditError(QStringLiteral("镜头配置格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "镜头配置格式无效"));
             *value = json.value(QLatin1String(key)).toString();
         }
     for (auto [key, value] : {std::pair{"purpleHue", &s.purple_hue}, {"greenHue", &s.green_hue}})
         if (json.contains(QLatin1String(key))) {
             const auto a = json.value(QLatin1String(key)).toArray();
             if (a.size() != 2 || !a[0].isDouble() || !a[1].isDouble())
-                throw EditError(QStringLiteral("去边范围无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "去边范围无效"));
             *value = {a[0].toDouble(), a[1].toDouble()};
         }
     validate_optics(s);
@@ -249,7 +250,7 @@ QImage apply_optics(const QImage& source, const OpticsSettings& s,
         return source;
     if (source.format() != QImage::Format_RGBA32FPx4_Premultiplied ||
         source.colorSpace() != working_space())
-        throw EditError(QStringLiteral("光学校正需要线性FP32图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "光学校正需要线性FP32图像"));
     // Geometry and achromatic gain commute with the working-space matrix. Avoid
     // unnecessary color conversions, including their finite precision error.
     const bool chromatic = s.remove_ca;
@@ -262,7 +263,7 @@ QImage apply_optics(const QImage& source, const OpticsSettings& s,
         const auto xml = s.profile_xml.toUtf8();
         if (db.Load("embedded profile", xml.constData(), std::size_t(xml.size())) != LF_NO_ERROR ||
             !db.GetLenses() || !db.GetLenses()[0])
-            throw EditError(QStringLiteral("镜头配置无法解析"));
+            throw EditError(QCoreApplication::translate("Huelith", "镜头配置无法解析"));
         const auto* lens = db.GetLenses()[0];
         modifier = std::make_unique<lfModifier>(lens, float(s.crop_factor), source.width(),
                                                 source.height());

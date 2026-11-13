@@ -25,6 +25,14 @@ using namespace editing;
 void EditorController::configure_template_tools() {
     auto* file = window_->menus_->actions().first()->menu();
     auto* templates = file->addMenu(tr("布局与模板"));
+    templates->addAction(tr("画板管理…"), this, [this] { guarded([&] { show_regions(false); }); });
+    templates->addAction(tr("切片管理…"), this, [this] { guarded([&] { show_regions(true); }); });
+    file->addAction(tr("图像大小…"),this,[this]{guarded([&]{show_image_size(false);});});
+    file->addAction(tr("画布大小…"),this,[this]{guarded([&]{show_image_size(true);});});
+    file->addAction(tr("文档颜色与精度…"), this, [this] { guarded([&] { show_document_color(false); }); });
+    file->addAction(tr("校样设置…"), this, [this] { guarded([&] { show_document_color(true); }); });
+    auto* print = file->addAction(tr("打印…"), this, [this] { guarded([&] { print_document(); }); });
+    print->setShortcut(QKeySequence::Print);
     auto create = [this](State state) {
         CanvasSpec spec;
         spec.width = state.size.width();

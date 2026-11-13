@@ -1,6 +1,7 @@
 #include "application_icon.h"
 #include "main_window.h"
 #include "canvas_preferences.h"
+#include "interface_language.h"
 #include "huelith/editing/ai_worker.h"
 #include <QApplication>
 #include <QCommandLineParser>
@@ -15,6 +16,7 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setApplicationName("Huelith");
     huelith::desktop::configure_interface_scale();
     QApplication application(argc, argv);
+    huelith::desktop::install_interface_language();
     application.setWindowIcon(huelith::desktop::application_icon());
     QCoreApplication::setApplicationVersion("0.1.0-dev");
     QCommandLineParser parser;

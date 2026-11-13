@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/portrait_effects.h"
 #include "huelith/editing/project.h"
 #include <QJsonArray>
@@ -9,14 +10,14 @@ QJsonObject portrait_scalp_geometry(const QJsonObject& person) {
     const auto masks=person["settings"].toObject()["automaticMasks"].toObject();
     const auto decode=[&](const char* key){return QImage::fromData(QByteArray::fromBase64(masks[key].toString().toLatin1())).convertToFormat(QImage::Format_Grayscale8);};
     const auto hair=decode("hair"),skin=decode("skin");const auto points=person["landmarks"].toArray();
-    if(hair.isNull() || skin.isNull() || points.size()<66)return {{"valid",false},{"reason",QStringLiteral("需要先完成头发与皮肤识别")}};
+    if(hair.isNull() || skin.isNull() || points.size()<66)return {{"valid",false},{"reason",QCoreApplication::translate("Huelith", "需要先完成头发与皮肤识别")}};
     const auto canvas=hair.size();const auto skinMask=skin.scaled(canvas,Qt::IgnoreAspectRatio,Qt::SmoothTransformation);
     auto point=[&](int i){const auto a=points[i].toArray();return cv::Point2f(float(a[0].toDouble()*canvas.width()),float(a[1].toDouble()*canvas.height()));};
     auto axis=(point(42)+point(45)-point(36)-point(39))*.5F;const float eyeSpan=float(cv::norm(axis));
-    if(eyeSpan<2)return {{"valid",false},{"reason",QStringLiteral("眼部定位不足，不能建立头部方向")}};
+    if(eyeSpan<2)return {{"valid",false},{"reason",QCoreApplication::translate("Huelith", "眼部定位不足，不能建立头部方向")}};
     axis*=1/eyeSpan;const cv::Point2f down(-axis.y,axis.x);
     const auto origin=(point(39)+point(42))*.5F;const float width=float(cv::norm(point(16)-point(0)));
-    if(width<16)return {{"valid",false},{"reason",QStringLiteral("头部太小，无法可靠区分发际线")}};
+    if(width<16)return {{"valid",false},{"reason",QCoreApplication::translate("Huelith", "头部太小，无法可靠区分发际线")}};
     float baseline=0;for(int i=17;i<27;++i)baseline=std::min(baseline,(point(i)-origin).dot(down)/width);baseline-=.02F;
     auto pixel=[&](double x,double y){return origin+axis*float(x*width)+down*float(y*width);};
     auto sample=[&](const QImage& mask,cv::Point2f p){const int x=cvRound(p.x),y=cvRound(p.y);return x>=0 && y>=0 && x<mask.width() && y<mask.height()?int(mask.constScanLine(y)[x]):0;};
@@ -36,7 +37,7 @@ QJsonObject portrait_scalp_geometry(const QJsonObject& person) {
         if(std::abs(u)>.65 || v>baseline || v<-1.4)continue;
         top=std::min(top,v);++count;clipped|=x<2 || y<2 || x>=hair.width()-2 || y>=hair.height()-2;
     }
-    if(count<width*width*.02)return {{"valid",false},{"reason",QStringLiteral("没有足够可见头发，不能自动调整发际线或颅顶")}};
+    if(count<width*width*.02)return {{"valid",false},{"reason",QCoreApplication::translate("Huelith", "没有足够可见头发，不能自动调整发际线或颅顶")}};
     if(!boundaryDetected){
         // Crown/volume only need the visible hair extent. Keep the facial
         // boundary stable even when fine blond hairs have a weak skin seam.

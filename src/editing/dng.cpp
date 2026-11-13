@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/raw_camera.h"
 #include "huelith/editing/dng.h"
 #include "huelith/editing/image_storage.h"
@@ -32,10 +33,10 @@ TIFF* device_tiff(QIODevice& device, const char* mode) {
         },[](thandle_t){return 0;},[](thandle_t h)->toff_t{return toff_t(static_cast<QIODevice*>(h)->size());},
         [](thandle_t,void**,toff_t*){return 0;},[](thandle_t,void*,toff_t){});
 }
-void check(int value){if(value!=1)throw EditError(QStringLiteral("DNG 标签或像素写入失败"));}
-void cancel(const std::atomic_bool* flag){if(flag&&flag->load())throw EditError(QStringLiteral("保存 DNG 已取消"));}
+void check(int value){if(value!=1)throw EditError(QCoreApplication::translate("Huelith", "DNG 标签或像素写入失败"));}
+void cancel(const std::atomic_bool* flag){if(flag&&flag->load())throw EditError(QCoreApplication::translate("Huelith", "保存 DNG 已取消"));}
 void unpack(LibRaw& decoder,const QByteArray& bytes) {
-    if(bytes.isEmpty()||bytes.size()>512LL*1024*1024)throw EditError(QStringLiteral("RAW 源数据大小无效"));
+    if(bytes.isEmpty()||bytes.size()>512LL*1024*1024)throw EditError(QCoreApplication::translate("Huelith", "RAW 源数据大小无效"));
     int result=decoder.open_buffer(const_cast<char*>(bytes.constData()),std::size_t(bytes.size()));
     if(result==LIBRAW_SUCCESS)result=decoder.unpack();
     if(result!=LIBRAW_SUCCESS)throw EditError(QString::fromUtf8(libraw_strerror(result)));
@@ -43,7 +44,7 @@ void unpack(LibRaw& decoder,const QByteArray& bytes) {
     if(!data.rawdata.raw_image||!data.idata.filters||data.idata.colors!=3||
         qint64(data.sizes.raw_width)*data.sizes.raw_height>maximum_image_pixels||data.sizes.raw_pitch<data.sizes.raw_width*2u||
         data.color.cblack[4]>64||data.color.cblack[5]>64)
-        throw EditError(QStringLiteral("DNG 转存目前支持 RGB Bayer / X-Trans 传感器数据；此布局请保存工程或导出 TIFF"));
+        throw EditError(QCoreApplication::translate("Huelith", "DNG 转存目前支持 RGB Bayer / X-Trans 传感器数据；此布局请保存工程或导出 TIFF"));
 }
 QByteArray sensor_digest(const LibRaw& decoder) {
     QCryptographicHash hash(QCryptographicHash::Sha256);const auto& data=decoder.imgdata;
@@ -55,7 +56,7 @@ QByteArray recipe_packet(const QJsonObject& recipe) {
     RawGroups groups;groups.fill(true);
     (void)read_raw_preset(QJsonDocument(raw_preset(QStringLiteral("DNG"),recipe,groups)).toJson(QJsonDocument::Compact));
     const auto json=QJsonDocument(recipe).toJson(QJsonDocument::Compact);
-    if(json.size()>32*1024*1024)throw EditError(QStringLiteral("DNG 显影设置超过 32 MiB"));
+    if(json.size()>32*1024*1024)throw EditError(QCoreApplication::translate("Huelith", "DNG 显影设置超过 32 MiB"));
     QByteArray packet;QXmlStreamWriter xml(&packet);
     xml.writeStartElement("x:xmpmeta");xml.writeNamespace("adobe:ns:meta/","x");
     xml.writeStartElement("rdf:RDF");xml.writeNamespace("http://www.w3.org/1999/02/22-rdf-syntax-ns#","rdf");
@@ -78,11 +79,11 @@ QJsonObject raw_sensor_info(const QByteArray& bytes) {
 void save_raw_dng(const Layer& source,const QString& path,const std::atomic_bool* cancelled) {
     cancel(cancelled);
     const auto output=QFileInfo(path).absoluteFilePath();
-    if(!path.endsWith(".dng",Qt::CaseInsensitive))throw EditError(QStringLiteral("请选择 .dng 文件名"));
+    if(!path.endsWith(".dng",Qt::CaseInsensitive))throw EditError(QCoreApplication::translate("Huelith", "请选择 .dng 文件名"));
     if(!source.linked_path.isEmpty() &&
         (output.compare(QFileInfo(source.linked_path).absoluteFilePath(),Qt::CaseInsensitive)==0 ||
          (QFileInfo::exists(output)&&QFileInfo(output).canonicalFilePath().compare(QFileInfo(source.linked_path).canonicalFilePath(),Qt::CaseInsensitive)==0)))
-        throw EditError(QStringLiteral("DNG 必须保存为副本，不能覆盖 RAW 原片"));
+        throw EditError(QCoreApplication::translate("Huelith", "DNG 必须保存为副本，不能覆盖 RAW 原片"));
     LibRaw decoder;unpack(decoder,source.raw_source);cancel(cancelled);
     normalize_raw_neutral(decoder.imgdata.color);
     normalize_raw_matrix(decoder.imgdata.color);
@@ -90,7 +91,7 @@ void save_raw_dng(const Layer& source,const QString& path,const std::atomic_bool
     const auto packet=recipe_packet(source.raw_recipe);
     QSaveFile file(output);file.setDirectWriteFallback(false);
     if(!file.open(QIODevice::WriteOnly))throw EditError(file.errorString());
-    Tiff handle(device_tiff(file,"wl"),TIFFClose);if(!handle)throw EditError(QStringLiteral("无法创建 DNG"));
+    Tiff handle(device_tiff(file,"wl"),TIFFClose);if(!handle)throw EditError(QCoreApplication::translate("Huelith", "无法创建 DNG"));
     auto* tiff=handle.get();
     // Standard EXIF fields are retained independently from our versioned development recipe.
     uint64_t exif_offset{};
@@ -130,14 +131,14 @@ void save_raw_dng(const Layer& source,const QString& path,const std::atomic_bool
     const auto channel=[&](int y,int x){return period==6?int(data.idata.xtrans_abs[y%6][x%6]):decoder.COLOR(y,x);};
     const std::array<uint16_t,2> repeat{uint16_t(period),uint16_t(period)};std::vector<uint8_t> pattern(period*period);
     for(int y=0;y<period;++y)for(int x=0;x<period;++x){const char letter=data.idata.cdesc[channel(y,x)];
-        if(letter!='R'&&letter!='G'&&letter!='B')throw EditError(QStringLiteral("RAW CFA 色彩排列不受支持"));
+        if(letter!='R'&&letter!='G'&&letter!='B')throw EditError(QCoreApplication::translate("Huelith", "RAW CFA 色彩排列不受支持"));
         pattern[std::size_t(y)*period+x]=uint8_t(letter=='R'?0:letter=='G'?1:2);}
     const std::array<uint8_t,3> colors{0,1,2};
     check(TIFFSetField(tiff,TIFFTAG_CFAREPEATPATTERNDIM,repeat.data()));check(TIFFSetField(tiff,TIFFTAG_CFAPATTERN,int(pattern.size()),pattern.data()));
     check(TIFFSetField(tiff,TIFFTAG_CFAPLANECOLOR,3,colors.data()));check(TIFFSetField(tiff,TIFFTAG_CFALAYOUT,1));
     const int rows=data.color.cblack[4]?std::lcm(period,int(data.color.cblack[4])):period;
     const int columns=data.color.cblack[5]?std::lcm(period,int(data.color.cblack[5])):period;
-    if(rows>128||columns>128)throw EditError(QStringLiteral("RAW 黑电平模式过大"));
+    if(rows>128||columns>128)throw EditError(QCoreApplication::translate("Huelith", "RAW 黑电平模式过大"));
     std::vector<float> black(std::size_t(rows)*columns);
     for(int y=0;y<rows;++y)for(int x=0;x<columns;++x){
         double value=data.color.black+data.color.cblack[channel(y,x)];
@@ -149,7 +150,7 @@ void save_raw_dng(const Layer& source,const QString& path,const std::atomic_bool
     const uint32_t white=data.color.maximum;check(TIFFSetField(tiff,TIFFTAG_WHITELEVEL,1,&white));
     std::array<float,9> matrix{};std::array<float,3> neutral{};
     for(int y=0;y<3;++y){
-        if(!std::isfinite(data.color.cam_mul[y])||data.color.cam_mul[y]<=0)throw EditError(QStringLiteral("RAW 白平衡元数据无效"));
+        if(!std::isfinite(data.color.cam_mul[y])||data.color.cam_mul[y]<=0)throw EditError(QCoreApplication::translate("Huelith", "RAW 白平衡元数据无效"));
         neutral[y]=data.color.cam_mul[1]/data.color.cam_mul[y];
         for(int x=0;x<3;++x)matrix[std::size_t(y)*3+x]=data.color.cam_xyz[y][x];
     }
@@ -163,10 +164,10 @@ void save_raw_dng(const Layer& source,const QString& path,const std::atomic_bool
     check(TIFFSetField(tiff,TIFFTAG_XMLPACKET,uint32_t(packet.size()),packet.constData()));
     for(int y=0;y<data.sizes.raw_height;++y){cancel(cancelled);
         auto* row=reinterpret_cast<char*>(data.rawdata.raw_image)+qsizetype(y)*data.sizes.raw_pitch;
-        if(TIFFWriteScanline(tiff,row,uint32_t(y),0)<0)throw EditError(QStringLiteral("DNG 像素写入失败"));
+        if(TIFFWriteScanline(tiff,row,uint32_t(y),0)<0)throw EditError(QCoreApplication::translate("Huelith", "DNG 像素写入失败"));
     }
     check(TIFFWriteDirectory(tiff));handle.reset();cancel(cancelled);
-    if(!file.commit())throw EditError(QStringLiteral("DNG 原子保存失败：%1").arg(file.errorString()));
+    if(!file.commit())throw EditError(QCoreApplication::translate("Huelith", "DNG 原子保存失败：%1").arg(file.errorString()));
 }
 QJsonObject dng_recipe(const QByteArray& bytes) {
     if(!bytes.startsWith("II")&&!bytes.startsWith("MM"))return {};
@@ -175,22 +176,22 @@ QJsonObject dng_recipe(const QByteArray& bytes) {
     void* version{};if(!TIFFGetField(handle.get(),TIFFTAG_DNGVERSION,&version))return {};
     uint32_t length{};void* payload{};
     if(!TIFFGetField(handle.get(),TIFFTAG_XMLPACKET,&length,&payload))return {};
-    if(length>48*1024*1024)throw EditError(QStringLiteral("DNG 设置包过大"));
+    if(length>48*1024*1024)throw EditError(QCoreApplication::translate("Huelith", "DNG 设置包过大"));
     QXmlStreamReader reader(QByteArray(static_cast<const char*>(payload),length));
     QByteArray encoded;QString revision;
     while(!reader.atEnd()){
-        reader.readNext();if(reader.isDTD())throw EditError(QStringLiteral("DNG 设置不支持 DTD"));
+        reader.readNext();if(reader.isDTD())throw EditError(QCoreApplication::translate("Huelith", "DNG 设置不支持 DTD"));
         if(reader.isStartElement()&&reader.namespaceUri()==QStringLiteral("urn:huelith:raw:1.0")){
             if(reader.name()==QStringLiteral("Version"))revision=reader.readElementText();
             else if(reader.name()==QStringLiteral("Recipe"))encoded=reader.readElementText().toLatin1();
         }
     }
     if(encoded.isEmpty())return {};
-    if(reader.hasError()||revision!="1")throw EditError(QStringLiteral("DNG 显影设置损坏或版本不支持"));
+    if(reader.hasError()||revision!="1")throw EditError(QCoreApplication::translate("Huelith", "DNG 显影设置损坏或版本不支持"));
     const auto compressed=QByteArray::fromBase64(encoded,QByteArray::AbortOnBase64DecodingErrors);
-    if(compressed.size()<4||qFromBigEndian<uint32_t>(compressed.constData())>32*1024*1024)throw EditError(QStringLiteral("DNG 显影设置大小无效"));
+    if(compressed.size()<4||qFromBigEndian<uint32_t>(compressed.constData())>32*1024*1024)throw EditError(QCoreApplication::translate("Huelith", "DNG 显影设置大小无效"));
     QJsonParseError error;const auto document=QJsonDocument::fromJson(qUncompress(compressed),&error);
-    if(error.error!=QJsonParseError::NoError||!document.isObject())throw EditError(QStringLiteral("DNG 显影设置无法读取"));
+    if(error.error!=QJsonParseError::NoError||!document.isObject())throw EditError(QCoreApplication::translate("Huelith", "DNG 显影设置无法读取"));
     (void)recipe_packet(document.object());return document.object();
 }
 }

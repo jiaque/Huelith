@@ -28,38 +28,38 @@ void save_json(const QString& path, const QJsonObject& data) {
     QSaveFile file(path);
     const auto bytes = QJsonDocument(data).toJson(QJsonDocument::Compact);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
-        throw EditError(QStringLiteral("无法写入 AI 任务文件"));
+        throw EditError(QCoreApplication::translate("Huelith", "无法写入 AI 任务文件"));
 }
 QJsonObject load_json(const QString& path, qint64 maximum_bytes = 1024 * 1024) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly) || file.size() > maximum_bytes)
-        throw EditError(QStringLiteral("AI 任务文件不可读"));
+        throw EditError(QCoreApplication::translate("Huelith", "AI 任务文件不可读"));
     QJsonParseError error;
     const auto doc = QJsonDocument::fromJson(file.readAll(), &error);
     if (error.error != QJsonParseError::NoError || !doc.isObject())
-        throw EditError(QStringLiteral("AI 任务协议无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "AI 任务协议无效"));
     return doc.object();
 }
 }
 bool is_ai_worker() { return worker_process; }
 void write_ai_image(const QString& path, const QImage& image) {
     if (image.isNull())
-        throw EditError(QStringLiteral("AI 输入图像为空"));
+        throw EditError(QCoreApplication::translate("Huelith", "AI 输入图像为空"));
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))
-        throw EditError(QStringLiteral("无法创建 AI 图像交换文件"));
+        throw EditError(QCoreApplication::translate("Huelith", "无法创建 AI 图像交换文件"));
     QDataStream stream(&file);
     stream << quint32(0x48414931) << qint32(image.width()) << qint32(image.height())
            << qint32(image.format()) << qint64(image.bytesPerLine()) << image.colorSpace().iccProfile();
     if (stream.status() != QDataStream::Ok ||
         file.write(reinterpret_cast<const char*>(image.constBits()), image.sizeInBytes()) != image.sizeInBytes() ||
         !file.commit())
-        throw EditError(QStringLiteral("AI 图像交换写入失败：请检查临时磁盘空间"));
+        throw EditError(QCoreApplication::translate("Huelith", "AI 图像交换写入失败：请检查临时磁盘空间"));
 }
 QImage read_ai_image(const QString& path) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
-        throw EditError(QStringLiteral("AI 图像交换文件缺失"));
+        throw EditError(QCoreApplication::translate("Huelith", "AI 图像交换文件缺失"));
     QDataStream stream(&file);
     quint32 magic{};
     qint32 w{}, h{}, format{};
@@ -70,12 +70,12 @@ QImage read_ai_image(const QString& path) {
         qint64(w) * h > 512000000 ||
         (format != QImage::Format_RGBA32FPx4_Premultiplied && format != QImage::Format_RGBA32FPx4 &&
          format != QImage::Format_Grayscale8 && format != QImage::Format_RGBA8888))
-        throw EditError(QStringLiteral("AI 图像交换格式无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "AI 图像交换格式无效"));
     auto image = allocate_image(w, h, QImage::Format(format));
     if (image.isNull() || image.bytesPerLine() != stride || file.size() - file.pos() != image.sizeInBytes())
-        throw EditError(QStringLiteral("AI 图像尺寸或文件长度不匹配"));
+        throw EditError(QCoreApplication::translate("Huelith", "AI 图像尺寸或文件长度不匹配"));
     if (file.read(reinterpret_cast<char*>(image.bits()), image.sizeInBytes()) != image.sizeInBytes())
-        throw EditError(QStringLiteral("AI 图像读取不完整"));
+        throw EditError(QCoreApplication::translate("Huelith", "AI 图像读取不完整"));
     image.setColorSpace(QColorSpace::fromIccProfile(profile));
     return image;
 }
@@ -83,12 +83,12 @@ AiResult run_ai_job(QJsonObject request, const QImage& image, const std::atomic_
                     const AiProgress& progress) {
     auto check = [&] {
         if (cancelled && cancelled->load())
-            throw EditError(QStringLiteral("AI 处理已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "AI 处理已取消"));
     };
     check();
     QTemporaryDir directory(QDir::tempPath() + "/Huelith-ai-XXXXXX");
     if (!directory.isValid())
-        throw EditError(QStringLiteral("无法创建 AI 临时目录"));
+        throw EditError(QCoreApplication::translate("Huelith", "无法创建 AI 临时目录"));
     if (!image.isNull())
         write_ai_image(directory.filePath("input.bin"), image);
     // Portrait masks belong to the bounded payload, not the small job envelope.
@@ -96,7 +96,7 @@ AiResult run_ai_job(QJsonObject request, const QImage& image, const std::atomic_
     if (repair) {
         const auto person = request.take("person").toObject();
         if (QJsonDocument(person).toJson(QJsonDocument::Compact).size() > 64 * 1024 * 1024)
-            throw EditError(QStringLiteral("人像修复分析数据超过 64 MiB，请缩小分析预览"));
+            throw EditError(QCoreApplication::translate("Huelith", "人像修复分析数据超过 64 MiB，请缩小分析预览"));
         save_json(directory.filePath("person.json"), person);
     }
     auto executable = qEnvironmentVariable("HUELITH_AI_WORKER_EXE");
@@ -112,7 +112,7 @@ AiResult run_ai_job(QJsonObject request, const QImage& image, const std::atomic_
         worker.setProcessChannelMode(QProcess::SeparateChannels);
         worker.start(executable, {"--ai-worker", directory.filePath("job.json")});
         if (!worker.waitForStarted(10000))
-            throw EditError(QStringLiteral("无法启动 AI 工作进程：%1").arg(worker.errorString()));
+            throw EditError(QCoreApplication::translate("Huelith", "无法启动 AI 工作进程：%1").arg(worker.errorString()));
         QElapsedTimer heartbeat;
         heartbeat.start();
         QByteArray pending, errors;
@@ -155,9 +155,9 @@ AiResult run_ai_job(QJsonObject request, const QImage& image, const std::atomic_
             return result;
         }
         const auto error = QString::fromUtf8(errors).trimmed();
-        first_error = error.isEmpty() ? QStringLiteral("AI 工作进程异常退出 (%1)").arg(worker.exitCode()) : error;
+        first_error = error.isEmpty() ? QCoreApplication::translate("Huelith", "AI 工作进程异常退出 (%1)").arg(worker.exitCode()) : QCoreApplication::translate("Huelith", error.toUtf8().constData());
     }
-    throw EditError(QStringLiteral("AI 处理失败；原文档未修改。%1").arg(first_error));
+    throw EditError(QCoreApplication::translate("Huelith", "AI 处理失败；原文档未修改。%1").arg(first_error));
 }
 int ai_worker_main(const QString& job_path) {
     worker_process = true;
@@ -226,7 +226,7 @@ int ai_worker_main(const QString& job_path) {
             options.quality = request["quality"].toBool();
             options.model = request["model"].toString();
             result = infer_enhancement(read_ai_image(directory.filePath("input.bin")), options, progress);
-        } else throw EditError(QStringLiteral("未知 AI 任务"));
+        } else throw EditError(QCoreApplication::translate("Huelith", "未知 AI 任务"));
         write_ai_image(directory.filePath("output.bin"), result.image);
         if (!result.reference.isNull()) write_ai_image(directory.filePath("reference.bin"), result.reference);
         save_json(directory.filePath("result.json"), result.metadata);

@@ -18,6 +18,7 @@ class ExportDialog final : public QDialog {
   public:
     explicit ExportDialog(QWidget* parent);
     void set_sources(const QList<CanvasView*>& sources);
+    void quick_export(CanvasView* canvas);
     void set_snapshots(std::vector<editing::Snapshot> snapshots);
     [[nodiscard]] editing::ExportQueue& queue() {
         return queue_;
@@ -41,6 +42,9 @@ class ExportDialog final : public QDialog {
     QComboBox* format_{};
     QComboBox* profile_{};
     QComboBox* conflict_{};
+    QComboBox* scope_{};
+    QColorSpace custom_profile_;
+    QCheckBox* credentials_{};
     QSpinBox* quality_{};
     QCheckBox* alpha_{};
     QCheckBox* metadata_[5]{};

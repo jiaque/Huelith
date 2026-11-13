@@ -22,6 +22,8 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
+#include <QEnterEvent>
 #include <QPointer>
 #include <QPushButton>
 #include <QShortcut>
@@ -37,6 +39,72 @@
 
 namespace huelith::desktop {
 namespace {
+QIcon liquify_icon(int tool) {
+    QPixmap image(48, 48);
+    image.setDevicePixelRatio(2);
+    image.fill(Qt::transparent);
+    QPainter p(&image);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(QColor(225, 232, 238), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    const auto arrow = [&](QPointF a, QPointF b) {
+        p.drawLine(a, b);
+        const auto d = (b - a) / QLineF(a, b).length();
+        const QPointF n(-d.y(), d.x());
+        p.drawLine(b, b - d * 3 + n * 2);
+        p.drawLine(b, b - d * 3 - n * 2);
+    };
+    if (tool == 0 || tool == 6) {
+        QPainterPath contour;
+        contour.moveTo(7, 3); contour.cubicTo(4, 8, 14, 14, 7, 21);
+        p.drawPath(contour);
+        arrow(tool == 0 ? QPointF(10, 12) : QPointF(21, 12),
+              tool == 0 ? QPointF(21, 12) : QPointF(10, 12));
+    } else if (tool == 1 || tool == 3) {
+        p.drawArc(QRectF(4, 4, 16, 16), 35 * 16, 285 * 16);
+        arrow(QPointF(20, 6), QPointF(17, 3));
+        if (tool == 1) p.drawLine(8, 12, 16, 12);
+        else p.drawArc(QRectF(8, 8, 8, 8), 0, 280 * 16);
+    } else if (tool == 2) {
+        for (int y : {7, 16}) {
+            QPainterPath wave;
+            wave.moveTo(3, y); wave.cubicTo(9, y - 6, 15, y + 6, 21, y);
+            p.drawPath(wave);
+        }
+    } else if (tool == 4 || tool == 5) {
+        p.drawEllipse(QPointF(12, 12), 2, 2);
+        for (QPointF direction : {QPointF(1, 0), QPointF(-1, 0), QPointF(0, 1), QPointF(0, -1)}) {
+            const auto inner = QPointF(12, 12) + direction * 5;
+            const auto outer = QPointF(12, 12) + direction * 10;
+            arrow(tool == 4 ? outer : inner, tool == 4 ? inner : outer);
+        }
+    } else if (tool == 7) {
+        for (double angle : {0., 1.0472, 2.0944}) {
+            const QPointF d(std::cos(angle), std::sin(angle)), n(-d.y(), d.x());
+            p.drawLine(QPointF(12, 12) - d * 10, QPointF(12, 12) + d * 10);
+            for (int sign : {-1, 1}) {
+                const auto tip = QPointF(12, 12) + d * (7 * sign);
+                p.drawLine(tip, tip - d * (3 * sign) + n * 3);
+                p.drawLine(tip, tip - d * (3 * sign) - n * 3);
+            }
+        }
+    } else if (tool == 8) {
+        p.drawPolygon(QPolygonF{QPointF(3, 15), QPointF(14, 4), QPointF(21, 11),
+                               QPointF(12, 20), QPointF(8, 20)});
+        p.drawLine(8, 10, 15, 17);
+    } else if (tool == 9) {
+        QPainterPath hand;
+        hand.moveTo(8, 21); hand.lineTo(3, 13); hand.quadTo(3, 10, 6, 12);
+        hand.lineTo(8, 14); hand.lineTo(8, 5); hand.quadTo(10, 2, 11, 5);
+        hand.lineTo(11, 11); hand.lineTo(11, 3); hand.quadTo(13, 1, 14, 4);
+        hand.lineTo(14, 11); hand.lineTo(14, 5); hand.quadTo(17, 3, 17, 6);
+        hand.lineTo(17, 12); hand.quadTo(21, 7, 21, 12);
+        hand.lineTo(19, 21); hand.closeSubpath(); p.drawPath(hand);
+    } else {
+        p.drawEllipse(QRectF(3, 3, 13, 13)); p.drawLine(15, 15, 22, 22);
+        p.drawLine(6, 9, 13, 9); p.drawLine(9, 6, 9, 13);
+    }
+    return QIcon(image);
+}
 class LiquifyView final : public QWidget {
   public:
     LiquifyView(QImage source, QSize size, editing::Effect effect, editing::ToneSettings tone,
@@ -69,6 +137,12 @@ class LiquifyView final : public QWidget {
     int navigation{}; // 0 paint, 1 hand, 2 zoom
     double rate{.5};
     std::function<void()> changed;
+    void set_diameter(double value) {
+        brush.diameter = value;
+        if (!has_cursor_) cursor_ = image_rect().center();
+        size_preview_ = true;
+        update();
+    }
     void checkpoint() {
         undo_.push_back(mesh);
         if (undo_.size() > 30)
@@ -205,12 +279,31 @@ class LiquifyView final : public QWidget {
                 p.drawLines(grid_.data(), int(grid_.size()));
         }
         p.restore();
-        if (underMouse() && navigation == 0 && !space_) {
+        if ((hover_ || size_preview_) && navigation == 0 && !space_) {
             const double radius = brush.diameter * .5 * area.width() / size_.width();
-            p.setPen(QPen(Qt::white, 1));
             p.setBrush(Qt::NoBrush);
-            p.drawEllipse(cursor_, radius, radius);
+            for (auto pen : {QPen(QColor(0, 0, 0, 190), 3), QPen(Qt::white, 1)}) {
+                p.setPen(pen);
+                p.drawEllipse(cursor_, radius, radius);
+                p.drawLine(cursor_ - QPointF(4, 0), cursor_ + QPointF(4, 0));
+                p.drawLine(cursor_ - QPointF(0, 4), cursor_ + QPointF(0, 4));
+            }
+            if (size_preview_) {
+                p.fillRect(QRect(8, 8, 180, 28), QColor(25, 28, 32, 220));
+                p.drawText(QRect(16, 8, 164, 28), Qt::AlignVCenter,
+                           tr("画笔直径 %1 px").arg(qRound(brush.diameter)));
+            }
         }
+    }
+    void enterEvent(QEnterEvent* e) override {
+        cursor_ = e->position();
+        hover_ = has_cursor_ = true;
+        size_preview_ = false;
+        update();
+    }
+    void leaveEvent(QEvent*) override {
+        hover_ = size_preview_ = false;
+        update();
     }
     void mousePressEvent(QMouseEvent* e) override {
         if (e->button() != Qt::LeftButton)
@@ -233,6 +326,8 @@ class LiquifyView final : public QWidget {
         hold_.restart();
     }
     void mouseMoveEvent(QMouseEvent* e) override {
+        hover_ = has_cursor_ = true;
+        size_preview_ = false;
         modifiers_ = e->modifiers();
         cursor_ = e->position();
         if (dragging_) {
@@ -316,6 +411,7 @@ class LiquifyView final : public QWidget {
     std::vector<QImage> undo_, redo_;
     int revision_{}, running_revision_{};
     bool pending_{}, dragging_{}, panning_{}, space_{};
+    bool hover_{}, has_cursor_{}, size_preview_{};
     QPointF cursor_, last_, last_screen_, pan_;
     double zoom_{1};
     double pressure_{1};
@@ -351,6 +447,13 @@ class LiquifyView final : public QWidget {
     void dab(QPointF from, QPointF to, double amount) {
         auto active = brush;
         active.pressure *= pressure_;
+        if (active.tool == editing::LiquifyTool::warp || active.tool == editing::LiquifyTool::push_left) {
+            // A stroke nudges the contour; it must not drag pixels at cursor speed.
+            active.pressure *= .25;
+            const double distance = QLineF(from, to).length();
+            if (distance > active.diameter * .08)
+                from = to - (to - from) * (active.diameter * .08 / distance);
+        }
         active.reverse = modifiers_.testFlag(Qt::AltModifier);
         if (active.reverse && active.tool == editing::LiquifyTool::freeze)
             active.tool = editing::LiquifyTool::thaw;
@@ -429,15 +532,28 @@ class LiquifyDialog final : public QDialog {
                                 tr("顺时针旋转 (C)"), tr("褶皱 (S)"),     tr("膨胀 (B)"),
                                 tr("左推 (O)"),       tr("冻结蒙版 (F)"), tr("解冻蒙版 (D)"),
                                 tr("抓手 (H)"),       tr("缩放 (Z)")};
-        const QStringList glyphs{"↗", "↶", "≈", "↻", "↘", "↖", "⇐", "▧", "▨", "✋", "⊕"};
+        const QStringList labels{tr("推动"), tr("重建"), tr("平滑"), tr("旋转"), tr("收缩"),
+                                 tr("膨胀"), tr("左推"), tr("冻结"), tr("解冻"), tr("抓手"), tr("缩放")};
+        const QStringList hints{tr("沿拖动方向轻推轮廓，可多次叠加"), tr("涂抹恢复局部原貌"),
+            tr("抚平已有变形"), tr("按住旋转，Alt 反向"), tr("按住向中心收缩"),
+            tr("按住向外膨胀"), tr("向拖动方向的左侧推动，Alt 反向"),
+            tr("涂抹保护区域，防止变形"), tr("涂抹解除保护，然后选择推动继续调整"),
+            tr("拖动画布；按住空格可临时使用抓手"), tr("点击放大，Alt 点击缩小")};
         const QStringList keys{"W", "R", "E", "C", "S", "B", "O", "F", "D", "H", "Z"};
         for (int i = 0; i < names.size(); ++i) {
             auto* b = new QToolButton(this);
             b->setObjectName(QString("liquifyTool%1").arg(i));
-            b->setText(glyphs[i]);
-            b->setToolTip(names[i]);
+            b->setText(labels[i]);
+            b->setIcon(liquify_icon(i));
+            b->setIconSize(QSize(24, 24));
+            b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+            b->setToolTip(names[i] + "\n" + hints[i]);
+            b->setAccessibleName(names[i]);
             b->setCheckable(true);
-            b->setFixedSize(34, 34);
+            b->setFixedSize(92, 38);
+            b->setStyleSheet("QToolButton { padding: 5px; border: 1px solid transparent; border-radius: 4px; }"
+                             "QToolButton:hover { background: #343c44; }"
+                             "QToolButton:checked { background: #28577c; border-color: #65b0eb; }");
             group->addButton(b, i);
             tools->addWidget(b);
             b->setChecked(i == 0);
@@ -480,10 +596,12 @@ class LiquifyDialog final : public QDialog {
             connect(control, &QDoubleSpinBox::valueChanged, this, set);
             return control;
         };
-        diameter_ = spin(tr("大小"), "liquifySize", 100, 15000, [this](double v) {
-            view_->brush.diameter = v;
-            view_->update();
+        const int maximum_diameter = std::clamp(std::max(size.width(), size.height()), 1, 15000);
+        view_->brush.diameter = std::min(100, maximum_diameter);
+        diameter_ = spin(tr("大小"), "liquifySize", view_->brush.diameter, maximum_diameter, [this](double v) {
+            view_->set_diameter(v);
         });
+        diameter_->setSuffix(" px");
         diameter_->setMinimum(1);
         spin(tr("密度"), "liquifyDensity", 50, 100,
              [this](double v) { view_->brush.density = v / 100; });
@@ -565,6 +683,8 @@ class LiquifyDialog final : public QDialog {
         button(tr("100%"), "liquifyActual", [this] { view_->actual(); });
         side->addStretch();
         auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        buttons->button(QDialogButtonBox::Ok)->setText(tr("确定"));
+        buttons->button(QDialogButtonBox::Cancel)->setText(tr("取消"));
         right_column->addWidget(buttons);
         connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
         connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -592,7 +712,7 @@ std::optional<QImage> edit_portrait_liquify(QWidget* parent,const QImage& source
         mesh=editing::create_liquify_mesh(original_size);
         if(!person_mask.isNull()){const auto mask=person_mask.scaled(mesh.size(),Qt::IgnoreAspectRatio,Qt::SmoothTransformation);for(int y=0;y<mesh.height();++y){auto* row=reinterpret_cast<float*>(mesh.scanLine(y));for(int x=0;x<mesh.width();++x)row[x*4+2]=1-mask.constScanLine(y)[x]/255.F;}}
     }
-    editing::Effect effect;effect.name=QStringLiteral("人像液化");effect.liquify=mesh;
+    editing::Effect effect;effect.name=QObject::tr("人像液化");effect.liquify=mesh;
     LiquifyDialog dialog(source,editing::display_image(source),original_size,effect,{},0,parent);
     dialog.setWindowModality(Qt::WindowModal);
     if(dialog.exec()!=QDialog::Accepted)return std::nullopt;

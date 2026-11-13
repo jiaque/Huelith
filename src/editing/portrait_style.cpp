@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/portrait_effects.h"
 #include "huelith/editing/project.h"
 #include "huelith/editing/image_storage.h"
@@ -513,7 +514,7 @@ QImage portrait_style_region(QImage base,QSize source_size,const QJsonObject& re
         const auto disabled=settings["disabledParameters"].toObject();
         const bool autoContourTone=settings["contourAutoLighting"].toBool() && settings["contourLighting"].toObject()["version"].toInt()==1 && enabled["contour"].toBool(true) &&
             ((params["contour.highlight"].toDouble()!=0 && !disabled["contour.highlight"].toBool()) || (params["contour.shadow"].toDouble()!=0 && !disabled["contour.shadow"].toBool()));
-        auto descriptors=portrait_parameters(11);descriptors.push_back({"face.doubleChin",QStringLiteral("双下巴明暗")});for(int panel=12;panel<=14;++panel){const auto extra=portrait_parameters(panel);descriptors.insert(descriptors.end(),extra.begin(),extra.end());}for(const auto& zone:settings["hairZones"].toArray())descriptors.push_back({zone.toObject()["key"].toString(),QStringLiteral("分区染发"),false,0,100});
+        auto descriptors=portrait_parameters(11);descriptors.push_back({"face.doubleChin",QCoreApplication::translate("Huelith", "双下巴明暗")});for(int panel=12;panel<=14;++panel){const auto extra=portrait_parameters(panel);descriptors.insert(descriptors.end(),extra.begin(),extra.end());}for(const auto& zone:settings["hairZones"].toArray())descriptors.push_back({zone.toObject()["key"].toString(),QCoreApplication::translate("Huelith", "分区染发"),false,0,100});
         for(const auto& descriptor:descriptors){
             // The automatic combination supplies the tonal component; retain
             // face.volume geometry but do not add its legacy cheek exposure again.

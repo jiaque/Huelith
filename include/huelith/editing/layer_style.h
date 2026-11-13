@@ -6,10 +6,15 @@
 #include <array>
 #include <vector>
 namespace huelith::editing {
-enum class StyleKind { stroke, drop_shadow, inner_shadow, outer_glow, inner_glow, color_overlay };
+enum class StyleKind { stroke, drop_shadow, inner_shadow, outer_glow, inner_glow, color_overlay,
+                       gradient_overlay, pattern_overlay, bevel, satin };
 struct LayerStyle {
+    int kind{};
+    int contour{}; // Linear, smooth, concave, convex.
     bool enabled{};
     QColor color{Qt::black};
+    QColor color2{Qt::white};
+    QImage pattern;
     double opacity{.75};
     Blend blend{Blend::normal};
     double size{5};
@@ -22,7 +27,8 @@ struct LayerStyle {
 struct LayerStyles {
     bool enabled{true};
     double global_angle{120};
-    std::array<LayerStyle, 6> entries{};
+    double scale{1};
+    std::vector<LayerStyle> entries = std::vector<LayerStyle>(10);
     LayerStyles();
     [[nodiscard]] bool active() const;
 };

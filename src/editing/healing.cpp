@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/healing.h"
 #include "huelith/editing/project.h"
 #include <QJsonObject>
@@ -16,7 +17,7 @@ namespace {
 using Rgb = std::array<double, 3>;
 void check(const std::atomic_bool* cancelled) {
     if (cancelled && cancelled->load())
-        throw EditError(QStringLiteral("修复已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "修复已取消"));
 }
 void validate(const HealingStroke& s) {
     if (s.points.empty() || s.points.size() > 16384 || !std::isfinite(s.radius) || s.radius <= 0 ||
@@ -24,19 +25,19 @@ void validate(const HealingStroke& s) {
         !std::isfinite(s.opacity) || s.opacity < 0 || s.opacity > 1 ||
         !std::isfinite(s.offset.x()) || !std::isfinite(s.offset.y()) ||
         std::abs(s.offset.x()) > 1 || std::abs(s.offset.y()) > 1)
-        throw EditError(QStringLiteral("修复笔画参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "修复笔画参数无效"));
     if(!s.source_offsets.empty() && s.source_offsets.size()!=s.points.size())throw EditError("修复来源路径数量无效");
     for(const auto p:s.source_offsets)if(!std::isfinite(p.x()) || !std::isfinite(p.y()) || std::abs(p.x())>1 || std::abs(p.y())>1)throw EditError("修复来源坐标无效");
     for (const auto p : s.points)
         if (!std::isfinite(p.x()) || !std::isfinite(p.y()) || p.x() < 0 || p.x() > 1 || p.y() < 0 ||
             p.y() > 1)
-            throw EditError(QStringLiteral("修复笔画坐标无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "修复笔画坐标无效"));
 }
 double number(const QJsonObject& object, const char* key, double fallback) {
     if (!object.contains(QLatin1String(key)))
         return fallback;
     if (!object.value(QLatin1String(key)).isDouble())
-        throw EditError(QStringLiteral("修复数值格式无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "修复数值格式无效"));
     return object.value(QLatin1String(key)).toDouble();
 }
 Rgb sample(const QImage& image, QPointF position) {
@@ -307,10 +308,10 @@ QJsonObject healing_json(const HealingStroke& s) {
 }
 HealingStroke healing_from_json(const QJsonObject& object) {
     if (number(object, "version", 0) != 1 || !object.value("points").isArray())
-        throw EditError(QStringLiteral("未知修复配方版本或格式"));
+        throw EditError(QCoreApplication::translate("Huelith", "未知修复配方版本或格式"));
     for (const auto* key : {"clone", "enabled"})
         if (object.contains(QLatin1String(key)) && !object.value(QLatin1String(key)).isBool())
-            throw EditError(QStringLiteral("修复开关格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "修复开关格式无效"));
     HealingStroke s;
     s.clone = object.value("clone").toBool();
     s.enabled = object.value("enabled").toBool(true);
@@ -321,7 +322,7 @@ HealingStroke healing_from_json(const QJsonObject& object) {
     for (const auto& value : object.value("points").toArray()) {
         const auto p = value.toArray();
         if (p.size() != 2 || !p[0].isDouble() || !p[1].isDouble())
-            throw EditError(QStringLiteral("修复笔画格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "修复笔画格式无效"));
         s.points.emplace_back(p[0].toDouble(), p[1].toDouble());
     }
     if(object.contains("sourceOffsets")){if(!object["sourceOffsets"].isArray())throw EditError("修复来源路径无效");for(const auto value:object["sourceOffsets"].toArray()){const auto a=value.toArray();if(a.size()!=2 || !a[0].isDouble() || !a[1].isDouble())throw EditError("修复来源路径无效");s.source_offsets.emplace_back(a[0].toDouble(),a[1].toDouble());}}
@@ -329,13 +330,13 @@ HealingStroke healing_from_json(const QJsonObject& object) {
     const auto known = healing_json(s);
     for (auto i = object.begin(); i != object.end(); ++i)
         if (!known.contains(i.key()))
-            throw EditError(QStringLiteral("未知修复参数"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知修复参数"));
     return s;
 }
 QPointF automatic_healing_offset(const QImage& image, const HealingStroke& s, int alternative, const QImage& source_mask, const QPointF* preferred_offset, bool match_texture, bool nearby_only) {
     validate(s);
     if (image.isNull() || image.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("自动取样需要 FP32 图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "自动取样需要 FP32 图像"));
     const auto path = points(s, image.size());
     const double radius = std::max(1., s.radius * std::min(image.width(), image.height()));
     QRectF bounds(path.front(), QSizeF{});
@@ -409,7 +410,7 @@ QPointF automatic_healing_offset(const QImage& image, const HealingStroke& s, in
         }
     if (candidates.empty())
         throw EditError(
-            QStringLiteral("没有足够的邻近区域自动取样，请缩小笔刷或 Alt 单击指定来源"));
+            QCoreApplication::translate("Huelith", "没有足够的邻近区域自动取样，请缩小笔刷或 Alt 单击指定来源"));
     std::stable_sort(candidates.begin(), candidates.end(),
                      [](const auto& a, const auto& b) { return a.first < b.first; });
     if(nearby_only && alternative==0){
@@ -455,11 +456,11 @@ QImage apply_healing(const QImage& source, const QJsonArray& strokes,
         effective_coverage->fill(Qt::transparent);
     }
     if (strokes.size() > 256)
-        throw EditError(QStringLiteral("修复笔画数量超过 256"));
+        throw EditError(QCoreApplication::translate("Huelith", "修复笔画数量超过 256"));
     if (strokes.isEmpty())
         return source;
     if (source.isNull() || source.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("修复需要 FP32 图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "修复需要 FP32 图像"));
     auto image = source;
     for (const auto& value : strokes) {
         check(cancelled);

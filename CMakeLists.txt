@@ -3,7 +3,10 @@ project(Huelith VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
 option(HUELITH_ENABLE_ASAN "Instrument project targets with AddressSanitizer" OFF)
-find_package(Qt6 6.10.3 EXACT REQUIRED COMPONENTS Widgets Svg)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build/dependencies/qtwebsockets/lib/cmake/Qt6WebSockets")
+    set(Qt6WebSockets_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/dependencies/qtwebsockets/lib/cmake/Qt6WebSockets")
+endif()
+find_package(Qt6 6.10.3 EXACT REQUIRED COMPONENTS Widgets Svg PrintSupport Network Concurrent WebSockets)
 
 add_library(huelith_build_options INTERFACE)
 target_compile_features(huelith_build_options INTERFACE cxx_std_20)
@@ -44,6 +47,7 @@ set(TIFF_LIBRARY_DEBUG "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/lib
 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG FALSE)
 set(CMAKE_DISABLE_FIND_PACKAGE_Tiff TRUE)
 find_package(TIFF MODULE REQUIRED)
+find_package(ZLIB REQUIRED)
 set(HUELITH_ORT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/dependencies/onnxruntime-directml" CACHE PATH "Pinned ONNX Runtime DirectML native SDK")
 add_library(huelith_ort SHARED IMPORTED)
 set_target_properties(huelith_ort PROPERTIES
@@ -52,6 +56,7 @@ set_target_properties(huelith_ort PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${HUELITH_ORT_DIR}")
 add_library(huelith_editing src/editing/project.cpp src/editing/project_io.cpp src/editing/blend.cpp src/editing/photo_operations.cpp src/editing/raw_develop.cpp src/editing/raw_cache.cpp src/editing/tiff_io.cpp src/editing/tone.cpp src/editing/export_queue.cpp)
 target_include_directories(huelith_editing PUBLIC include)
+target_link_libraries(huelith_editing PRIVATE ZLIB::ZLIB)
 target_sources(huelith_editing PRIVATE src/editing/raw_adjustments.cpp src/editing/raw_recipe.cpp)
 target_sources(huelith_editing PRIVATE src/editing/raw_profile.cpp)
 target_sources(huelith_editing PRIVATE src/editing/raw_sidecar.cpp)
@@ -81,6 +86,13 @@ target_sources(huelith_editing PRIVATE src/editing/ai_worker.cpp src/editing/enh
 target_sources(huelith_editing PRIVATE src/editing/photo_merge.cpp src/editing/image_storage.cpp src/editing/project_archive.cpp)
 target_sources(huelith_editing PRIVATE src/editing/dng.cpp)
 target_sources(huelith_editing PRIVATE src/editing/metadata.cpp)
+target_sources(huelith_editing PRIVATE src/editing/layout_regions.cpp)
+target_sources(huelith_editing PRIVATE src/editing/document_color.cpp)
+target_sources(huelith_editing PRIVATE src/editing/pdf_import.cpp src/editing/photoshop_file.cpp)
+target_sources(huelith_editing PRIVATE src/editing/credentials.cpp)
+if(WIN32)
+    target_link_libraries(huelith_editing PRIVATE windowsapp)
+endif()
 target_sources(huelith_editing PRIVATE src/editing/embedded_preview.cpp)
 target_include_directories(huelith_editing SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(huelith_editing PRIVATE ${OpenCV_LIBS})
@@ -174,12 +186,28 @@ add_library(huelith_desktop
     apps/desktop/validation_session.cpp
     apps/desktop/main_window.cpp)
 target_include_directories(huelith_desktop PUBLIC apps/desktop)
+target_sources(huelith_desktop PRIVATE apps/desktop/regions_workflow.cpp)
+target_sources(huelith_desktop PRIVATE apps/desktop/perspective_workflow.cpp)
+target_sources(huelith_desktop PRIVATE apps/desktop/color_workflow.cpp)
+target_sources(huelith_desktop PRIVATE apps/desktop/document_color_picker.cpp)
+target_sources(huelith_desktop PRIVATE apps/desktop/pdf_workflow.cpp apps/desktop/action_workflow.cpp apps/desktop/comfy_workflow.cpp apps/desktop/help_workflow.cpp)
+target_sources(huelith_desktop PRIVATE apps/desktop/credential_workflow.cpp)
+target_sources(huelith_desktop PRIVATE apps/desktop/interface_language.cpp)
+qt_add_resources(huelith_desktop huelith_translations PREFIX "/huelith"
+    BASE apps/desktop/assets FILES apps/desktop/assets/translations/en.json)
+get_filename_component(HUELITH_QT_TRANSLATIONS "${Qt6_DIR}/../../../translations" ABSOLUTE)
+qt_add_resources(huelith_desktop huelith_qt_translations PREFIX "/huelith/translations"
+    BASE "${HUELITH_QT_TRANSLATIONS}" FILES "${HUELITH_QT_TRANSLATIONS}/qtbase_zh_CN.qm")
+target_link_libraries(huelith_desktop PUBLIC Qt6::PrintSupport Qt6::Network Qt6::Concurrent Qt6::WebSockets)
 target_link_libraries(huelith_desktop PUBLIC huelith_document huelith_editing huelith_validation Qt6::Widgets Qt6::Svg)
 if(WIN32)
-    target_link_libraries(huelith_desktop PRIVATE gdi32)
+    target_link_libraries(huelith_desktop PRIVATE gdi32 dxgi)
 endif()
 qt_add_resources(huelith_desktop huelith_assets PREFIX "/huelith"
     BASE apps/desktop/assets FILES apps/desktop/assets/huelith.svg
+    apps/desktop/assets/workflows/matting.json
+    apps/desktop/assets/workflows/inpaint.json
+    apps/desktop/assets/workflows/manifest.json
     apps/desktop/assets/portrait/volume.svg
     apps/desktop/assets/portrait/volume-approved.png
     apps/desktop/assets/portrait/lift-approved.png
@@ -222,8 +250,13 @@ if(WIN32)
     find_program(HUELITH_WINDEPLOYQT windeployqt
         HINTS "${Qt6Core_DIR}/../../../bin" REQUIRED)
     add_custom_command(TARGET Huelith POST_BUILD
-        COMMAND "${HUELITH_WINDEPLOYQT}" "$<IF:$<CONFIG:Debug>,--debug,--release>" --no-translations --no-compiler-runtime
-            "$<TARGET_FILE:Huelith>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Core>" "$<TARGET_FILE:Qt6::Gui>" "$<TARGET_FILE:Qt6::Widgets>"
+            "$<TARGET_FILE:Qt6::Svg>" "$<TARGET_FILE:Qt6::PrintSupport>" "$<TARGET_FILE:Qt6::Network>"
+            "$<TARGET_FILE:Qt6::WebSockets>" "$<TARGET_FILE_DIR:Huelith>"
+        COMMAND "${HUELITH_WINDEPLOYQT}" "$<IF:$<CONFIG:Debug>,--debug,--release>" --no-libraries --no-translations --no-compiler-runtime
+            --dir "$<TARGET_FILE_DIR:Huelith>" "$<TARGET_FILE:Qt6::Widgets>"
+            "$<TARGET_FILE:Qt6::Svg>" "$<TARGET_FILE:Qt6::Network>" "$<TARGET_FILE:Qt6::PrintSupport>"
         COMMENT "Deploying local Qt runtime and platform plugins" VERBATIM)
     if(MSVC)
         set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
@@ -243,6 +276,16 @@ endif()
 add_custom_command(TARGET Huelith POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${EXIFTOOL_RUNTIME}/exiftool_files" "$<TARGET_FILE_DIR:Huelith>/tools/exiftool/exiftool_files"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${EXIFTOOL_RUNTIME}/exiftool(-k).exe" "$<TARGET_FILE_DIR:Huelith>/tools/exiftool/exiftool.exe")
+set(HUELITH_C2PATOOL "${CMAKE_CURRENT_SOURCE_DIR}/build/dependencies/c2patool/c2patool/c2patool.exe" CACHE FILEPATH "Official c2patool executable")
+if(EXISTS "${HUELITH_C2PATOOL}")
+    add_custom_command(TARGET Huelith POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Huelith>/tools/c2patool"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${HUELITH_C2PATOOL}" "$<TARGET_FILE_DIR:Huelith>/tools/c2patool/c2patool.exe")
+    foreach(license LICENSE-MIT LICENSE-APACHE)
+        add_custom_command(TARGET Huelith POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/build/dependencies/c2patool/c2patool/${license}" "$<TARGET_FILE_DIR:Huelith>/tools/c2patool/${license}")
+    endforeach()
+endif()
 add_custom_command(TARGET Huelith POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/lensfun/version_1"
     "$<TARGET_FILE_DIR:Huelith>/lensfun")

@@ -3,6 +3,14 @@
 class QWidget;
 namespace huelith::desktop {
 struct CanvasPreferences {
+    int pixels_mb{2048}, scratch_gib{32}, history_mb{2048}, psd_policy{};
+    QString scratch_dir;
+    bool text_pixels{};
+    bool external_actions{true}, comfy{true};
+    bool show_slices{true};
+    bool slice_numbers{true};
+    QColor slice_color{"#78b8f0"};
+    QColor gamut_color{Qt::gray};
     bool wheel_zoom{};
     bool center_clicked{};
     bool scrubby_zoom{};
@@ -16,6 +24,11 @@ struct CanvasPreferences {
     int spring_delay{200};
     bool show_tooltips{true};
     int history_states{100};
+    bool operation_log{};
+    QString operation_log_path;
+    int operation_log_detail{};
+    int interface_theme{};
+    int interface_language{}; // Simplified Chinese, English; applied after restart.
     bool auto_recovery{true};
     int recovery_minutes{1};
     int recent_files{12};

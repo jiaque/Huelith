@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/raw_camera.h"
 #include "huelith/editing/image_storage.h"
 #include "huelith/editing/raw_develop.h"
@@ -33,7 +34,7 @@ Matrix inverse(const Matrix& a) {
     const double det = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) +
                        a[2] * (a[3] * a[7] - a[4] * a[6]);
     if (!std::isfinite(det) || std::abs(det) < 1e-12)
-        throw EditError(QStringLiteral("RAW 相机矩阵不可逆"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 相机矩阵不可逆"));
     Matrix result{a[4] * a[8] - a[5] * a[7], a[2] * a[7] - a[1] * a[8], a[1] * a[5] - a[2] * a[4],
                   a[5] * a[6] - a[3] * a[8], a[0] * a[8] - a[2] * a[6], a[2] * a[3] - a[0] * a[5],
                   a[3] * a[7] - a[4] * a[6], a[1] * a[6] - a[0] * a[7], a[0] * a[4] - a[1] * a[3]};
@@ -54,14 +55,14 @@ Matrix color_matrix(const libraw_colordata_t& color) {
     for (int row = 0; row < 3; ++row) {
         const double sum = normalized[row * 3] + normalized[row * 3 + 1] + normalized[row * 3 + 2];
         if (!std::isfinite(sum) || std::abs(sum) < 1e-10)
-            throw EditError(QStringLiteral("RAW 中性轴校准无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW 中性轴校准无效"));
         for (int col = 0; col < 3; ++col)
             normalized[row * 3 + col] /= sum;
     }
     Matrix white_balance{};
     for (int c = 0; c < 3; ++c) {
         if (!std::isfinite(color.cam_mul[c]) || color.cam_mul[c] <= 0)
-            throw EditError(QStringLiteral("RAW 白平衡元数据无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW 白平衡元数据无效"));
         white_balance[c * 3 + c] = color.cam_mul[c] / color.cam_mul[1];
     }
     return multiply(multiply(xyz_rec, inverse(xyz_srgb)),
@@ -69,7 +70,7 @@ Matrix color_matrix(const libraw_colordata_t& color) {
 }
 void check_cancel(const std::atomic_bool& cancelled) {
     if (cancelled.load())
-        throw EditError(QStringLiteral("RAW 处理已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 处理已取消"));
 }
 int reflect(int coordinate, int length) {
     const int period = 2 * (length - 1);
@@ -112,12 +113,12 @@ QJsonObject capabilities(LibRaw& decoder) {
     const bool dng=(bayer||xtrans)&&d.idata.colors==3;
     return {{"sensorLayout",xtrans?"X-Trans":bayer?"Bayer":"LibRaw special"},
         {"rawDenoiseSupported",bayer},{"rawDngSupported",dng},
-        {"rawDenoiseReason",bayer?QString{}:QStringLiteral("此传感器不兼容内置 Bayer AI RAW 降噪模型；可普通显影后在主窗口使用 RGB AI 降噪。")},
-        {"rawDngReason",dng?QString{}:QStringLiteral("此 RAW 的传感器布局暂不支持保留原始数据的 DNG 转存；可保存工程或导出 TIFF。")}};
+        {"rawDenoiseReason",bayer?QString{}:QCoreApplication::translate("Huelith", "此传感器不兼容内置 Bayer AI RAW 降噪模型；可普通显影后在主窗口使用 RGB AI 降噪。")},
+        {"rawDngReason",dng?QString{}:QCoreApplication::translate("Huelith", "此 RAW 的传感器布局暂不支持保留原始数据的 DNG 转存；可保存工程或导出 TIFF。")}};
 }
 RawResult generic_develop(LibRaw& decoder,const QByteArray& bytes,const RawOptions& options,
                           const std::atomic_bool& cancelled,const RawProgress& progress) {
-    if(options.denoise)throw EditError(QStringLiteral("此传感器不支持 Bayer AI RAW 降噪；请关闭 AI RAW 降噪后显影，或在主窗口使用 RGB AI 降噪。"));
+    if(options.denoise)throw EditError(QCoreApplication::translate("Huelith", "此传感器不支持 Bayer AI RAW 降噪；请关闭 AI RAW 降噪后显影，或在主窗口使用 RGB AI 降噪。"));
     auto& d=decoder.imgdata;
     QJsonObject metadata=capabilities(decoder);
     metadata.insert("camera",QString::fromUtf8(d.idata.model));metadata.insert("cameraMake",QString::fromUtf8(d.idata.make));
@@ -157,7 +158,7 @@ RawResult generic_develop(LibRaw& decoder,const QByteArray& bytes,const RawOptio
     auto* bitmap=decoder.dcraw_make_mem_image(&error);
     std::unique_ptr<libraw_processed_image_t,void(*)(libraw_processed_image_t*)> memory(bitmap,LibRaw::dcraw_clear_mem);
     if(error!=LIBRAW_SUCCESS||!bitmap||bitmap->type!=LIBRAW_IMAGE_BITMAP||bitmap->bits!=16||bitmap->colors<3)
-        throw EditError(QStringLiteral("LibRaw 未能生成受支持的线性 RGB 显影结果"));
+        throw EditError(QCoreApplication::translate("Huelith", "LibRaw 未能生成受支持的线性 RGB 显影结果"));
     auto image=allocate_image(bitmap->width,bitmap->height,QImage::Format_RGBA32FPx4_Premultiplied);
     image.setColorSpace(working_space());
     const auto* input=reinterpret_cast<const uint16_t*>(bitmap->data);
@@ -191,24 +192,24 @@ bool raw_high_quality(const QJsonObject& recipe) {
         return !recipe.contains("version");
     const auto method = recipe.value("demosaic").toString();
     if (method != "malvar-2004" && method != "bilinear")
-        throw EditError(QStringLiteral("RAW 插值版本无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 插值版本无效"));
     return method == "malvar-2004";
 }
 QImage blend_raw_denoise(const QImage& enhanced, const QImage& reference, double amount,
                          const std::atomic_bool* cancelled) {
     if (!std::isfinite(amount) || amount < 0 || amount > 100)
-        throw EditError(QStringLiteral("降噪强度必须在 0–100 之间"));
+        throw EditError(QCoreApplication::translate("Huelith", "降噪强度必须在 0–100 之间"));
     if (reference.isNull() || amount == 100)
         return enhanced;
     if (reference.size() != enhanced.size() || reference.format() != enhanced.format() ||
         enhanced.format() != QImage::Format_RGBA32FPx4_Premultiplied ||
         reference.colorSpace() != enhanced.colorSpace())
-        throw EditError(QStringLiteral("降噪对照图像不一致"));
+        throw EditError(QCoreApplication::translate("Huelith", "降噪对照图像不一致"));
     if (amount == 0)
         return reference;
     auto result = copy_image(enhanced);
     if (result.isNull())
-        throw EditError(QStringLiteral("降噪强度预览内存不足"));
+        throw EditError(QCoreApplication::translate("Huelith", "降噪强度预览内存不足"));
     const float weight = float(amount / 100);
     for (int y = 0; y < result.height(); ++y) {
         if (cancelled)
@@ -224,7 +225,7 @@ QImage blend_raw_denoise(const QImage& enhanced, const QImage& reference, double
 RawResult develop_raw(const QString& path, const RawOptions& options,
                       const std::atomic_bool& cancelled, const RawProgress& progress) {
     if (!std::isfinite(options.exposure) || std::abs(options.exposure) > 20)
-        throw EditError(QStringLiteral("RAW 曝光参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 曝光参数无效"));
     check_cancel(cancelled);
     if (options.denoise && !is_ai_worker()) {
         const auto result = run_ai_job({{"operation", "raw"}, {"source", path},
@@ -234,7 +235,7 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
     }
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly) || file.size() > 512LL * 1024 * 1024)
-        throw EditError(QStringLiteral("无法读取 RAW 或源文件超出预算"));
+        throw EditError(QCoreApplication::translate("Huelith", "无法读取 RAW 或源文件超出预算"));
     const auto source_bytes = file.readAll();
     LibRaw decoder;
     const auto check = [](int result) {
@@ -251,7 +252,7 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
     const int source_width=data.sizes.width, source_height=data.sizes.height;
     const int width=(source_width+1)&~1, height=(source_height+1)&~1;
     if (width < 4 || height < 4 || qint64(width)*height > maximum_image_pixels)
-        throw EditError(QStringLiteral("RAW 图像尺寸超出支持范围"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 图像尺寸超出支持范围"));
     if (!bayer_layout(decoder) || !data.rawdata.raw_image)
         return generic_develop(decoder, source_bytes, options, cancelled, progress);
     const int pw = width / 2, ph = height / 2;
@@ -268,19 +269,19 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
                 decoder.COLOR(y + data.sizes.top_margin, x + data.sizes.left_margin);
             const char letter = data.idata.cdesc[channel];
             if (letter != 'R' && letter != 'G' && letter != 'B')
-                throw EditError(QStringLiteral("不支持此 RAW CFA 通道"));
+                throw EditError(QCoreApplication::translate("Huelith", "不支持此 RAW CFA 通道"));
             ++color_counts[letter == 'R' ? 0 : letter == 'G' ? 1 : 2];
             const int destination = letter == 'R' ? 0 : letter == 'B' ? 3 : greens++ == 0 ? 1 : 2;
             positions[destination] = {x, y};
             color_ids[destination] = channel;
         }
     if (greens != 2 || color_counts != std::array<int, 3>{1, 2, 1})
-        throw EditError(QStringLiteral("不支持此 RAW CFA 排列"));
+        throw EditError(QCoreApplication::translate("Huelith", "不支持此 RAW CFA 排列"));
     for (int channel = 0; channel < 4; ++channel) {
         const double base_black = data.color.black + data.color.cblack[color_ids[channel]];
         const double white = data.color.maximum;
         if (white <= base_black || data.color.cblack[4] > 64 || data.color.cblack[5] > 64)
-            throw EditError(QStringLiteral("RAW 黑白位无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW 黑白位无效"));
         black_levels.append(base_black);
         for (int y = 0; y < ph; ++y)
             for (int x = 0; x < pw; ++x) {
@@ -291,7 +292,7 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
                 double black=base_black;
                 if(data.color.cblack[4] && data.color.cblack[5])
                     black+=data.color.cblack[6+((sy-data.sizes.top_margin)%data.color.cblack[4])*data.color.cblack[5]+(sx-data.sizes.left_margin)%data.color.cblack[5]];
-                if(white<=black)throw EditError(QStringLiteral("RAW 黑电平不小于白电平"));
+                if(white<=black)throw EditError(QCoreApplication::translate("Huelith", "RAW 黑电平不小于白电平"));
                 const auto raw =
                     data.rawdata.raw_image[std::size_t(sy) * (data.sizes.raw_pitch / 2) + sx];
                 packed[std::size_t(channel) * plane + std::size_t(y) * pw + x] =
@@ -300,20 +301,20 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
     }
     auto image = allocate_image(width, height, QImage::Format_RGBA32FPx4_Premultiplied);
     if (image.isNull())
-        throw EditError(QStringLiteral("RAW 输出内存不足"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 输出内存不足"));
     image.setColorSpace(working_space());
     double gain = 1;
     QByteArray model_hash;
     if (options.denoise) {
         QFile model(options.model_path);
         if (!model.open(QIODevice::ReadOnly))
-            throw EditError(QStringLiteral("AI RAW 模型缺失，请指定已验证的 Bayer ONNX 模型"));
+            throw EditError(QCoreApplication::translate("Huelith", "AI RAW 模型缺失，请指定已验证的 Bayer ONNX 模型"));
         QCryptographicHash hash(QCryptographicHash::Sha256);
         hash.addData(&model);
         model_hash = hash.result().toHex();
         if (!options.custom_model &&
             model_hash != "da27509dab6a2915da67e988acd86cf71f9d5bbc8d1aa0ed32933578a887b901")
-            throw EditError(QStringLiteral("RAW 模型哈希与 M0 固定版本不一致"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW 模型哈希与 M0 固定版本不一致"));
         Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "HuelithRaw");
         Ort::SessionOptions session_options;
         session_options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
@@ -328,7 +329,7 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
         const auto model_path = options.model_path.toStdWString();
         Ort::Session session(env, model_path.c_str(), session_options);
         if (session.GetInputCount() != 1 || session.GetOutputCount() != 1)
-            throw EditError(QStringLiteral("自定义模型必须是单输入/单输出的 RawNIND Bayer 模型"));
+            throw EditError(QCoreApplication::translate("Huelith", "自定义模型必须是单输入/单输出的 RawNIND Bayer 模型"));
         Ort::AllocatorWithDefaultOptions contract_allocator;
         const auto input_name = session.GetInputNameAllocated(0, contract_allocator);
         const auto input_type = session.GetInputTypeInfo(0);
@@ -340,8 +341,7 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
             (input_shape[1] > 0 && input_shape[1] != 4) ||
             (input_shape[2] > 0 && input_shape[2] != 512) ||
             (input_shape[3] > 0 && input_shape[3] != 512))
-            throw EditError(QStringLiteral(
-                "模型不兼容：需要 FP32 input[1,4,512,512]，输出线性相机 RGB[1,3,1024,1024]"));
+            throw EditError(QCoreApplication::translate("Huelith", "模型不兼容：需要 FP32 input[1,4,512,512]，输出线性相机 RGB[1,3,1024,1024]"));
         Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
         constexpr int tile = 512, halo = 128, core = 256;
         constexpr std::size_t tile_plane = std::size_t(tile) * tile;
@@ -369,7 +369,7 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
                 const auto info = output[0].GetTensorTypeAndShapeInfo();
                 if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
                     info.GetShape() != std::vector<int64_t>{1, 3, tile * 2, tile * 2})
-                    throw EditError(QStringLiteral("AI RAW 输出尺寸不符合约定"));
+                    throw EditError(QCoreApplication::translate("Huelith", "AI RAW 输出尺寸不符合约定"));
                 const auto* values = output[0].GetTensorData<float>();
                 for (int y = 0; y < std::min(core, ph - ty) * 2; ++y) {
                     auto* row = reinterpret_cast<float*>(image.scanLine(ty * 2 + y));
@@ -378,7 +378,7 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
                             const float value = values[std::size_t(c) * tile_plane * 4 +
                                                        (y + halo * 2) * tile * 2 + x + halo * 2];
                             if (!std::isfinite(value))
-                                throw EditError(QStringLiteral("AI RAW 输出非有限像素"));
+                                throw EditError(QCoreApplication::translate("Huelith", "AI RAW 输出非有限像素"));
                             row[(tx * 2 + x) * 4 + c] = value;
                             output_sum += value;
                         }
@@ -392,7 +392,7 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
         const double input_mean = std::accumulate(packed.begin(), packed.end(), 0.) / packed.size();
         const double output_mean = output_sum / (double(width) * height * 3);
         if (!std::isfinite(output_mean) || output_mean <= 0)
-            throw EditError(QStringLiteral("AI RAW 输出增益无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "AI RAW 输出增益无效"));
         gain = input_mean / output_mean;
     } else if (!options.high_quality) {
         // Float bilinear reference: retain camera-domain samples until the common color transform.
@@ -427,7 +427,7 @@ RawResult develop_raw(const QString& path, const RawOptions& options,
     if (options.denoise) {
         reference = allocate_image(width, height, QImage::Format_RGBA32FPx4_Premultiplied);
         if (reference.isNull())
-            throw EditError(QStringLiteral("降噪对照图像内存不足"));
+            throw EditError(QCoreApplication::translate("Huelith", "降噪对照图像内存不足"));
         reference.setColorSpace(working_space());
         demosaic_malvar(packed, positions, reference, cancelled);
     }

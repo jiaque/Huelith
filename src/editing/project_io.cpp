@@ -1,13 +1,16 @@
-#include "project_archive.h"
-#include <QTemporaryFile>
+#include <QCoreApplication>
 #include "huelith/editing/image_storage.h"
 #include "huelith/editing/project.h"
+#include "project_archive.h"
 #include <QBuffer>
 #include <QDataStream>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QTemporaryFile>
 #include <QtEndian>
 #include <cstring>
 #include <limits>
@@ -15,10 +18,12 @@
 namespace huelith::editing {
 namespace {
 constexpr qint64 file_budget = 1024LL * 1024 * 1024;
-constexpr quint32 schema = 16;
+constexpr quint32 schema = 19;
+void write_images(QDataStream&, const QMap<QString, QImage>&);
+QMap<QString, QImage> read_images(QDataStream&);
 void checked(QDataStream& stream) {
     if (stream.status() != QDataStream::Ok)
-        throw EditError(QStringLiteral("工程截断或数据无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "工程截断或数据无效"));
 }
 void write_image(QDataStream& out, const QImage& image) {
     out << qint32(image.width()) << qint32(image.height()) << qint32(image.format());
@@ -41,10 +46,10 @@ QByteArray bounded_bytes(QDataStream& in,qint64 limit=file_budget) {
     if (size == 0xffffffffU)
         return {};
     if (size > limit || qint64(size) > in.device()->bytesAvailable())
-        throw EditError(QStringLiteral("工程资源长度无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "工程资源长度无效"));
     QByteArray bytes(static_cast<qsizetype>(size), Qt::Uninitialized);
     if (in.readRawData(bytes.data(), static_cast<int>(size)) != static_cast<int>(size))
-        throw EditError(QStringLiteral("工程资源读取失败"));
+        throw EditError(QCoreApplication::translate("Huelith", "工程资源读取失败"));
     return bytes;
 }
 QImage read_image(QDataStream& in) {
@@ -56,27 +61,27 @@ QImage read_image(QDataStream& in) {
     if (width < 1 || height < 1 || qint64(width) * height > huelith::editing::maximum_image_pixels ||
         (format != QImage::Format_RGBA32FPx4_Premultiplied && format != QImage::Format_Grayscale8 &&
          format != QImage::Format_RGBA8888))
-        throw EditError(QStringLiteral("不支持的资源尺寸或格式"));
+        throw EditError(QCoreApplication::translate("Huelith", "不支持的资源尺寸或格式"));
     auto result=allocate_image(width,height,static_cast<QImage::Format>(format));
     QByteArray icc;
     if(in.device()->property("tiledImages").toBool()) {
         icc=bounded_bytes(in,16*1024*1024);
         qint32 rows{};in>>rows;
         if(rows<1 || qint64(rows)*result.bytesPerLine()>8LL*1024*1024)
-            throw EditError(QStringLiteral("工程分块尺寸无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "工程分块尺寸无效"));
         for(int y=0;y<height;y+=rows) {
             const auto compressed=bounded_bytes(in,9*1024*1024);
             const auto expected=std::min(rows,height-y)*result.bytesPerLine();
             if(compressed.size()<4 || compressed.size()>9*1024*1024 ||
                qFromBigEndian<quint32>(compressed.constData())!=expected)
-                throw EditError(QStringLiteral("工程分块长度无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "工程分块长度无效"));
             const auto block=qUncompress(compressed);
-            if(block.size()!=expected)throw EditError(QStringLiteral("工程分块损坏"));
+            if(block.size()!=expected)throw EditError(QCoreApplication::translate("Huelith", "工程分块损坏"));
             std::memcpy(result.scanLine(y),block.constData(),std::size_t(expected));
         }
     } else {
         const auto bytes=bounded_bytes(in);icc=bounded_bytes(in);
-        if(bytes.size()!=result.sizeInBytes())throw EditError(QStringLiteral("资源像素长度不匹配"));
+        if(bytes.size()!=result.sizeInBytes())throw EditError(QCoreApplication::translate("Huelith", "资源像素长度不匹配"));
         std::memcpy(result.bits(),bytes.constData(),std::size_t(bytes.size()));
     }
     if(!icc.isEmpty()) result.setColorSpace(QColorSpace::fromIccProfile(icc));
@@ -106,6 +111,8 @@ void write_layers(QDataStream& out, const std::vector<Layer>& layers) {
             write_image(out, effect.liquify);
             out << effect.blur_radius;
             out << QJsonDocument(effect.portrait).toJson(QJsonDocument::Compact);
+            out << qint32(effect.filter) << effect.filter_radius << effect.filter_angle
+                << effect.filter_seed << qint32(effect.blend);
         }
         out << QJsonDocument(text_json(layer.text)).toJson(QJsonDocument::Compact)
             << QJsonDocument(shape_json(layer.shape)).toJson(QJsonDocument::Compact);
@@ -114,6 +121,9 @@ void write_layers(QDataStream& out, const std::vector<Layer>& layers) {
         if (layer.frame)
             out << *layer.frame;
         out << QJsonDocument(layer.source_metadata).toJson(QJsonDocument::Compact);
+        out << layer.source_id;
+        out << layer.artboard;
+        write_images(out, layer.generation_inputs);
         write_image(out, layer.pixels);
         write_image(out, layer.mask);
         write_layers(out, layer.children);
@@ -124,7 +134,7 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
     in >> size;
     checked(in);
     if (depth > 32 || size > 4096 || count + size > 4096)
-        throw EditError(QStringLiteral("工程图层数量或深度超限"));
+        throw EditError(QCoreApplication::translate("Huelith", "工程图层数量或深度超限"));
     count += static_cast<int>(size);
     std::vector<Layer> layers;
     for (quint32 i = 0; i < size; ++i) {
@@ -137,7 +147,7 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
             layer.linked_path >> layer.linked_hash;
         checked(in);
         if (kind < 0 || kind > qint32(version >= 8 ? LayerKind::shape : LayerKind::composition))
-            throw EditError(QStringLiteral("工程含未知图层，已拒绝打开并保留原文件"));
+            throw EditError(QCoreApplication::translate("Huelith", "工程含未知图层，已拒绝打开并保留原文件"));
         layer.kind = static_cast<LayerKind>(kind);
         layer.blend = static_cast<Blend>(blend);
         if (version >= 3) {
@@ -151,14 +161,14 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
             QJsonParseError error;
             const auto document = QJsonDocument::fromJson(recipe, &error);
             if (error.error != QJsonParseError::NoError || !document.isObject())
-                throw EditError(QStringLiteral("RAW 配方无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "RAW 配方无效"));
             layer.raw_recipe = document.object();
         }
         if (version >= 5) {
             QJsonParseError error;
             const auto document = QJsonDocument::fromJson(bounded_bytes(in), &error);
             if (error.error != QJsonParseError::NoError || !document.isObject())
-                throw EditError(QStringLiteral("调色配方无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "调色配方无效"));
             layer.tone = tone_from_json(document.object());
         }
         if (version >= 6)
@@ -168,14 +178,14 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
             in >> effect_count;
             checked(in);
             if (effect_count > 64)
-                throw EditError(QStringLiteral("效果数量超限"));
+                throw EditError(QCoreApplication::translate("Huelith", "效果数量超限"));
             for (quint32 e = 0; e < effect_count; ++e) {
                 Effect effect;
                 in >> effect.id >> effect.name >> effect.enabled >> effect.amount;
                 QJsonParseError error;
                 const auto json = QJsonDocument::fromJson(bounded_bytes(in), &error);
                 if (error.error != QJsonParseError::NoError || !json.isObject())
-                    throw EditError(QStringLiteral("效果参数无效"));
+                    throw EditError(QCoreApplication::translate("Huelith", "效果参数无效"));
                 effect.tone = tone_from_json(json.object());
                 const auto lut = bounded_bytes(in);
                 if (!lut.isEmpty())
@@ -188,8 +198,15 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
                 if (version >= 16) {
                     const auto data=bounded_bytes(in,64*1024*1024);
                     const auto document=QJsonDocument::fromJson(data);
-                    if(!document.isObject()) throw EditError(QStringLiteral("人像设置损坏"));
+                    if(!document.isObject()) throw EditError(QCoreApplication::translate("Huelith", "人像设置损坏"));
                     effect.portrait=document.object();
+                }
+                if (version >= 17) {
+                    qint32 filter{}, effect_blend{};
+                    in >> filter >> effect.filter_radius >> effect.filter_angle >>
+                        effect.filter_seed >> effect_blend;
+                    effect.filter = filter;
+                    effect.blend = Blend(effect_blend);
                 }
                 layer.effects.push_back(std::move(effect));
             }
@@ -198,14 +215,14 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
             const auto text = QJsonDocument::fromJson(bounded_bytes(in));
             const auto shape = QJsonDocument::fromJson(bounded_bytes(in));
             if (!text.isObject() || !shape.isObject())
-                throw EditError(QStringLiteral("文字或形状数据损坏"));
+                throw EditError(QCoreApplication::translate("Huelith", "文字或形状数据损坏"));
             layer.text = text_from_json(text.object());
             layer.shape = shape_from_json(shape.object());
         }
         if (version >= 9) {
             const auto styles = QJsonDocument::fromJson(bounded_bytes(in));
             if (!styles.isObject())
-                throw EditError(QStringLiteral("样式数据损坏"));
+                throw EditError(QCoreApplication::translate("Huelith", "样式数据损坏"));
             layer.styles = styles_from_json(styles.object());
         }
         if (version >= 10) {
@@ -219,9 +236,15 @@ std::vector<Layer> read_layers(QDataStream& in, int depth, int& count, quint32 v
         }
         if(version>=14) {
             const auto data=QJsonDocument::fromJson(bounded_bytes(in));
-            if(!data.isObject())throw EditError(QStringLiteral("图层元数据损坏"));
+            if(!data.isObject())throw EditError(QCoreApplication::translate("Huelith", "图层元数据损坏"));
             layer.source_metadata=data.object();
         }
+        if (version >= 17)
+            in >> layer.source_id;
+        if (version >= 18)
+            in >> layer.artboard;
+        if (version >= 19)
+            layer.generation_inputs = read_images(in);
         layer.pixels = read_image(in);
         layer.mask = read_image(in);
         layer.children = read_layers(in, depth + 1, count, version);
@@ -240,7 +263,7 @@ QMap<QString, QImage> read_images(QDataStream& in) {
     quint32 count{};
     in >> count;
     if (count > 256)
-        throw EditError(QStringLiteral("工程保存范围或快照过多"));
+        throw EditError(QCoreApplication::translate("Huelith", "工程保存范围或快照过多"));
     QMap<QString, QImage> result;
     for (quint32 i = 0; i < count; ++i) {
         QString name;
@@ -271,6 +294,9 @@ void save_project(const Snapshot& snapshot, const QString& path, bool simulate_f
     for (const auto value : state.vertical_guides)
         out << value;
     out << QJsonDocument(state.metadata).toJson(QJsonDocument::Compact);
+    out << quint32(state.slices.size());
+    for (const auto& slice : state.slices)
+        out << slice.id << slice.name << slice.bounds;
     checked(out);
     const QJsonObject manifest{{"schema", int(schema)},
                                {"workingSpace", "linear-rec2020"},
@@ -282,7 +308,7 @@ void save_project(const Snapshot& snapshot, const QString& path, bool simulate_f
     write_project_archive(file,payload,manifest);
     if (simulate_failure) {
         file.cancelWriting();
-        throw EditError(QStringLiteral("注入保存失败"));
+        throw EditError(QCoreApplication::translate("Huelith", "注入保存失败"));
     }
     if (!file.commit())
         throw EditError(file.errorString());
@@ -296,7 +322,7 @@ State load_project(const QString& path) {
     const auto manifest=read_project_archive(file,payload);
     if ((manifest.value("schema").toInt() < 2 || manifest.value("schema").toInt() > int(schema)) ||
         manifest.value("pixels").toString() != "rgba-f32-le-premultiplied")
-        throw EditError(QStringLiteral("不支持的工程版本，原文件未修改"));
+        throw EditError(QCoreApplication::translate("Huelith", "不支持的工程版本，原文件未修改"));
     QDataStream in(&payload);
     in.setVersion(QDataStream::Qt_6_0);
     in.setByteOrder(QDataStream::LittleEndian);
@@ -306,7 +332,7 @@ State load_project(const QString& path) {
     if (version >= 11)
         in >> state.global_light_angle;
     if (version < 2 || version > schema || int(version) != manifest.value("schema").toInt())
-        throw EditError(QStringLiteral("工程版本不匹配"));
+        throw EditError(QCoreApplication::translate("Huelith", "工程版本不匹配"));
     payload.setProperty("tiledImages",version>=15);
     int count{};
     state.layers = read_layers(in, 0, count, version);
@@ -318,7 +344,7 @@ State load_project(const QString& path) {
         quint32 length{};
         in >> length;
         if (length > 10000)
-            throw EditError(QStringLiteral("参考线过多"));
+            throw EditError(QCoreApplication::translate("Huelith", "参考线过多"));
         for (quint32 i = 0; i < length; ++i) {
             double value{};
             in >> value;
@@ -327,13 +353,31 @@ State load_project(const QString& path) {
     }
     if(version>=14){
         const auto data=QJsonDocument::fromJson(bounded_bytes(in));
-        if(!data.isObject())throw EditError(QStringLiteral("文档元数据损坏"));
+        if(!data.isObject())throw EditError(QCoreApplication::translate("Huelith", "文档元数据损坏"));
         state.metadata=data.object();
+    }
+    if (version >= 18) {
+        quint32 length{};
+        in >> length;
+        if (length > 4096) throw EditError(QCoreApplication::translate("Huelith", "切片数量过多"));
+        for (quint32 i = 0; i < length; ++i) {
+            Slice slice;
+            in >> slice.id >> slice.name >> slice.bounds;
+            state.slices.push_back(std::move(slice));
+        }
     }
     checked(in);
     if (!in.atEnd())
-        throw EditError(QStringLiteral("未知工程尾部数据"));
+        throw EditError(QCoreApplication::translate("Huelith", "未知工程尾部数据"));
     validate_state(state);
+    const auto resolve = [&](auto&& self, std::vector<Layer>& layers) -> void {
+        for (auto& layer : layers) {
+            if (!layer.linked_path.isEmpty() && QFileInfo(layer.linked_path).isRelative())
+                layer.linked_path = QFileInfo(path).dir().absoluteFilePath(layer.linked_path);
+            self(self, layer.children);
+        }
+    };
+    resolve(resolve, state.layers);
     return state;
 }
 } // namespace huelith::editing

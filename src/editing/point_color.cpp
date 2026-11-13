@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/point_color.h"
 #include "huelith/editing/project.h"
 #include <QJsonObject>
@@ -18,10 +19,10 @@ void read_array(const QJsonObject& json, const char* name, std::array<double, N>
         return;
     const auto values = json.value(QLatin1String(name)).toArray();
     if (values.size() != N)
-        throw EditError(QStringLiteral("点颜色参数数量无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "点颜色参数数量无效"));
     for (std::size_t i = 0; i < N; ++i) {
         if (!values[qsizetype(i)].isDouble())
-            throw EditError(QStringLiteral("点颜色参数格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "点颜色参数格式无效"));
         target[i] = values[qsizetype(i)].toDouble();
     }
 }
@@ -78,21 +79,21 @@ PointColor sample_point_color(QColor color) {
 }
 void validate_point_colors(std::span<const PointColor> colors) {
     if (colors.size() > 8)
-        throw EditError(QStringLiteral("点颜色最多保留8个样本"));
+        throw EditError(QCoreApplication::translate("Huelith", "点颜色最多保留8个样本"));
     for (const auto& color : colors) {
         if (!std::isfinite(color.range) || color.range < 0 || color.range > 100)
-            throw EditError(QStringLiteral("点颜色范围无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "点颜色范围无效"));
         for (int c = 0; c < 3; ++c) {
             if (!std::isfinite(color.sample[c]) || color.sample[c] < 0 || color.sample[c] > 1 ||
                 !std::isfinite(color.shift[c]) || std::abs(color.shift[c]) > 100)
-                throw EditError(QStringLiteral("点颜色样本或偏移无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "点颜色样本或偏移无效"));
             const auto& edges = c == 0   ? color.hue_range
                                 : c == 1 ? color.saturation_range
                                          : color.luminance_range;
             for (int i = 0; i < 4; ++i)
                 if (!std::isfinite(edges[i]) || edges[i] < (c == 0 ? -.5 : 0) ||
                     edges[i] > (c == 0 ? .5 : 1) || (i > 0 && edges[i] < edges[i - 1]))
-                    throw EditError(QStringLiteral("点颜色范围端点顺序或数值无效"));
+                    throw EditError(QCoreApplication::translate("Huelith", "点颜色范围端点顺序或数值无效"));
         }
     }
 }
@@ -111,18 +112,18 @@ QJsonArray point_colors_json(std::span<const PointColor> colors) {
 std::vector<PointColor> point_colors_from_json(const QJsonArray& json) {
     std::vector<PointColor> result;
     if (json.size() > 8)
-        throw EditError(QStringLiteral("点颜色最多保留8个样本"));
+        throw EditError(QCoreApplication::translate("Huelith", "点颜色最多保留8个样本"));
     for (const auto item : json) {
         if (!item.isObject())
-            throw EditError(QStringLiteral("点颜色配方格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "点颜色配方格式无效"));
         const auto object = item.toObject();
         const QStringList keys{"sample",   "shift",           "range",
                                "hueRange", "saturationRange", "luminanceRange"};
         for (auto it = object.begin(); it != object.end(); ++it)
             if (!keys.contains(it.key()))
-                throw EditError(QStringLiteral("未知点颜色配方字段"));
+                throw EditError(QCoreApplication::translate("Huelith", "未知点颜色配方字段"));
         if (!object.contains("sample"))
-            throw EditError(QStringLiteral("点颜色缺少样本"));
+            throw EditError(QCoreApplication::translate("Huelith", "点颜色缺少样本"));
         PointColor color;
         read_array(object, "sample", color.sample);
         read_array(object, "shift", color.shift);
@@ -131,7 +132,7 @@ std::vector<PointColor> point_colors_from_json(const QJsonArray& json) {
         read_array(object, "luminanceRange", color.luminance_range);
         if (object.contains("range")) {
             if (!object.value("range").isDouble())
-                throw EditError(QStringLiteral("点颜色范围格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "点颜色范围格式无效"));
             color.range = object.value("range").toDouble();
         }
         result.push_back(color);

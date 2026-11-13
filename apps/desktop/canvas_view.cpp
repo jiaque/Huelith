@@ -1,11 +1,15 @@
 #include "canvas_view.h"
 #include "canvas_preferences.h"
+#include "huelith/editing/document_color.h"
+#include "huelith/editing/layout_regions.h"
 #include "text_edit_view.h"
 #include <QAction>
+#include <QDateTime>
 #include <QFile>
 #include <QJsonDocument>
 #include <QKeyEvent>
 #include <QMenu>
+#include <QMessageBox>
 #include <QScreen>
 #include <QSettings>
 #ifdef Q_OS_WIN
@@ -32,15 +36,32 @@ CanvasView::CanvasView(CanvasSpec spec, QWidget* parent) : QWidget(parent), spec
     state.size = {spec_.width, spec_.height};
     state.name = QString::fromStdString(spec_.name);
     state.ppi = spec_.resolution_ppi;
-    if (spec_.background == CanvasBackground::white) {
+    const QColorSpace::NamedColorSpace profiles[]{QColorSpace::SRgb, QColorSpace::AdobeRgb,
+                                                  QColorSpace::DisplayP3, QColorSpace::ProPhotoRgb};
+    const auto profile =
+        spec_.icc_profile.empty()
+            ? QColorSpace(profiles[spec_.color_profile])
+            : QColorSpace::fromIccProfile(QByteArray::fromStdString(spec_.icc_profile));
+    editing::set_document_color(state, {spec_.color_mode, spec_.color_bits, profile});
+    gamut_color = QSettings().value("color/gamutWarningColor", QColor(Qt::gray)).value<QColor>();
+    if (spec_.background != CanvasBackground::transparent) {
         editing::Layer layer;
         layer.background = true;
         QImage white(state.size, QImage::Format_RGBA8888);
-        white.fill(Qt::white);
+        white.fill(spec_.background == CanvasBackground::white
+                       ? QColor(Qt::white)
+                       : QColor::fromRgb(spec_.background_rgb));
         layer.pixels = editing::to_working(white);
         layer.name = tr("背景");
         state.layers.push_back(layer);
         active_layer = layer.id;
+    }
+    if (spec_.artboard) {
+        std::vector<QUuid> contents;
+        for (const auto& layer : state.layers)
+            contents.push_back(layer.id);
+        active_layer =
+            editing::create_artboard(state, tr("画板 1"), QRect(QPoint(), state.size), contents);
     }
     project_ = std::make_unique<editing::Project>(state);
     history_source = editing::render(state);
@@ -110,7 +131,8 @@ void CanvasView::load_state(editing::State state, bool saved) {
     if (saved)
         loaded->mark_saved(loaded->revision());
     project_ = std::move(loaded);
-    project_->set_history_limit(std::size_t(read_canvas_preferences().history_states));
+    const auto limits=read_canvas_preferences();
+    project_->set_history_limit(std::size_t(limits.history_states),qint64(limits.history_mb)<<20);
     history_source = editing::render(project_->state());
     reset_preview(history_source);
     spec_.width = project_->state().size.width();
@@ -124,9 +146,61 @@ void CanvasView::load_state(editing::State state, bool saved) {
 void CanvasView::edit(const QString& name, const std::function<void(editing::State&)>& operation) {
     commit_transform();
     project_->edit(name, operation);
+    if(property("actionRecording").toBool()){
+        auto steps=property("recordedSteps").toJsonArray();
+        const auto& state=project_->state();const auto* layer=editing::find_layer(state.layers,active_layer);
+        QJsonObject step;
+        if(layer && (name==tr("调整不透明度") || name==tr("拖动不透明度"))) step={{"op","opacity"},{"value",layer->opacity}};
+        else if(layer && name==tr("调整曝光"))step={{"op","exposure"},{"value",layer->exposure}};
+        else if(name==tr("图像大小")) step={{"op","resize"},{"width",state.size.width()},{"height",state.size.height()},{"ppi",state.ppi}};
+        else step={{"op","stop"},{"message",tr("此操作暂不支持录制：%1").arg(name)}};
+        if(steps.size()<256)steps.append(step);
+        else steps[255]=QJsonObject{{"op","stop"},{"message",tr("录制超过 256 步，请拆分动作")}};
+        setProperty("recordedSteps",steps);setProperty("actionRecordedRevision",QVariant::fromValue<qulonglong>(project_->revision()));
+    }
     refresh();
 }
 void CanvasView::refresh(bool update_pixels) {
+    const auto revision = project_->revision();
+    if (property("loggedRevision").isValid() &&
+        property("loggedRevision").toULongLong() != revision) {
+        if(property("actionRecording").toBool() && property("actionRecordedRevision").toULongLong()!=revision){
+            auto steps=property("recordedSteps").toJsonArray();QJsonObject step{{"op","stop"},{"message",tr("此文档修改不支持录制，请编辑动作后再播放")}};
+            if(steps.size()<256)steps.append(step);else steps[255]=step;
+            setProperty("recordedSteps",steps);setProperty("actionRecordedRevision",QVariant::fromValue<qulonglong>(revision));
+        }
+        const auto prefs = read_canvas_preferences();
+        if (prefs.operation_log) {
+            const auto position = project_->history_position();
+            QJsonObject record{
+                {"time", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+                {"document", project_->state().name},
+                {"operation", project_->history_names().value(int(position))}};
+            if (prefs.operation_log_detail) {
+                record["width"] = project_->state().size.width();
+                record["height"] = project_->state().size.height();
+                record["layer"] = active_layer.toString();
+                record["historyPosition"] = int(position);
+            }
+            QFile file(prefs.operation_log_path);
+            const auto bytes = QJsonDocument(record).toJson(QJsonDocument::Compact) + '\n';
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Append) ||
+                file.write(bytes) != bytes.size() || !file.flush()) {
+                if (!property("operationLogErrorShown").toBool()) {
+                    setProperty("operationLogErrorShown", true);
+                    const auto error = file.errorString();
+                    QTimer::singleShot(0, this, [this, error] {
+                        QMessageBox::warning(
+                            this, tr("操作日志写入失败"),
+                            tr("图片编辑已保留。请在首选项检查日志路径。\n%1").arg(error));
+                    });
+                }
+            } else
+                setProperty("operationLogErrorShown", false);
+        }
+    }
+    setProperty("loggedRevision", QVariant::fromValue<qulonglong>(revision));
+
     if (!path_layer_.isNull() && !dragging_ &&
         (tool_ == CanvasTool::pen || tool_ == CanvasTool::path_select))
         bind_shape_path();
@@ -143,6 +217,11 @@ void CanvasView::preview(const editing::State& state) {
     update();
 }
 void CanvasView::set_tool(CanvasTool tool) {
+    setProperty("magneticLasso", false);
+    if (property("quickSelection").toBool()) {
+        setProperty("quickSelection", false);
+        quick_mask = false;
+    }
     if (tool != tool_)
         object_cancel();
     scrub_gesture_ = false;
@@ -195,8 +274,9 @@ void CanvasView::set_tool(CanvasTool tool) {
 void CanvasView::apply_preferences() {
     const auto preferences = read_canvas_preferences();
     const auto previous_history_count = project_->history_names().size();
-    project_->set_history_limit(std::size_t(preferences.history_states));
+    project_->set_history_limit(std::size_t(preferences.history_states),qint64(preferences.history_mb)<<20);
     grid_spacing = preferences.grid_spacing;
+    gamut_color = preferences.gamut_color;
     constrain_pan();
     update_tool_cursor();
     update();
@@ -722,6 +802,18 @@ void CanvasView::paintEvent(QPaintEvent*) {
     painter.fillRect(visible.intersected(QRectF(QPointF(), project_->state().size)),
                      QBrush(checker));
     QImage image = preview_;
+    if (property("channelPreview").toBool()) {
+        const int component = property("channelPreviewComponent").toInt();
+        if (component < 0) {
+            const auto alpha =
+                project_->state().saved_selections.value(property("channelPreviewName").toString());
+            if (!alpha.isNull())
+                image = alpha;
+        } else if (!image.isNull()) {
+            if (!linear_preview_.isNull())
+                image = editing::document_channel(linear_preview_, project_->state(), component);
+        }
+    }
     if (!comparison.isEmpty())
         image =
             editing::display_image(project_->state().snapshots.value(comparison), monitor_space_);
@@ -746,6 +838,24 @@ void CanvasView::paintEvent(QPaintEvent*) {
         painter.restore();
     } else if (!source.isEmpty())
         painter.drawImage(source, image, image_scale.mapRect(source));
+    if (preferences.show_slices) {
+        painter.save();
+        QPen pen(preferences.slice_color, 0, Qt::DashLine);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        QFont font = painter.font();
+        font.setPixelSize(std::max(1, qRound(12 / zoom_)));
+        painter.setFont(font);
+        int index = 0;
+        for (const auto& slice : display_state().slices) {
+            ++index;
+            painter.drawRect(slice.bounds);
+            if (preferences.slice_numbers)
+                painter.drawText(slice.bounds.topLeft() + QPointF(4 / zoom_, 14 / zoom_),
+                                 QString::number(index) + " · " + slice.name);
+        }
+        painter.restore();
+    }
     if (tool_ == CanvasTool::object_selection)
         object_paint(painter);
     if (quick_mask) {
@@ -1209,6 +1319,12 @@ void CanvasView::mousePressEvent(QMouseEvent* event) {
         stroke_coverage_ = QImage(project_->state().size, QImage::Format_ARGB32_Premultiplied);
         stroke_coverage_.fill(Qt::transparent);
         brush_stroke_.reset(brush_settings(), ++brush_seed_, zoom_);
+        if (tool_ == CanvasTool::brush && advanced_brush_.mixer_enabled && !mask_target &&
+            !quick_mask)
+            brush_stroke_.set_mixer_source(
+                editing::display_image(editing::sample_layers(*stroke_base_, active_layer,
+                                                              editing::SampleLayers::visible)),
+                foreground);
         brush_clock_.start();
         stamp_brush(p, p);
         update_brush_preview();
@@ -1466,9 +1582,32 @@ void CanvasView::mouseMoveEvent(QMouseEvent* event) {
         pan_ += event->position() - last_;
         fit_mode_ = false;
     } else if (tool_ == CanvasTool::lasso || tool_ == CanvasTool::brush ||
-               tool_ == CanvasTool::eraser)
-        stroke_.lineTo(p);
-    else if (tool_ == CanvasTool::rectangle || tool_ == CanvasTool::ellipse) {
+               tool_ == CanvasTool::eraser) {
+        QPointF target = p;
+        if (tool_ == CanvasTool::lasso && property("magneticLasso").toBool() &&
+            !preview_.isNull()) {
+            const double sx = double(preview_.width()) / project_->state().size.width(),
+                         sy = double(preview_.height()) / project_->state().size.height();
+            const QPoint center(qRound(p.x() * sx), qRound(p.y() * sy));
+            double best = 0;
+            for (int y = std::max(1, center.y() - 6);
+                 y <= std::min(preview_.height() - 2, center.y() + 6); ++y)
+                for (int x = std::max(1, center.x() - 6);
+                     x <= std::min(preview_.width() - 2, center.x() + 6); ++x) {
+                    const double dx = qGray(preview_.pixel(x + 1, y)) -
+                                      qGray(preview_.pixel(x - 1, y)),
+                                 dy = qGray(preview_.pixel(x, y + 1)) -
+                                      qGray(preview_.pixel(x, y - 1));
+                    const double score =
+                        std::hypot(dx, dy) - 4 * std::hypot(x - center.x(), y - center.y());
+                    if (score > best + 8) {
+                        best = score;
+                        target = QPointF(x / sx, y / sy);
+                    }
+                }
+        }
+        stroke_.lineTo(target);
+    } else if (tool_ == CanvasTool::rectangle || tool_ == CanvasTool::ellipse) {
         stroke_ = QPainterPath();
         if (temporary_hand_)
             press_ += event->position() - last_;
@@ -1519,12 +1658,58 @@ void CanvasView::set_brush_settings(const editing::BrushSettings& settings) {
         tool_changed();
 }
 void CanvasView::stamp_brush(QPointF, QPointF to) {
-    brush_stroke_.add(stroke_coverage_, to, pressure_);
+    brush_stroke_.add(stroke_coverage_, to, pressure_, pen_tilt_);
 }
 void CanvasView::update_brush_preview() {
     if (!stroke_base_)
         return;
     brush_draft_ = *stroke_base_;
+    if (property("quickSelection").toBool() && !preview_.isNull()) {
+        const auto image =
+            (std::max(preview_.width(), preview_.height()) > 1280
+                 ? preview_.scaled(1280, 1280, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                 : preview_)
+                .convertToFormat(QImage::Format_ARGB32);
+        const auto coverage =
+            stroke_coverage_.scaled(image.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        QImage mask(image.size(), QImage::Format_Grayscale8);
+        mask.fill(0);
+        struct Seed {
+            QPoint point;
+            QRgb color;
+        };
+        std::vector<Seed> queue;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                if (qAlpha(coverage.pixel(x, y)) >= 128 && qAlpha(image.pixel(x, y)) > 0) {
+                    mask.scanLine(y)[x] = uchar(qAlpha(image.pixel(x, y)));
+                    queue.push_back({QPoint(x, y), image.pixel(x, y)});
+                }
+        const int tolerance = std::max(8, color_tolerance) * 3;
+        for (std::size_t i = 0; i < queue.size(); ++i) {
+            const auto seed = queue[i];
+            for (const auto delta : {QPoint(-1, 0), QPoint(1, 0), QPoint(0, -1), QPoint(0, 1)}) {
+                const auto point = seed.point + delta;
+                if (!mask.rect().contains(point) || mask.constScanLine(point.y())[point.x()])
+                    continue;
+                const auto color = image.pixel(point);
+                if (qAlpha(color) > 0 && std::abs(qRed(color) - qRed(seed.color)) +
+                                                 std::abs(qGreen(color) - qGreen(seed.color)) +
+                                                 std::abs(qBlue(color) - qBlue(seed.color)) <=
+                                             tolerance) {
+                    mask.scanLine(point.y())[point.x()] = uchar(qAlpha(color));
+                    queue.push_back({point, seed.color});
+                }
+            }
+        }
+        editing::combine_range(
+            *brush_draft_,
+            mask.scaled(brush_draft_->size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
+            gesture_range_);
+        update();
+        return;
+    }
+
     if (quick_mask && (tool_ == CanvasTool::brush || tool_ == CanvasTool::eraser)) {
         auto& range = brush_draft_->selection;
         if (range.isNull()) {
@@ -1571,6 +1756,8 @@ void CanvasView::update_brush_preview() {
     sample.fill(paint_color);
     const auto color = editing::to_working(sample);
     const auto* channels = reinterpret_cast<const float*>(color.constBits());
+    const bool mixer = tool_ == CanvasTool::brush && advanced_brush_.mixer_enabled && !mask_target;
+    const auto mixed_color = mixer ? editing::to_working(stroke_coverage_) : QImage{};
     const auto matrix = (mask_target ? layer->mask_transform : layer->transform) *
                         editing::parent_matrix(*stroke_base_, active_layer);
     auto& target = mask_target ? layer->mask : layer->pixels;
@@ -1595,6 +1782,16 @@ void CanvasView::update_brush_preview() {
             } else {
                 auto* value = reinterpret_cast<float*>(target.scanLine(y)) + x * 4;
                 const float* source = channels;
+                std::array<float, 4> mixed{};
+                if (mixer) {
+                    const auto* pixel =
+                        reinterpret_cast<const float*>(mixed_color.constScanLine(point.y())) +
+                        point.x() * 4;
+                    if (pixel[3] <= 0)
+                        continue;
+                    mixed = {pixel[0] / pixel[3], pixel[1] / pixel[3], pixel[2] / pixel[3], 1};
+                    source = mixed.data();
+                }
                 if (tool_ == CanvasTool::history_brush) {
                     if (history_source.isNull() || !history_source.rect().contains(point))
                         continue;
@@ -2108,7 +2305,8 @@ void CanvasView::keyReleaseEvent(QKeyEvent* event) {
     QWidget::keyReleaseEvent(event);
 }
 void CanvasView::tabletEvent(QTabletEvent* event) {
-    pressure_ = std::clamp(double(event->pressure()), .05, 1.);
+    pressure_ = std::clamp(double(event->pressure()), 0., 1.);
+    pen_tilt_ = QPointF(event->xTilt(), event->yTilt());
     const auto type = event->type() == QEvent::TabletPress     ? QEvent::MouseButtonPress
                       : event->type() == QEvent::TabletRelease ? QEvent::MouseButtonRelease
                                                                : QEvent::MouseMove;
@@ -2123,7 +2321,9 @@ void CanvasView::tabletEvent(QTabletEvent* event) {
     else
         mouseMoveEvent(&mouse);
     event->accept();
-    if (type == QEvent::MouseButtonRelease)
+    if (type == QEvent::MouseButtonRelease) {
         pressure_ = 1;
+        pen_tilt_ = {};
+    }
 }
 } // namespace huelith::desktop

@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/image_storage.h"
 #include "huelith/editing/export_queue.h"
 #include "huelith/editing/tiff_io.h"
@@ -27,7 +28,7 @@ class ExportFile final : public QFile {
   protected:
     qint64 writeData(const char* data, qint64 length) override {
         if (cancelled_.load(std::memory_order_relaxed)) {
-            setErrorString(QStringLiteral("任务已取消"));
+            setErrorString(QCoreApplication::translate("Huelith", "任务已取消"));
             return -1;
         }
         return QFile::writeData(data, length);
@@ -65,12 +66,28 @@ QImage prepare_export_image(const QImage& source, const ExportOptions& options, 
         size.isEmpty() || qint64(size.width()) * size.height() > huelith::editing::maximum_image_pixels ||
         (options.bits != 8 && options.bits != 16) || !std::isfinite(ppi) || ppi <= 0 ||
         ppi > 100000 || !options.matte.isValid() || options.matte.alpha() != 255)
-        throw EditError(QStringLiteral("输出图像、色彩空间、位深或分辨率无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "输出图像、色彩空间、位深或分辨率无效"));
+    const bool cmyk = options.space.colorModel() == QColorSpace::ColorModel::Cmyk;
+    if (cmyk && (options.format != "tif" || options.bits != 8))
+        throw EditError(QCoreApplication::translate("Huelith", "CMYK ICC 当前仅支持 8 位 TIFF 输出"));
+    if (cmyk) {
+        auto rgb_options = options;
+        rgb_options.space = working_space();
+        rgb_options.bits = 16;
+        rgb_options.alpha = false;
+        auto rgb = prepare_export_image(source, rgb_options, ppi);
+        auto result = rgb.convertedToColorSpace(options.space, QImage::Format_CMYK8888);
+        if (result.isNull())
+            throw EditError(QCoreApplication::translate("Huelith", "CMYK 输出转换失败"));
+        result.setDotsPerMeterX(rgb.dotsPerMeterX());
+        result.setDotsPerMeterY(rgb.dotsPerMeterY());
+        return result;
+    }
     auto image =
         convert_image(source.size() == size ? source : source.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
                           options.space, options.bits == 16 ? QImage::Format_RGBA64 : QImage::Format_RGBA8888);
     if (image.isNull())
-        throw EditError(QStringLiteral("输出色彩转换或像素分配失败"));
+        throw EditError(QCoreApplication::translate("Huelith", "输出色彩转换或像素分配失败"));
     image.setColorSpace(options.space);
     if (!options.alpha || options.format == "jpg") {
         auto filled = allocate_image(image.size(), image.format());
@@ -105,7 +122,7 @@ quint64 ExportQueue::add(Snapshot snapshot, ExportOptions options) {
     if (options.size == QSize() || options.size == QSize(0, 0))
         options.size = snapshot.state.size;
     if (options.size.isEmpty())
-        throw EditError(QStringLiteral("导出尺寸无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "导出尺寸无效"));
     if (options.path.isEmpty() ||
         qint64(options.size.width()) * options.size.height() > huelith::editing::maximum_image_pixels ||
         options.size.width() > 65536 || options.size.height() > 65536 ||
@@ -114,7 +131,7 @@ quint64 ExportQueue::add(Snapshot snapshot, ExportOptions options) {
         (options.format == "jpg" && options.bits != 8) || !options.space.isValid() ||
         options.quality < 1 || options.quality > 100 || !options.matte.isValid() ||
         options.matte.alpha() != 255 || int(options.conflict) < 0 || int(options.conflict) > 2)
-        throw EditError(QStringLiteral("导出路径、尺寸、格式或位深无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "导出路径、尺寸、格式或位深无效"));
     collect_sources(snapshot.state.layers, options.protected_paths);
     auto job = std::make_shared<Job>();
     job->item.document = snapshot.state.name;
@@ -212,26 +229,26 @@ void ExportQueue::process(const std::shared_ptr<Job>& job) {
     const auto& options = job->options;
     const auto check_cancel = [&] {
         if (job->cancelled)
-            throw EditError(QStringLiteral("任务已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "任务已取消"));
     };
     check_cancel();
     QString target = QFileInfo(options.path).absoluteFilePath();
     const QFileInfo original(target);
     if (!original.dir().exists())
-        throw EditError(QStringLiteral("输出目录不存在"));
+        throw EditError(QCoreApplication::translate("Huelith", "输出目录不存在"));
     // Serialize path allocation across cooperating Huelith queues/processes.
     QLockFile lock(original.dir().filePath(".huelith-export.lock"));
     if (!lock.tryLock(0))
-        throw EditError(QStringLiteral("输出目录正在被其他导出任务使用，可稍后重试"));
+        throw EditError(QCoreApplication::translate("Huelith", "输出目录正在被其他导出任务使用，可稍后重试"));
     if (options.conflict == ExportConflict::number) {
         for (int index = 1; QFileInfo::exists(target) || protected_path(options, target); ++index) {
             if (index > 100000)
-                throw EditError(QStringLiteral("同名文件数量超限"));
+                throw EditError(QCoreApplication::translate("Huelith", "同名文件数量超限"));
             target = original.dir().filePath(original.completeBaseName() + "_" +
                                              QString::number(index) + "." + original.suffix());
         }
     } else if (protected_path(options, target))
-        throw EditError(QStringLiteral("禁止覆盖原始素材或工程文件"));
+        throw EditError(QCoreApplication::translate("Huelith", "禁止覆盖原始素材或工程文件"));
     else if (QFileInfo::exists(target) && options.conflict == ExportConflict::skip) {
         status(job, ExportStatus::skipped);
         return;
@@ -250,8 +267,8 @@ void ExportQueue::process(const std::shared_ptr<Job>& job) {
     status(job, ExportStatus::writing);
     QTemporaryDir temporary(original.dir().filePath(".huelith-export-XXXXXX"));
     if (!temporary.isValid())
-        throw EditError(QStringLiteral("无法创建原子导出临时目录"));
-    const auto staged = temporary.filePath("output." + options.format);
+        throw EditError(QCoreApplication::translate("Huelith", "无法创建原子导出临时目录"));
+    auto staged = temporary.filePath("output." + options.format);
     if (options.format == "tif")
         write_tiff(image, staged, options.bits, job->cancelled, job->snapshot.state.ppi);
     else {
@@ -269,24 +286,30 @@ void ExportQueue::process(const std::shared_ptr<Job>& job) {
     check_cancel();
     write_photo_metadata(staged,job->snapshot.state.metadata,options.metadata,image.size(),
                          options.space==QColorSpace(QColorSpace::SRgb),&job->cancelled);
+    if (options.credentials) {
+        const auto signed_path = temporary.filePath("credential." + options.format);
+        sign_credentials(staged, signed_path, job->snapshot.state.name, options.credential_settings,
+                         &job->cancelled);
+        staged = signed_path;
+    }
     check_cancel();
     if (options.conflict == ExportConflict::overwrite) {
         // QSaveFile commits atomically; it never removes the existing file first.
         QFile input(staged);
         QSaveFile output(target);
         if (!input.open(QIODevice::ReadOnly) || !output.open(QIODevice::WriteOnly))
-            throw EditError(QStringLiteral("无法打开导出目标"));
+            throw EditError(QCoreApplication::translate("Huelith", "无法打开导出目标"));
         while (!input.atEnd()) {
             check_cancel();
             const auto bytes = input.read(1024 * 1024);
             if (bytes.isEmpty() || output.write(bytes) != bytes.size())
-                throw EditError(QStringLiteral("导出写入失败"));
+                throw EditError(QCoreApplication::translate("Huelith", "导出写入失败"));
         }
         check_cancel();
         if (!output.commit())
             throw EditError(output.errorString());
     } else if (!QFile::rename(staged, target))
-        throw EditError(QStringLiteral("输出文件已被占用或同名文件刚被创建，请重试"));
+        throw EditError(QCoreApplication::translate("Huelith", "输出文件已被占用或同名文件刚被创建，请重试"));
     status(job, ExportStatus::complete);
 }
 } // namespace huelith::editing

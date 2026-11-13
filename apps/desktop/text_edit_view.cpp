@@ -1,26 +1,41 @@
 #include "text_edit_view.h"
 #include "canvas_view.h"
-#include <QLabel>
 #include <QAbstractTextDocumentLayout>
 #include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsTextItem>
-#include <QKeyEvent>
 #include <QInputMethodEvent>
+#include <QKeyEvent>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScrollBar>
 #include <QTextBlockFormat>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <algorithm>
 #include <cmath>
 
 namespace huelith::desktop {
 namespace {
 class TextItem final : public QGraphicsTextItem {
   public:
-    explicit TextItem(QSizeF box, bool paragraph) : box_(box), paragraph_(paragraph) {}
+    explicit TextItem(const editing::TextContent& text)
+        : box_(text.box), paragraph_(text.paragraph), text_(text) {
+        setDefaultTextColor(Qt::black);
+        connect(document(), &QTextDocument::contentsChanged, this, [this] {
+            prepareGeometryChange();
+            update();
+        });
+    }
     QRectF boundingRect() const override {
+        if (text_.layout) {
+            QRectF bounds = paragraph_ ? QRectF(QPointF(), box_) : QRectF(0, 0, 32, 32);
+            for (const auto& glyph : editing::positioned_text_glyphs(*document(), text_))
+                bounds = bounds.united(glyph.outline.boundingRect())
+                             .united(QRectF(glyph.before.p1(), glyph.after.p2()).normalized());
+            return bounds.adjusted(-5, -5, 5, 5);
+        }
         return paragraph_ ? QRectF(QPointF(), box_).adjusted(-3, -3, 3, 3)
                           : QGraphicsTextItem::boundingRect();
     }
@@ -28,10 +43,11 @@ class TextItem final : public QGraphicsTextItem {
         return box_;
     }
     bool contains(const QPointF& point) const override {
-        return paragraph_ ? boundingRect().contains(point) : QGraphicsTextItem::contains(point);
+        return paragraph_ || text_.layout ? boundingRect().contains(point)
+                                          : QGraphicsTextItem::contains(point);
     }
     QPainterPath shape() const override {
-        if (!paragraph_)
+        if (!paragraph_ && !text_.layout)
             return QGraphicsTextItem::shape();
         QPainterPath path;
         path.addRect(boundingRect());
@@ -42,7 +58,40 @@ class TextItem final : public QGraphicsTextItem {
         painter->save();
         if (paragraph_)
             painter->setClipRect(QRectF(QPointF(), box_));
-        QGraphicsTextItem::paint(painter, option, widget);
+        if (!text_.layout)
+            QGraphicsTextItem::paint(painter, option, widget);
+        else {
+            const auto cursor = textCursor();
+            QLineF caret(0, 0, 24, 0);
+            bool located = false;
+            for (const auto& glyph : editing::positioned_text_glyphs(*document(), text_)) {
+                if (cursor.hasSelection() && glyph.end > cursor.selectionStart() &&
+                    glyph.start < cursor.selectionEnd())
+                    painter->fillRect(glyph.outline.boundingRect(), QColor(45, 128, 225, 120));
+                painter->fillPath(glyph.outline, glyph.color);
+                if (cursor.position() >= glyph.start && cursor.position() < glyph.end) {
+                    caret = glyph.before;
+                    located = true;
+                } else if (!located && cursor.position() >= glyph.end)
+                    caret = glyph.after;
+            }
+            if (hasFocus()) {
+                painter->setPen(QPen(QColor("#72b7f7"), 0));
+                painter->drawLine(caret);
+            }
+            if (!preedit_.isEmpty()) {
+                painter->save();
+                painter->translate(caret.p1());
+                if (text_.layout == 1)
+                    painter->rotate(90);
+                QFont font = cursor.charFormat().font();
+                font.setUnderline(true);
+                painter->setFont(font);
+                painter->setPen(Qt::white);
+                painter->drawText(QPointF(0, QFontMetricsF(font).ascent()), preedit_);
+                painter->restore();
+            }
+        }
         painter->restore();
         painter->setPen(QPen(QColor("#72b7f7"), 0, Qt::DashLine));
         painter->setBrush(Qt::NoBrush);
@@ -59,6 +108,40 @@ class TextItem final : public QGraphicsTextItem {
     }
 
   protected:
+    void inputMethodEvent(QInputMethodEvent* event) override {
+        preedit_ = event->preeditString();
+        QGraphicsTextItem::inputMethodEvent(event);
+        update();
+    }
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override {
+        if (!text_.layout) {
+            QGraphicsTextItem::mouseDoubleClickEvent(event);
+            return;
+        }
+        set_cursor_at(event->pos(), false);
+        auto cursor = textCursor();
+        cursor.select(QTextCursor::WordUnderCursor);
+        setTextCursor(cursor);
+        update();
+        event->accept();
+    }
+    void keyPressEvent(QKeyEvent* event) override {
+        if (text_.layout == 1 && !(event->modifiers() & (Qt::ControlModifier | Qt::AltModifier)) &&
+            (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)) {
+            auto cursor = textCursor();
+            cursor.movePosition(event->key() == Qt::Key_Up ? QTextCursor::PreviousCharacter
+                                                           : QTextCursor::NextCharacter,
+                                event->modifiers().testFlag(Qt::ShiftModifier)
+                                    ? QTextCursor::KeepAnchor
+                                    : QTextCursor::MoveAnchor);
+            setTextCursor(cursor);
+            update();
+            event->accept();
+            return;
+        }
+        QGraphicsTextItem::keyPressEvent(event);
+        update();
+    }
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
         if (paragraph_) {
             const auto p = event->pos();
@@ -78,9 +161,19 @@ class TextItem final : public QGraphicsTextItem {
                 return;
             }
         }
+        if (text_.layout && event->button() == Qt::LeftButton) {
+            set_cursor_at(event->pos(), event->modifiers().testFlag(Qt::ShiftModifier));
+            event->accept();
+            return;
+        }
         QGraphicsTextItem::mousePressEvent(event);
     }
     void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override {
+        if (text_.layout && !edges_ && event->buttons().testFlag(Qt::LeftButton)) {
+            set_cursor_at(event->pos(), true);
+            event->accept();
+            return;
+        }
         if (edges_) {
             const auto inverse = original_transform_.inverted();
             const auto delta = inverse.map(event->scenePos()) - inverse.map(press_);
@@ -95,6 +188,7 @@ class TextItem final : public QGraphicsTextItem {
                 box.setBottom(std::max(10., original_box_.height() + delta.y()));
             prepareGeometryChange();
             box_ = box.size();
+            text_.box = box_;
             document()->setTextWidth(box_.width());
             setTransform(QTransform::fromTranslate(box.x(), box.y()) * original_transform_);
             update();
@@ -104,6 +198,10 @@ class TextItem final : public QGraphicsTextItem {
         QGraphicsTextItem::mouseMoveEvent(event);
     }
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
+        if (text_.layout && !edges_) {
+            event->accept();
+            return;
+        }
         if (edges_) {
             mouseMoveEvent(event);
             edges_ = 0;
@@ -114,6 +212,45 @@ class TextItem final : public QGraphicsTextItem {
     }
 
   private:
+    void set_cursor_at(QPointF point, bool keep) {
+        double nearest = 1e100;
+        int position = 0;
+        for (const auto& glyph : editing::positioned_text_glyphs(*document(), text_)) {
+            for (const auto& candidate :
+                 {std::pair{glyph.before, glyph.start}, std::pair{glyph.after, glyph.end}}) {
+                const auto center = (candidate.first.p1() + candidate.first.p2()) * .5;
+                const double distance = QLineF(center, point).length();
+                if (distance < nearest) {
+                    nearest = distance;
+                    position = candidate.second;
+                }
+            }
+        }
+        auto cursor = textCursor();
+        cursor.setPosition(std::clamp(position, 0, document()->characterCount() - 1),
+                           keep ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor);
+        setTextCursor(cursor);
+        setFocus();
+        update();
+    }
+    QVariant inputMethodQuery(Qt::InputMethodQuery query) const override {
+        if (text_.layout && query == Qt::ImCursorRectangle) {
+            const int position = textCursor().position();
+            QLineF caret(0, 0, 24, 0);
+            for (const auto& glyph : editing::positioned_text_glyphs(*document(), text_)) {
+                if (position >= glyph.start && position < glyph.end) {
+                    caret = glyph.before;
+                    break;
+                }
+                if (position >= glyph.end)
+                    caret = glyph.after;
+            }
+            return QRectF(caret.p1(), caret.p2()).normalized().adjusted(-1, -1, 1, 1);
+        }
+        return QGraphicsTextItem::inputMethodQuery(query);
+    }
+    editing::TextContent text_;
+    QString preedit_;
     QSizeF box_;
     bool paragraph_;
     int edges_{};
@@ -124,7 +261,7 @@ class TextItem final : public QGraphicsTextItem {
 } // namespace
 TextEditView::TextEditView(CanvasView* canvas, editing::Layer layer, bool existing)
     : QGraphicsView(canvas), canvas_(canvas), layer_(std::move(layer)),
-      item_(new TextItem(layer_.text.box, layer_.text.paragraph)) {
+      item_(new TextItem(layer_.text)) {
     setObjectName("canvasTextEditor");
     setAccessibleName(tr("画布文字编辑，Ctrl+Enter 确认，Esc 取消"));
     auto* scene = new QGraphicsScene(this);
@@ -150,7 +287,9 @@ TextEditView::TextEditView(CanvasView* canvas, editing::Layer layer, bool existi
     item_->setTextCursor(cursor);
     sync_view();
     if (layer_.warped) {
-        auto* hint=new QLabel(tr("正在编辑变形文字：编辑时显示原始轮廓，完成后恢复原有变形。Esc 取消。"),this);
+        const auto message =
+            tr("正在编辑变形文字：编辑时显示原始轮廓，完成后恢复原有变形。Esc 取消。");
+        auto* hint = new QLabel(message, this);
         hint->setObjectName("textWarpHint");
         hint->setStyleSheet("QLabel { background: #343b42; color: #ffffff; padding: 8px; }");
         hint->adjustSize();hint->move(12,12);hint->show();

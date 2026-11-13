@@ -1,8 +1,13 @@
 #include "canvas_preferences.h"
+#include "huelith/editing/image_storage.h"
+#include <QMessageBox>
+#include <QStorageInfo>
+#include <QDir>
 #include "canvas_view.h"
 #include "main_window.h"
 #include "raw_dialog.h"
 #include "window_header.h"
+#include <QAbstractButton>
 #include <QApplication>
 #include <QCheckBox>
 #include <QColorDialog>
@@ -11,14 +16,17 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QEvent>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenuBar>
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
+#include "interface_language.h"
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QVBoxLayout>
@@ -40,6 +48,7 @@ class PreferenceEventFilter final : public QObject {
 };
 } // namespace
 void configure_interface_scale() {
+    QSettings limits;editing::configure_pixel_storage(limits.value("storage/scratchDirectory").toString(),qint64(std::clamp(limits.value("storage/pixelsMiB",2048).toInt(),64,65536))<<20,qint64(std::clamp(limits.value("storage/scratchGiB",32).toInt(),1,1024))<<30);
     const double scales[]{.75,1.,1.25,1.5,2.};
     const int index=std::clamp(QSettings().value("interface/scale",1).toInt(),0,4);
     bool valid=false;const double external=qEnvironmentVariable("QT_SCALE_FACTOR").toDouble(&valid);
@@ -53,6 +62,18 @@ CanvasPreferences read_canvas_preferences() {
     }
     CanvasPreferences p;
     const QSettings settings;
+    p.pixels_mb=std::clamp(settings.value("storage/pixelsMiB",2048).toInt(),64,65536);
+    p.scratch_gib=std::clamp(settings.value("storage/scratchGiB",32).toInt(),1,1024);
+    p.history_mb=std::clamp(settings.value("history/pixelsMiB",2048).toInt(),64,65536);
+    p.scratch_dir=settings.value("storage/scratchDirectory").toString();
+    p.psd_policy=std::clamp(settings.value("files/psdPolicy",0).toInt(),0,2);
+    p.external_actions=settings.value("extensions/actions",true).toBool();
+    p.comfy=settings.value("extensions/comfy",true).toBool();
+    p.text_pixels = settings.value("text/pixelUnits", false).toBool();
+    p.show_slices = settings.value("slices/visible", true).toBool();
+    p.slice_numbers = settings.value("slices/numbers", true).toBool();
+    p.slice_color = settings.value("slices/color", p.slice_color).value<QColor>();
+    p.gamut_color = settings.value("color/gamutWarningColor", p.gamut_color).value<QColor>();
     p.wheel_zoom = settings.value("navigation/wheelZoom", false).toBool();
     p.center_clicked = settings.value("navigation/centerClicked", false).toBool();
     p.scrubby_zoom = settings.value("navigation/scrubbyZoom", false).toBool();
@@ -65,6 +86,11 @@ CanvasPreferences read_canvas_preferences() {
     p.spring_tools = settings.value("tools/springLoaded", true).toBool();
     p.spring_delay = std::clamp(settings.value("tools/springDelay", 200).toInt(), 100, 2000);
     p.show_tooltips = settings.value("tools/showTooltips", true).toBool();
+    p.operation_log = settings.value("history/logEnabled", false).toBool();
+    p.operation_log_path = settings.value("history/logPath").toString();
+    p.operation_log_detail = std::clamp(settings.value("history/logDetail", 0).toInt(), 0, 1);
+    p.interface_theme = std::clamp(settings.value("interface/theme", 0).toInt(), 0, 2);
+    p.interface_language = interface_language() == "en" ? 1 : 0;
     p.history_states = std::clamp(settings.value("history/states", 100).toInt(), 2, 1000);
     p.auto_recovery = settings.value("files/autoRecovery", true).toBool();
     p.recovery_minutes = std::clamp(settings.value("files/recoveryMinutes", 1).toInt(), 1, 60);
@@ -137,19 +163,31 @@ bool show_canvas_preferences(QWidget* parent, int initial_page) {
     dialog.setObjectName("navigationPreferences");
     dialog.setWindowTitle(QObject::tr("首选项"));
     dialog.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-    dialog.resize(650, 470);
+    dialog.resize(780, 580);
     auto* layout = new QVBoxLayout(&dialog);
     auto* menu = new QMenuBar(&dialog);
     menu->addAction(QObject::tr("首选项"))->setEnabled(false);
     layout->addWidget(new WindowHeader(menu, &dialog));
+    auto* search = new QLineEdit(&dialog);
+    search->setObjectName("preferenceSearch");
+    search->setPlaceholderText(QObject::tr("搜索设置，例如：滚轮、画笔、缓存"));
+    layout->addWidget(search);
+    auto* no_results = new QLabel(QObject::tr("没有匹配的设置"), &dialog);
+    no_results->hide();
+    layout->addWidget(no_results);
     auto* body = new QHBoxLayout;
     auto* categories = new QListWidget(&dialog);
     categories->setObjectName("preferenceCategories");
-    categories->addItems(
-        {QObject::tr("工具与画面操控"), QObject::tr("光标"), QObject::tr("单位与标尺"),
-         QObject::tr("参考线与网格"), QObject::tr("透明度与画布"), QObject::tr("历史记录"),
-         QObject::tr("文件处理"), QObject::tr("界面与工作区"), QObject::tr("RAW与性能")});
-    categories->setFixedWidth(155);
+    categories->addItems({QObject::tr("工具与画面操控"), QObject::tr("光标"),
+                          QObject::tr("单位与标尺"), QObject::tr("参考线与网格"),
+                          QObject::tr("透明度与画布"), QObject::tr("历史记录"),
+                          QObject::tr("文件处理"), QObject::tr("界面与工作区"),
+                          QObject::tr("RAW与性能"), QObject::tr("文字、切片与校样")});
+    int category_width = 155;
+    for (int i = 0; i < categories->count(); ++i)
+        category_width = std::max(category_width,
+            categories->fontMetrics().horizontalAdvance(categories->item(i)->text()) + 22);
+    categories->setFixedWidth(category_width);
     auto* pages = new QStackedWidget(&dialog);
     body->addWidget(categories);
     body->addWidget(pages, 1);
@@ -327,7 +365,28 @@ bool show_canvas_preferences(QWidget* parent, int initial_page) {
         &dialog);
     history_help->setWordWrap(true);
     history->addRow(history_help);
+    check(history, "operationLogEnabled", QObject::tr("记录操作日志（确认后生效）"),
+          draft.operation_log);
+    auto* log_path = new QLineEdit(draft.operation_log_path, &dialog);
+    log_path->setObjectName("operationLogPath");
+    history->addRow(QObject::tr("日志文件"), log_path);
+    QObject::connect(log_path, &QLineEdit::textChanged, &dialog,
+                     [&](const QString& value) { draft.operation_log_path = value; });
+    refresh.emplace_back([&] { log_path->setText(draft.operation_log_path); });
+    auto* browse_log = new QPushButton(QObject::tr("选择日志文件…"), &dialog);
+    history->addRow(browse_log);
+    QObject::connect(browse_log, &QPushButton::clicked, &dialog, [&] {
+        const auto path = QFileDialog::getSaveFileName(&dialog, QObject::tr("操作日志"),
+                                                       log_path->text(), "JSON Lines (*.jsonl)",
+                                                       nullptr, QFileDialog::DontConfirmOverwrite);
+        if (!path.isEmpty())
+            log_path->setText(path);
+    });
+    combo(history, "operationLogDetail", QObject::tr("日志内容"),
+          {QObject::tr("时间、文档与操作"), QObject::tr("另记尺寸、活动图层与历史位置")},
+          draft.operation_log_detail);
     auto* files = page();
+    combo(files,"psdPolicyPreference",QObject::tr("PSD/PSB 导入"),{QObject::tr("分层导入，先提示兼容问题"),QObject::tr("遇到兼容问题时停止"),QObject::tr("仅打开文件合成图")},draft.psd_policy);
     check(files, "autoRecoveryPreference", QObject::tr("自动保存恢复信息"), draft.auto_recovery);
     const auto integer = [&](const char* name, const QString& label, int& value, int minimum,
                              int maximum) {
@@ -352,6 +411,10 @@ bool show_canvas_preferences(QWidget* parent, int initial_page) {
     recovery_help->setWordWrap(true);
     files->addRow(recovery_help);
     auto* interface_page = page();
+    combo(interface_page, "interfaceLanguagePreference", QObject::tr("界面语言（重启生效）"),
+          {QString::fromUtf8("简体中文"), QStringLiteral("English")}, draft.interface_language);
+    combo(interface_page, "interfaceThemePreference", QObject::tr("界面主题（确认后生效）"),
+          {QObject::tr("深灰"), QObject::tr("黑色"), QObject::tr("中灰")}, draft.interface_theme);
     combo(interface_page, "interfaceScalePreference", QObject::tr("界面缩放（重启生效）"),
           {"75%", "100%", "125%", "150%", "200%"}, draft.interface_scale);
     combo(interface_page, "interfaceFontPreference", QObject::tr("用户界面字体大小"),
@@ -406,6 +469,18 @@ bool show_canvas_preferences(QWidget* parent, int initial_page) {
                        draft.raw_memory_mb, " MiB");
     performance_number(QObject::tr("RAW磁盘缓存"), "rawDiskPreference", 1024, 131072,
                        draft.raw_disk_mb, " MiB");
+    performance_number(QObject::tr("应用像素缓冲内存"),"pixelsMemoryPreference",64,65536,draft.pixels_mb," MiB");
+    performance_number(QObject::tr("应用像素暂存容量"),"scratchSizePreference",1,1024,draft.scratch_gib," GiB");
+    performance_number(QObject::tr("每个文档的历史额外像素"),"historyBytesPreference",64,65536,draft.history_mb," MiB");
+    auto* scratch=new QLineEdit(draft.scratch_dir,&dialog);scratch->setPlaceholderText(QDir::tempPath());performance->addRow(QObject::tr("像素暂存目录"),scratch);
+    QObject::connect(scratch,&QLineEdit::textChanged,&dialog,[&](QString path){draft.scratch_dir=path.trimmed();});
+    refresh.emplace_back([scratch,&draft]{scratch->setText(draft.scratch_dir);});
+    const auto use=editing::pixel_storage_usage();
+    performance->addRow(QObject::tr("已用像素缓冲 / 暂存"),new QLabel(QObject::tr("%1 / %2 MiB").arg(use.resident>>20).arg(use.mapped>>20),&dialog));
+    const QStorageInfo volume(QDir::tempPath());
+    if (volume.isReady() && volume.bytesAvailable() >= 0)
+        performance->addRow(QObject::tr("临时缓存可用空间"),
+                            new QLabel(QObject::tr("%1 GiB").arg(volume.bytesAvailable() / 1073741824.0, 0, 'f', 1), &dialog));
     bool clear_raw_cache = false;
     auto* clear = new QPushButton(QObject::tr("清除当前RAW会话缓存"), &dialog);
     clear->setObjectName("rawClearCachePreference");
@@ -424,14 +499,160 @@ bool show_canvas_preferences(QWidget* parent, int initial_page) {
         &dialog);
     explanation->setWordWrap(true);
     performance->addRow(explanation);
+    auto* extras = page();
+    check(extras,"actionsEnabled",QObject::tr("允许载入外部动作和数据集（JSON）"),draft.external_actions);
+    check(extras,"comfyEnabled",QObject::tr("启用外接 ComfyUI 图片工作流"),draft.comfy);
+    check(extras, "textPixelUnitsPreference", QObject::tr("文字大小默认使用像素（否则使用点）"),
+          draft.text_pixels);
+    check(extras, "sliceVisiblePreference", QObject::tr("显示切片边界"), draft.show_slices);
+    check(extras, "sliceNumbersPreference", QObject::tr("显示切片编号和名称"), draft.slice_numbers);
+    color(extras, "sliceColorPreference", QObject::tr("切片线颜色"), draft.slice_color);
+    color(extras, "gamutColorPreference", QObject::tr("色域警告颜色"), draft.gamut_color);
     QObject::connect(categories, &QListWidget::currentRowChanged, pages,
                      &QStackedWidget::setCurrentIndex);
-    categories->setCurrentRow(std::clamp(initial_page, 0, 8));
+    categories->setCurrentRow(std::clamp(initial_page, 0, 9));
+    QObject::connect(search, &QLineEdit::textChanged, &dialog, [=](QString query) {
+        query = query.trimmed();
+        if (query == QObject::tr("笔刷"))
+            query = QObject::tr("画笔");
+        if (query == QObject::tr("暂存盘"))
+            query = QObject::tr("缓存");
+        int first = -1;
+        for (int i = 0; i < pages->count(); ++i) {
+            auto* scroll = qobject_cast<QScrollArea*>(pages->widget(i));
+            auto* form = qobject_cast<QFormLayout*>(scroll->widget()->layout());
+            bool any = false;
+            for (int row = 0; row < form->rowCount(); ++row) {
+                QString text = categories->item(i)->text();
+                for (auto role : {QFormLayout::LabelRole, QFormLayout::FieldRole}) {
+                    auto* item = form->itemAt(row, role);
+                    if (!item || !item->widget())
+                        continue;
+                    auto* widget = item->widget();
+                    text += widget->toolTip();
+                    if (auto* label = qobject_cast<QLabel*>(widget))
+                        text += label->text();
+                    if (auto* button = qobject_cast<QAbstractButton*>(widget))
+                        text += button->text();
+                    if (auto* combo = qobject_cast<QComboBox*>(widget))
+                        for (int index = 0; index < combo->count(); ++index)
+                            text += combo->itemText(index);
+                }
+                const bool matches = query.isEmpty() || text.contains(query, Qt::CaseInsensitive);
+                form->setRowVisible(row, matches);
+                any = any || matches;
+            }
+            categories->item(i)->setHidden(!any);
+            if (any && first < 0)
+                first = i;
+        }
+        no_results->setVisible(first < 0);
+        pages->setVisible(first >= 0);
+        if (first >= 0 && (categories->currentRow() < 0 || categories->currentItem()->isHidden()))
+            categories->setCurrentRow(first);
+    });
     auto* footer = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel |
                                             QDialogButtonBox::RestoreDefaults,
                                         &dialog);
     layout->addWidget(footer);
-    QObject::connect(footer, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    footer->button(QDialogButtonBox::RestoreDefaults)->setText(QObject::tr("恢复全部默认"));
+    auto* reset_page = footer->addButton(QObject::tr("恢复本页默认"), QDialogButtonBox::ResetRole);
+    QObject::connect(reset_page, &QPushButton::clicked, &dialog, [&] {
+        const CanvasPreferences defaults;
+        switch (categories->currentRow()) {
+        case 0:
+            draft.wheel_zoom = defaults.wheel_zoom;
+            draft.center_clicked = defaults.center_clicked;
+            draft.scrubby_zoom = defaults.scrubby_zoom;
+            draft.animated_zoom = defaults.animated_zoom;
+            draft.flick_panning = defaults.flick_panning;
+            draft.overscroll = defaults.overscroll;
+            draft.zoom_all = defaults.zoom_all;
+            draft.pan_all = defaults.pan_all;
+            draft.shift_tool_switch = defaults.shift_tool_switch;
+            draft.spring_tools = defaults.spring_tools;
+            draft.spring_delay = defaults.spring_delay;
+            draft.show_tooltips = defaults.show_tooltips;
+            break;
+        case 1:
+            draft.painting_cursor = defaults.painting_cursor;
+            draft.cursor_crosshair = defaults.cursor_crosshair;
+            draft.precise_other = defaults.precise_other;
+            break;
+        case 2:
+            draft.ruler_unit = defaults.ruler_unit;
+            break;
+        case 3:
+            draft.grid_spacing = defaults.grid_spacing;
+            draft.grid_subdivisions = defaults.grid_subdivisions;
+            draft.grid_style = defaults.grid_style;
+            draft.guide_style = defaults.guide_style;
+            draft.snap_guides = defaults.snap_guides;
+            draft.snap_grid = defaults.snap_grid;
+            draft.snap_layers = defaults.snap_layers;
+            draft.snap_document = defaults.snap_document;
+            draft.snap_distance = defaults.snap_distance;
+            draft.grid_color = defaults.grid_color;
+            draft.guide_color = defaults.guide_color;
+            break;
+        case 4:
+            draft.checker_size = defaults.checker_size;
+            draft.checker_light = defaults.checker_light;
+            draft.checker_dark = defaults.checker_dark;
+            draft.canvas_color = defaults.canvas_color;
+            break;
+        case 5:
+            draft.history_states = defaults.history_states;
+            draft.operation_log = defaults.operation_log;
+            draft.operation_log_path = defaults.operation_log_path;
+            draft.operation_log_detail = defaults.operation_log_detail;
+            break;
+        case 6:
+            draft.psd_policy=defaults.psd_policy;
+            draft.auto_recovery = defaults.auto_recovery;
+            draft.recovery_minutes = defaults.recovery_minutes;
+            draft.recent_files = defaults.recent_files;
+            break;
+        case 7:
+            draft.interface_language = defaults.interface_language;
+            draft.interface_theme = defaults.interface_theme;
+            draft.interface_scale = defaults.interface_scale;
+            draft.interface_font = defaults.interface_font;
+            draft.restore_workspace = defaults.restore_workspace;
+            draft.lock_workspace = defaults.lock_workspace;
+            draft.movable_tabs = defaults.movable_tabs;
+            draft.close_tabs = defaults.close_tabs;
+            draft.large_tabs = defaults.large_tabs;
+            break;
+        case 9:
+            draft.external_actions=defaults.external_actions;draft.comfy=defaults.comfy;
+            draft.text_pixels = defaults.text_pixels;
+            draft.show_slices = defaults.show_slices;
+            draft.slice_numbers = defaults.slice_numbers;
+            draft.slice_color = defaults.slice_color;
+            draft.gamut_color = defaults.gamut_color;
+            break;
+        case 8:
+            draft.pixels_mb=defaults.pixels_mb;draft.scratch_gib=defaults.scratch_gib;draft.history_mb=defaults.history_mb;draft.scratch_dir=defaults.scratch_dir;
+            draft.raw_backend = defaults.raw_backend;
+            draft.raw_denoise = defaults.raw_denoise;
+            draft.raw_high_quality = defaults.raw_high_quality;
+            draft.raw_denoise_amount = defaults.raw_denoise_amount;
+            draft.raw_preview_edge = defaults.raw_preview_edge;
+            draft.raw_drag_edge = defaults.raw_drag_edge;
+            draft.raw_refine_delay = defaults.raw_refine_delay;
+            draft.raw_memory_mb = defaults.raw_memory_mb;
+            draft.raw_disk_mb = defaults.raw_disk_mb;
+            break;
+        }
+        for (const auto& update : refresh)
+            update();
+    });
+
+    QObject::connect(footer,&QDialogButtonBox::accepted,&dialog,[&]{
+        if(!draft.scratch_dir.isEmpty()&&(!QDir::isAbsolutePath(draft.scratch_dir)||!QFileInfo(draft.scratch_dir).isDir()||!QFileInfo(draft.scratch_dir).isWritable())){
+            QMessageBox::warning(&dialog,QObject::tr("像素暂存目录"),QObject::tr("请选择已有的可写绝对目录，或留空使用系统临时目录"));return;}
+        dialog.accept();});
     QObject::connect(footer, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     QObject::connect(footer->button(QDialogButtonBox::RestoreDefaults), &QPushButton::clicked,
                      &dialog, [&] {
@@ -442,6 +663,14 @@ bool show_canvas_preferences(QWidget* parent, int initial_page) {
     if (dialog.exec() != QDialog::Accepted)
         return false;
     QSettings settings;
+    editing::configure_pixel_storage(draft.scratch_dir,qint64(draft.pixels_mb)<<20,qint64(draft.scratch_gib)<<30);
+    settings.setValue("storage/scratchDirectory",draft.scratch_dir);settings.setValue("storage/pixelsMiB",draft.pixels_mb);settings.setValue("storage/scratchGiB",draft.scratch_gib);settings.setValue("history/pixelsMiB",draft.history_mb);settings.setValue("files/psdPolicy",draft.psd_policy);
+    settings.setValue("extensions/actions",draft.external_actions);settings.setValue("extensions/comfy",draft.comfy);
+    settings.setValue("text/pixelUnits", draft.text_pixels);
+    settings.setValue("slices/visible", draft.show_slices);
+    settings.setValue("slices/numbers", draft.slice_numbers);
+    settings.setValue("slices/color", draft.slice_color);
+    settings.setValue("color/gamutWarningColor", draft.gamut_color);
     settings.setValue("navigation/wheelZoom", draft.wheel_zoom);
     settings.setValue("navigation/centerClicked", draft.center_clicked);
     settings.setValue("navigation/scrubbyZoom", draft.scrubby_zoom);
@@ -455,6 +684,11 @@ bool show_canvas_preferences(QWidget* parent, int initial_page) {
     settings.setValue("tools/springDelay", draft.spring_delay);
     settings.setValue("tools/showTooltips", draft.show_tooltips);
     settings.setValue("history/states", draft.history_states);
+    settings.setValue("history/logEnabled", draft.operation_log);
+    settings.setValue("history/logPath", draft.operation_log_path);
+    settings.setValue("history/logDetail", draft.operation_log_detail);
+    settings.setValue("interface/theme", draft.interface_theme);
+    settings.setValue("interface/language", draft.interface_language == 1 ? "en" : "zh_CN");
     settings.setValue("files/autoRecovery", draft.auto_recovery);
     settings.setValue("files/recoveryMinutes", draft.recovery_minutes);
     settings.setValue("files/recentCount", draft.recent_files);
@@ -494,7 +728,8 @@ bool show_canvas_preferences(QWidget* parent, int initial_page) {
     settings.setValue("raw/memoryMB", draft.raw_memory_mb);
     settings.setValue("raw/diskMB", draft.raw_disk_mb);
     settings.sync();
-    if (qApp->property("interfaceFontSize").toInt() != draft.interface_font)
+    if (qApp->property("interfaceFontSize").toInt() != draft.interface_font ||
+        qApp->property("interfaceTheme").toInt() != draft.interface_theme)
         apply_dark_theme();
     for (auto* widget : QApplication::topLevelWidgets())
         if (auto* window = dynamic_cast<MainWindow*>(widget))

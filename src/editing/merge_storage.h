@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #pragma once
 #include "huelith/editing/project.h"
 #include <QDir>
@@ -25,7 +26,7 @@ public:
         auto mapping=std::make_unique<Mapping>();
         if(!mapping->file.open() || !mapping->file.resize(qint64(total)) ||
            !(mapping->bytes=mapping->file.map(0,qint64(total))))
-            throw EditError(QStringLiteral("合成临时磁盘空间不足或无法映射"));
+            throw EditError(QCoreApplication::translate("Huelith", "合成临时磁盘空间不足或无法映射"));
         auto result=std::make_unique<cv::UMatData>(this);
         result->data=result->origdata=mapping->bytes;result->size=total;
         result->userdata=mapping.release();

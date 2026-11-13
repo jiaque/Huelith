@@ -189,6 +189,76 @@ class EffectsDialog final : public QDialog {
         amount_->setSuffix(" %");
         right->addWidget(new QLabel(tr("效果强度"), this));
         right->addWidget(amount_);
+        filter_ = new QComboBox(this);
+        filter_->setObjectName("effectFilter");
+        filter_->addItems({tr("无常规滤镜"), tr("USM 锐化"), tr("动感模糊"), tr("中间值"),
+                           tr("添加杂色"), tr("旋转扭曲"), tr("浮雕"), tr("色调分离"), tr("云彩"),
+                           tr("油画"), tr("查找边缘"), tr("高反差保留"), tr("径向缩放模糊"),
+                           tr("波浪"), tr("挤压 / 球面化"), tr("马赛克"), tr("表面模糊")});
+        right->addWidget(filter_);
+        filter_radius_ = new QDoubleSpinBox(this);
+        filter_radius_->setObjectName("effectFilterRadius");
+        filter_radius_->setRange(.1, 256);
+        filter_radius_->setKeyboardTracking(false);
+        filter_label_ = new QLabel(tr("滤镜半径（像素）"), this);
+        right->addWidget(filter_label_);
+        right->addWidget(filter_radius_);
+        filter_angle_ = new QDoubleSpinBox(this);
+        filter_angle_->setObjectName("effectFilterAngle");
+        filter_angle_->setRange(-360, 360);
+        filter_angle_->setSuffix(tr(" °"));
+        filter_angle_->setKeyboardTracking(false);
+        right->addWidget(filter_angle_);
+        blend_ = new QComboBox(this);
+        blend_->setObjectName("effectBlend");
+        blend_->addItems({tr("正常"),     tr("变暗"),   tr("正片叠底"), tr("颜色加深"),
+                          tr("线性加深"), tr("变亮"),   tr("滤色"),     tr("颜色减淡"),
+                          tr("线性减淡"), tr("叠加"),   tr("柔光"),     tr("强光"),
+                          tr("亮光"),     tr("线性光"), tr("点光"),     tr("实色混合"),
+                          tr("差值"),     tr("排除"),   tr("减去"),     tr("划分"),
+                          tr("色相"),     tr("饱和度"), tr("颜色"),     tr("明度")});
+        right->addWidget(new QLabel(tr("滤镜混合模式"), this));
+        right->addWidget(blend_);
+        const auto filter_changed = [this] {
+            if (loading_ || current() < 0)
+                return;
+            auto& e = effects_[current()];
+            e.filter = filter_->currentIndex();
+            e.filter_radius = filter_radius_->value();
+            e.filter_angle = filter_angle_->value();
+            e.blend = editing::Blend(blend_->currentIndex());
+            {
+                const QSignalBlocker block(filter_radius_);
+                filter_radius_->setRange(e.filter == 7 ? 2 : .1, e.filter == 3   ? 8
+                                                                 : e.filter == 4 ? 100
+                                                                                 : 256);
+                e.filter_radius = filter_radius_->value();
+            }
+            filter_label_->setText(e.filter == 4    ? tr("杂色幅度 %")
+                                   : e.filter == 7  ? tr("色阶数量")
+                                   : e.filter == 8  ? tr("云彩尺寸")
+                                   : e.filter == 10 ? tr("边缘强度")
+                                   : e.filter == 12 ? tr("缩放模糊强度")
+                                   : e.filter == 13 ? tr("波长 px")
+                                                    : tr("滤镜半径（像素）"));
+            filter_angle_->setEnabled(e.filter == 2 || e.filter == 5 || e.filter == 6 ||
+                                      e.filter == 13 || e.filter == 14 || e.filter == 16);
+            filter_angle_->setPrefix(e.filter == 13   ? tr("波幅 ")
+                                     : e.filter == 14 ? tr("变形 ")
+                                     : e.filter == 16 ? tr("颜色阈值 ")
+                                                      : tr("角度 "));
+            filter_angle_->setSuffix(e.filter >= 13 ? QString{} : tr(" °"));
+            filter_radius_->setEnabled(e.filter != 0 && e.filter != 5 && e.filter != 14);
+            schedule();
+        };
+        connect(filter_, &QComboBox::currentIndexChanged, this,
+                [filter_changed](int) { filter_changed(); });
+        connect(blend_, &QComboBox::currentIndexChanged, this,
+                [filter_changed](int) { filter_changed(); });
+        connect(filter_radius_, &QDoubleSpinBox::valueChanged, this,
+                [filter_changed](double) { filter_changed(); });
+        connect(filter_angle_, &QDoubleSpinBox::valueChanged, this,
+                [filter_changed](double) { filter_changed(); });
         right->addWidget(new QLabel(tr("高斯模糊 · 半径（像素）"),this));
         blur_=new QDoubleSpinBox(this);blur_->setObjectName("effectBlurRadius");blur_->setRange(0,1000);blur_->setDecimals(1);blur_->setSingleStep(.1);blur_->setKeyboardTracking(false);right->addWidget(blur_);
         auto* blur_slider=new QSlider(Qt::Horizontal,this);blur_slider->setObjectName("effectBlurSlider");blur_slider->setRange(0,1000);right->addWidget(blur_slider);
@@ -312,6 +382,27 @@ class EffectsDialog final : public QDialog {
             panel_->set_settings(effects_[current()].tone);
             amount_->setValue(effects_[current()].amount * 100);
             blur_->setValue(effects_[current()].blur_radius);
+            filter_->setCurrentIndex(effects_[current()].filter);
+            const int kind = effects_[current()].filter;
+            filter_radius_->setRange(kind == 7 ? 2 : .1, kind == 3 ? 8 : kind == 4 ? 100 : 256);
+            filter_label_->setText(kind == 4    ? tr("杂色幅度 %")
+                                   : kind == 7  ? tr("色阶数量")
+                                   : kind == 8  ? tr("云彩尺寸")
+                                   : kind == 10 ? tr("边缘强度")
+                                   : kind == 12 ? tr("缩放模糊强度")
+                                   : kind == 13 ? tr("波长 px")
+                                                : tr("滤镜半径（像素）"));
+            filter_angle_->setEnabled(kind == 2 || kind == 5 || kind == 6 || kind == 13 ||
+                                      kind == 14 || kind == 16);
+            filter_angle_->setPrefix(kind == 13   ? tr("波幅 ")
+                                     : kind == 14 ? tr("变形 ")
+                                     : kind == 16 ? tr("颜色阈值 ")
+                                                  : tr("角度 "));
+            filter_angle_->setSuffix(kind >= 13 ? QString{} : tr(" °"));
+            filter_radius_->setEnabled(kind != 0 && kind != 5 && kind != 14);
+            filter_radius_->setValue(effects_[current()].filter_radius);
+            filter_angle_->setValue(effects_[current()].filter_angle);
+            blend_->setCurrentIndex(int(effects_[current()].blend));
         }
         loading_ = false;
     }
@@ -383,9 +474,17 @@ class EffectsDialog final : public QDialog {
         if (index >= 0) library_->setCurrentIndex(index);
     }
     static QJsonObject preset_json(const editing::Effect& effect) {
-        return {{"version", 3}, {"blurRadius", effect.blur_radius},
-                {"liquify", editing::liquify_json(effect.liquify)}, {"name", effect.name},
-                {"amount", effect.amount}, {"tone", editing::tone_json(effect.tone)},
+        return {{"version", 4},
+                {"blurRadius", effect.blur_radius},
+                {"filter", effect.filter},
+                {"filterRadius", effect.filter_radius},
+                {"filterAngle", effect.filter_angle},
+                {"filterSeed", double(effect.filter_seed)},
+                {"blend", int(effect.blend)},
+                {"liquify", editing::liquify_json(effect.liquify)},
+                {"name", effect.name},
+                {"amount", effect.amount},
+                {"tone", editing::tone_json(effect.tone)},
                 {"lut", effect.lut ? effect.lut->source : QString{}}};
     }
     static void write_preset(const QString& path, const QJsonObject& json) {
@@ -404,7 +503,7 @@ class EffectsDialog final : public QDialog {
         const auto document = QJsonDocument::fromJson(file.readAll(), &error);
         const auto json = document.object();
         if (error.error != QJsonParseError::NoError || !document.isObject() ||
-            (json.value("version").toInt() < 1 || json.value("version").toInt() > 3) ||
+            (json.value("version").toInt() < 1 || json.value("version").toInt() > 4) ||
             !json.value("tone").isObject() || !json.value("amount").isDouble())
             throw editing::EditError(tr("预设格式无效"));
         return json;
@@ -431,6 +530,14 @@ class EffectsDialog final : public QDialog {
         effect.name = json.value("name").toString(tr("预设"));
         effect.amount = json.value("amount").toDouble(1);
         effect.blur_radius=json.value("blurRadius").toDouble();
+        effect.filter = json.value("filter").toInt();
+        effect.filter_radius = json.value("filterRadius").toDouble(5);
+        effect.filter_angle = json.value("filterAngle").toDouble();
+        const double seed = json.value("filterSeed").toDouble(1);
+        if (!std::isfinite(seed) || seed < 0 || seed > 4294967295. || std::floor(seed) != seed)
+            throw editing::EditError(tr("滤镜随机种子无效"));
+        effect.filter_seed = quint32(seed);
+        effect.blend = editing::Blend(json.value("blend").toInt());
         effect.tone = editing::tone_from_json(json.value("tone").toObject());
         if (json.value("version").toInt() >= 2)
             effect.liquify = editing::liquify_from_json(json.value("liquify").toObject());
@@ -497,6 +604,9 @@ class EffectsDialog final : public QDialog {
     TonePanel* panel_{};
     QDoubleSpinBox* amount_{};
     QDoubleSpinBox* blur_{};
+    QComboBox *filter_{}, *blend_{};
+    QDoubleSpinBox *filter_radius_{}, *filter_angle_{};
+    QLabel* filter_label_{};
     QCheckBox* preview_{};
     QTimer timer_;
     std::future<QImage> worker_;

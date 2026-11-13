@@ -1,6 +1,7 @@
 #pragma once
 #include "huelith/editing/project.h"
 #include "huelith/editing/metadata.h"
+#include "huelith/editing/credentials.h"
 #include <atomic>
 #include <condition_variable>
 #include <memory>
@@ -22,6 +23,8 @@ struct ExportOptions {
     QColor matte{Qt::white};
     ExportConflict conflict{ExportConflict::number};
     QStringList protected_paths; // Original files and project files must never be replaced.
+    bool credentials{};
+    CredentialSettings credential_settings;
 };
 struct ExportItem {
     quint64 id{};

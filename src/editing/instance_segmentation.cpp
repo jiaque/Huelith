@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/project.h"
 #include "huelith/editing/semantic.h"
 #include "huelith/editing/ai_worker.h"
@@ -16,7 +17,7 @@ namespace {
 constexpr int extent = 800;
 void check(const std::atomic_bool& cancelled) {
     if (cancelled.load())
-        throw EditError(QStringLiteral("对象识别已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "对象识别已取消"));
 }
 QImage paste_mask(const float* probabilities, const float* box, QSize size) {
     // Torchvision: one-pixel mask padding, integer expanded box, bilinear
@@ -57,7 +58,7 @@ std::vector<SemanticInstance> semantic_instances(const QImage& image, const QStr
                                                  const std::atomic_bool& cancelled) {
     check(cancelled);
     if (image.isNull())
-        throw EditError(QStringLiteral("没有可识别的图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "没有可识别的图像"));
     if (!is_ai_worker()) {
         const auto result = run_ai_job({{"operation", "instances"}, {"model", model}, {"directml", false}},
             image.format() == QImage::Format_RGBA32FPx4_Premultiplied ? image : image.convertToFormat(QImage::Format_RGBA8888), &cancelled);
@@ -75,13 +76,13 @@ std::vector<SemanticInstance> semantic_instances(const QImage& image, const QStr
     }
     QFile file(model);
     if (!file.open(QIODevice::ReadOnly))
-        throw EditError(QStringLiteral("内置对象模型缺失：") + model);
+        throw EditError(QCoreApplication::translate("Huelith", "内置对象模型缺失：") + model);
     if (file.size() < 100'000'000 || file.size() > 250'000'000)
-        throw EditError(QStringLiteral("对象模型文件大小无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "对象模型文件大小无效"));
     const auto bytes = file.readAll();
     if (QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex() !=
         "19455030e0a5e56e80476bdc5a3dcdf0ced79a5871ddc34fd3abee600e2ead76")
-        throw EditError(QStringLiteral("对象模型校验失败，请恢复完整模型文件"));
+        throw EditError(QCoreApplication::translate("Huelith", "对象模型校验失败，请恢复完整模型文件"));
     check(cancelled);
     auto rgb =
         image.format() == QImage::Format_RGBA32FPx4_Premultiplied ? display_image(image) : image;
@@ -105,7 +106,7 @@ std::vector<SemanticInstance> semantic_instances(const QImage& image, const QStr
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         Ort::Session session(environment, bytes.constData(), std::size_t(bytes.size()), options);
         if (session.GetInputCount() != 1 || session.GetOutputCount() != 4)
-            throw EditError(QStringLiteral("对象模型接口无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "对象模型接口无效"));
         const auto memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
         const std::array<int64_t, 4> shape{1, 3, extent, extent};
         auto tensor = Ort::Value::CreateTensor<float>(memory, input.data(), input.size(),
@@ -129,7 +130,7 @@ std::vector<SemanticInstance> semantic_instances(const QImage& image, const QStr
         const auto box_shape = box_info.GetShape();
         if (box_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
             box_shape.size() != 2 || box_shape[1] != 4 || box_shape[0] < 0 || box_shape[0] > 50)
-            throw EditError(QStringLiteral("对象模型边界输出无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "对象模型边界输出无效"));
         const auto n = box_shape[0];
         for (int i = 1; i < 4; ++i) {
             const auto info = result[i].GetTensorTypeAndShapeInfo();
@@ -137,7 +138,7 @@ std::vector<SemanticInstance> semantic_instances(const QImage& image, const QStr
                                                  : ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) ||
                 info.GetShape() !=
                     (i == 3 ? std::vector<int64_t>{n, 1, 28, 28} : std::vector<int64_t>{n}))
-                throw EditError(QStringLiteral("对象模型蒙版输出无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "对象模型蒙版输出无效"));
         }
         const auto* boxes = result[0].GetTensorData<float>();
         const auto* labels = result[1].GetTensorData<int64_t>();
@@ -152,11 +153,11 @@ std::vector<SemanticInstance> semantic_instances(const QImage& image, const QStr
                 !std::all_of(box, box + 4,
                              [](float x) { return std::isfinite(x) && x >= 0 && x <= extent; }) ||
                 box[2] < box[0] || box[3] < box[1])
-                throw EditError(QStringLiteral("对象模型输出数值无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "对象模型输出数值无效"));
             const auto* values = masks + i * 28 * 28;
             if (!std::all_of(values, values + 28 * 28,
                              [](float x) { return std::isfinite(x) && x >= 0 && x <= 1; }))
-                throw EditError(QStringLiteral("对象模型蒙版数值无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "对象模型蒙版数值无效"));
             if (scores[i] < .5F)
                 continue;
             auto mask = paste_mask(values, box, rgb.size());
@@ -178,14 +179,13 @@ std::vector<SemanticInstance> semantic_instances(const QImage& image, const QStr
         return instances;
     } catch (const Ort::Exception& error) {
         check(cancelled);
-        throw EditError(QStringLiteral("对象识别失败：") + QString::fromUtf8(error.what()));
+        throw EditError(QCoreApplication::translate("Huelith", "对象识别失败：") + QString::fromUtf8(error.what()));
     }
 }
 
 QString semantic_category_name(int category) {
     static const auto names =
-        QStringLiteral(
-            "背景,人物,自行车,汽车,摩托车,飞机,巴士,火车,卡车,船,交通灯,消防栓,,停车标志,"
+        QCoreApplication::translate("Huelith", "背景,人物,自行车,汽车,摩托车,飞机,巴士,火车,卡车,船,交通灯,消防栓,,停车标志,"
             "停车计时器,长椅,鸟,猫,狗,马,羊,牛,大象,熊,斑马,长颈鹿,,背包,雨伞,,,手提包,领带,行李箱,"
             "飞盘,滑雪板,单板滑雪板,球,风筝,棒球棒,棒球手套,滑板,冲浪板,网球拍,瓶子,,酒杯,杯子,"
             "叉子,刀,勺子,碗,香蕉,苹果,三明治,橙子,西兰花,胡萝卜,热狗,披萨,甜甜圈,蛋糕,椅子,沙发,"
@@ -194,6 +194,6 @@ QString semantic_category_name(int category) {
             .split(',');
     return category > 0 && category < names.size() && !names[category].isEmpty()
                ? names[category]
-               : QStringLiteral("对象");
+               : QCoreApplication::translate("Huelith", "对象");
 }
 } // namespace huelith::editing

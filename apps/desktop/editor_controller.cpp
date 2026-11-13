@@ -1,10 +1,13 @@
-#include <QSvgRenderer>
+#include "huelith/editing/photoshop_file.h"
 #include "editor_controller.h"
-#include "huelith/editing/metadata.h"
 #include "canvas_preferences.h"
 #include "canvas_view.h"
+#include "document_color_picker.h"
 #include "export_dialog.h"
+#include "expression_spin_box.h"
+#include "huelith/editing/document_color.h"
 #include "huelith/editing/layout_template.h"
+#include "huelith/editing/metadata.h"
 #include "main_window.h"
 #include "raw_dialog.h"
 #include <QActionGroup>
@@ -30,6 +33,7 @@
 #include <QHeaderView>
 #include <QImageWriter>
 #include <QInputDialog>
+#include <QJsonArray>
 #include <QKeySequenceEdit>
 #include <QLabel>
 #include <QLineEdit>
@@ -42,6 +46,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSaveFile>
 #include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -87,16 +92,16 @@ namespace {
 Layer& editable(CanvasView* canvas, State& state) {
     auto* layer = find_layer(state.layers, canvas->active_layer);
     if (!layer)
-        throw EditError(QStringLiteral("请先选择图层"));
+        throw EditError(QObject::tr("请先选择图层"));
     if (layer_locked(state.layers, canvas->active_layer))
-        throw EditError(QStringLiteral("图层已锁定，请先解除锁定"));
+        throw EditError(QObject::tr("图层已锁定，请先解除锁定"));
     return *layer;
 }
 QString kind_name(LayerKind kind) {
     const QStringList names{
-        QStringLiteral("像素"),     QStringLiteral("源图片"), QStringLiteral("绘画修复"),
-        QStringLiteral("调整"),     QStringLiteral("填充"),   QStringLiteral("组"),
-        QStringLiteral("嵌套合成"), QStringLiteral("文字"),   QStringLiteral("形状")};
+        QObject::tr("像素"),     QObject::tr("源图片"), QObject::tr("绘画修复"),
+        QObject::tr("调整"),     QObject::tr("填充"),   QObject::tr("组"),
+        QObject::tr("嵌套合成"), QObject::tr("文字"),   QObject::tr("形状")};
     return names.at(int(kind));
 }
 class LayerTree final : public QTreeWidget {
@@ -129,6 +134,8 @@ class LayerDelegate final : public QStyledItemDelegate {
         painter->fillRect(option.rect, option.state.testFlag(QStyle::State_Selected)
                                            ? QColor("#334e64")
                                            : QColor("#252a2e"));
+        const auto label =
+            c->display_state().metadata["layerLabels"].toObject()[id.toString()].toString();
         const auto box = option.rect;
         const int middle = box.center().y();
         if (index.column() == 0) {
@@ -175,6 +182,9 @@ class LayerDelegate final : public QStyledItemDelegate {
                 painter->drawLine(thumb.topRight(), thumb.bottomLeft());
             }
         }
+        if (!label.isEmpty())
+            painter->fillRect(option.rect.adjusted(0, 0, -option.rect.width() + 3, 0),
+                              QColor(label));
         painter->restore();
     }
 
@@ -188,7 +198,7 @@ void add_rows(QTreeWidget* tree, QTreeWidgetItem* parent, const std::vector<Laye
         auto* row = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree);
         row->setText(0, layer.name);
         row->setText(1, kind_name(layer.kind));
-        row->setText(2, layer.mask.isNull() ? QStringLiteral("—") : QStringLiteral("蒙版"));
+        row->setText(2, layer.mask.isNull() ? QStringLiteral("—") : QObject::tr("蒙版"));
         row->setData(0, Qt::UserRole, layer.id);
         row->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
         row->setFlags(row->flags() | Qt::ItemIsEditable | Qt::ItemIsDragEnabled |
@@ -198,7 +208,7 @@ void add_rows(QTreeWidget* tree, QTreeWidgetItem* parent, const std::vector<Laye
                                : layer.linked_path +
                                      (QFileInfo::exists(layer.linked_path)
                                           ? QString{}
-                                          : QStringLiteral("（缺失，使用工程内缓存）")));
+                                          : QObject::tr("（缺失，使用工程内缓存）")));
         row->setSizeHint(0, QSize(0, 34));
         if (!layer.pixels.isNull())
             row->setIcon(0, QPixmap::fromImage(
@@ -267,8 +277,281 @@ EditorController::EditorController(MainWindow* window) : QObject(window), window
     layer_layout->setContentsMargins(0, 0, 0, 0);
     layer_controls_ = new QWidget(layer_tab);
     layer_layout->addWidget(layer_controls_);
+    auto* filter = new QLineEdit(layer_tab);
+    filter->setObjectName("layerNameFilter");
+    filter->setPlaceholderText(tr("筛选图层名称"));
+    auto* kind_filter = new QComboBox(layer_tab);
+    kind_filter->setObjectName("layerKindFilter");
+    kind_filter->addItem(tr("全部类型"), -1);
+    for (int kind = 0; kind <= int(LayerKind::shape); ++kind)
+        kind_filter->addItem(kind_name(LayerKind(kind)), kind);
+    auto* flags_filter = new QComboBox(layer_tab);
+    flags_filter->setObjectName("layerFlagsFilter");
+    flags_filter->addItems({tr("全部状态"), tr("可见"), tr("隐藏"), tr("有蒙版"), tr("有效果"),
+                            tr("有颜色标记"), tr("红色"), tr("橙色"), tr("黄色"), tr("绿色"),
+                            tr("蓝色"), tr("紫色")});
+    layer_layout->addWidget(filter);
+    auto* filter_row = new QHBoxLayout;
+    filter_row->addWidget(kind_filter);
+    filter_row->addWidget(flags_filter);
+    layer_layout->addLayout(filter_row);
+    connect(filter, &QLineEdit::textChanged, this, [this] { filter_layers(); });
+    connect(kind_filter, &QComboBox::currentIndexChanged, this, [this] { filter_layers(); });
+    connect(flags_filter, &QComboBox::currentIndexChanged, this, [this] { filter_layers(); });
     layer_layout->addWidget(layers_);
     tabs->addTab(layer_tab, tr("图层"));
+    auto* channel_tab = new QWidget(tabs);
+    auto* channel_layout = new QVBoxLayout(channel_tab);
+    channels_ = new QListWidget(channel_tab);
+    channels_->setObjectName("channelsList");
+    channel_layout->addWidget(channels_);
+    auto* channel_hint = new QLabel(
+        tr("双击 RGB 分量载入选区。Alpha 可载入快速蒙版，用画笔编辑后保存。"), channel_tab);
+    channel_hint->setWordWrap(true);
+    channel_layout->addWidget(channel_hint);
+    auto* channel_load = new QPushButton(tr("载入为选区"), channel_tab);
+    auto* channel_edit = new QPushButton(tr("用画笔编辑通道"), channel_tab);
+    auto* channel_save = new QPushButton(tr("将当前选区存为 Alpha…"), channel_tab);
+    auto* channel_delete = new QPushButton(tr("删除 Alpha"), channel_tab);
+    channel_load->setObjectName("channelLoad");
+    channel_edit->setObjectName("channelEdit");
+    channel_save->setObjectName("channelSave");
+    channel_delete->setObjectName("channelDelete");
+    for (auto* button : {channel_load, channel_edit, channel_save, channel_delete})
+        channel_layout->addWidget(button);
+    tabs->addTab(channel_tab, tr("通道"));
+    const auto load_channel = [this](bool edit) {
+        guarded([&] {
+            auto* c = canvas();
+            auto* item = channels_->currentItem();
+            if (!c || !item)
+                return;
+            const QString name = item->data(Qt::UserRole).toString();
+            const int component = item->data(Qt::UserRole + 1).toInt();
+            if (component < 0 && name.isEmpty())
+                return;
+            c->edit(tr("载入通道"), [&](State& state) {
+                if (component < 0)
+                    state.selection = state.saved_selections.value(name);
+                else {
+                    auto image = render(state);
+                    if (edit) {
+                        const auto& layer = editable(c, state);
+                        if (layer.pixels.isNull())
+                            throw EditError(tr("请先选择像素图层"));
+                        image = QImage(state.size, QImage::Format_RGBA32FPx4_Premultiplied);
+                        image.setColorSpace(working_space());
+                        image.fill(Qt::black);
+                        QPainter painter(&image);
+                        painter.setTransform(layer.transform * parent_matrix(state, layer.id));
+                        painter.drawImage(0, 0, layer.pixels);
+                    }
+                    state.selection = document_channel(image, state, component);
+                }
+            });
+            if (edit) {
+                if (!c->quick_mask)
+                    c->toggle_quick_mask();
+                c->set_tool(CanvasTool::brush);
+                c->setProperty("editingAlphaChannel", name);
+                c->setProperty("editingColorChannel", component);
+                c->setProperty("editingChannelLayer", c->active_layer);
+            }
+        });
+    };
+    connect(channel_load, &QPushButton::clicked, this, [load_channel] { load_channel(false); });
+    connect(channel_edit, &QPushButton::clicked, this, [load_channel] { load_channel(true); });
+    connect(channels_, &QListWidget::itemDoubleClicked, this,
+            [load_channel] { load_channel(false); });
+    connect(channel_save, &QPushButton::clicked, this, [this] {
+        guarded([&] {
+            auto* c = canvas();
+            if (!c)
+                return;
+            bool ok = false;
+            const auto name =
+                QInputDialog::getText(window_, tr("保存 Alpha"), tr("通道名称（同名将更新）"),
+                                      QLineEdit::Normal,
+                                      c->property("editingAlphaChannel").toString(), &ok)
+                    .trimmed();
+            if (!ok || name.isEmpty())
+                return;
+            if (c->quick_mask)
+                c->toggle_quick_mask();
+            c->edit(tr("保存 Alpha 通道"), [&](State& state) {
+                if (state.selection.isNull())
+                    throw EditError(tr("请先建立选区或快速蒙版"));
+                state.saved_selections[name] = state.selection;
+            });
+        });
+    });
+    connect(channel_delete, &QPushButton::clicked, this, [this] {
+        guarded([&] {
+            auto* c = canvas();
+            auto* item = channels_->currentItem();
+            if (!c || !item || item->data(Qt::UserRole + 1).toInt() >= 0)
+                return;
+            const auto name = item->data(Qt::UserRole).toString();
+            c->edit(tr("删除 Alpha 通道"), [&](State& state) {
+                state.saved_selections.remove(name);
+                auto inks = state.metadata.value("spotChannels").toObject();
+                inks.remove(name);
+                state.metadata["spotChannels"] = inks;
+            });
+        });
+    });
+    auto* channel_preview = new QCheckBox(tr("在画布上单独显示选中通道"), channel_tab);
+    channel_layout->addWidget(channel_preview);
+    const auto preview_channel = [=] {
+        if (auto* c = canvas()) {
+            auto* item = channels_->currentItem();
+            c->setProperty("channelPreview", channel_preview->isChecked() && item);
+            c->setProperty("channelPreviewComponent",
+                           item ? item->data(Qt::UserRole + 1).toInt() : -1);
+            c->setProperty("channelPreviewName",
+                           item ? item->data(Qt::UserRole).toString() : QString{});
+            c->update();
+        }
+    };
+    connect(channel_preview, &QCheckBox::toggled, this, [preview_channel] { preview_channel(); });
+    connect(channels_, &QListWidget::currentRowChanged, this, [this, preview_channel] {
+        if (!refreshing_)
+            preview_channel();
+    });
+    auto* channel_apply = new QPushButton(tr("应用画笔编辑到原通道"), channel_tab);
+    channel_apply->setObjectName("channelApply");
+    channel_layout->addWidget(channel_apply);
+    connect(channel_apply, &QPushButton::clicked, this, [this] {
+        guarded([&] {
+            auto* c = canvas();
+            if (!c || !c->property("editingColorChannel").isValid())
+                return;
+            if (c->quick_mask)
+                c->toggle_quick_mask();
+            const int component = c->property("editingColorChannel").toInt();
+            const auto id = c->property("editingChannelLayer").toUuid();
+            const auto name = c->property("editingAlphaChannel").toString();
+            c->edit(tr("应用通道编辑"), [&](State& state) {
+                if (state.selection.isNull())
+                    throw EditError(tr("通道编辑范围为空"));
+                if (component < 0) {
+                    state.saved_selections[name] = state.selection;
+                    return;
+                }
+                auto* layer = find_layer(state.layers, id);
+                if (!layer || layer_locked(state.layers, id) || layer->pixels.isNull())
+                    throw EditError(tr("原图层不可编辑，请选择未锁定的像素图层"));
+                apply_document_channel(*layer, state, component, state.selection);
+            });
+            c->setProperty("editingColorChannel", QVariant{});
+        });
+    });
+    auto* channel_calculate = new QPushButton(tr("计算 / 应用图像…"), channel_tab);
+    auto* spot = new QPushButton(tr("新建 / 编辑专色…"), channel_tab);
+    channel_layout->addWidget(spot);
+    connect(spot, &QPushButton::clicked, this, [this] { guarded([&] { show_spot_channel(); }); });
+    auto* plate = new QPushButton(tr("导出专色印版…"), channel_tab);
+    channel_layout->addWidget(plate);
+    connect(plate, &QPushButton::clicked, this, [this] {
+        guarded([&] {
+            auto* c = canvas();
+            auto* item = channels_->currentItem();
+            if (!c || !item)
+                return;
+            const auto name = item->data(Qt::UserRole).toString();
+            const auto& state = c->project().state();
+            if (!state.metadata.value("spotChannels").toObject().contains(name))
+                throw EditError(tr("请选择专色通道"));
+            const auto path = QFileDialog::getSaveFileName(window_, tr("导出印版（黑色表示油墨）"),
+                                                           name + ".png", "PNG (*.png)");
+            if (path.isEmpty())
+                return;
+            auto mask = state.saved_selections.value(name).copy();
+            mask.invertPixels();
+            mask.setDotsPerMeterX(qRound(state.ppi / .0254));
+            mask.setDotsPerMeterY(qRound(state.ppi / .0254));
+            QSaveFile file(path);
+            if (!file.open(QIODevice::WriteOnly) || !mask.save(&file, "PNG") || !file.commit())
+                throw EditError(tr("专色印版保存失败"));
+        });
+    });
+    channel_calculate->setObjectName("channelCalculate");
+    channel_layout->addWidget(channel_calculate);
+    connect(channel_calculate, &QPushButton::clicked, this, [this] {
+        guarded([&] {
+            auto* c = canvas();
+            if (!c)
+                return;
+            QDialog dialog(window_);
+            dialog.setWindowTitle(tr("通道计算"));
+            QFormLayout form(&dialog);
+            QComboBox source1, source2, mode, output;
+            source1.setObjectName("source1");
+            source2.setObjectName("source2");
+            mode.setObjectName("blendMode");
+            output.setObjectName("channelOutput");
+            const auto components = document_channel_names(c->project().state());
+            QStringList names = components;
+            names.append(tr("当前选区"));
+            names.append(c->project().state().saved_selections.keys());
+            source1.addItems(names);
+            source2.addItems(names);
+            mode.addItems({tr("正片叠底"), tr("滤色"), tr("相加"), tr("减去"), tr("差值")});
+            output.addItems({tr("新选区"), tr("新 Alpha 通道")});
+            for (const auto& name : components)
+                output.addItem(tr("当前图层 %1 通道").arg(name));
+            form.addRow(tr("来源一"), &source1);
+            form.addRow(tr("来源二"), &source2);
+            form.addRow(tr("混合"), &mode);
+            form.addRow(tr("输出"), &output);
+            QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+            form.addRow(&buttons);
+            connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+            connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            if (dialog.exec() != QDialog::Accepted)
+                return;
+            c->edit(tr("通道计算"), [&](State& state) {
+                const auto composite = render(state);
+                const auto channel = [&](int index) {
+                    if (index == components.size()) {
+                        if (state.selection.isNull())
+                            throw EditError(tr("请先建立选区"));
+                        return state.selection;
+                    }
+                    if (index > components.size())
+                        return state.saved_selections.value(names[index]);
+                    return document_channel(composite, state, index);
+                };
+                auto result = channel(source1.currentIndex());
+                const auto second = channel(source2.currentIndex());
+                for (int y = 0; y < result.height(); ++y)
+                    for (int x = 0; x < result.width(); ++x) {
+                        const int a = result.constScanLine(y)[x], b = second.constScanLine(y)[x];
+                        const int value = mode.currentIndex() == 0 ? a * b / 255
+                                          : mode.currentIndex() == 1
+                                              ? 255 - (255 - a) * (255 - b) / 255
+                                          : mode.currentIndex() == 2 ? a + b
+                                          : mode.currentIndex() == 3 ? a - b
+                                                                     : std::abs(a - b);
+                        result.scanLine(y)[x] = uchar(std::clamp(value, 0, 255));
+                    }
+                if (output.currentIndex() == 0)
+                    state.selection = result;
+                else if (output.currentIndex() == 1) {
+                    QString name = tr("Alpha 计算");
+                    for (int n = 2; state.saved_selections.contains(name); ++n)
+                        name = tr("Alpha 计算 %1").arg(n);
+                    state.saved_selections[name] = result;
+                } else {
+                    auto& layer = editable(c, state);
+                    if (layer.pixels.isNull())
+                        throw EditError(tr("应用图像需要像素图层"));
+                    apply_document_channel(layer, state, output.currentIndex() - 2, result);
+                }
+            });
+        });
+    });
+
     connect(layers_, &QTreeWidget::itemSelectionChanged, this, [this] {
         if (refreshing_ || !canvas())
             return;
@@ -412,6 +695,43 @@ QString EditorController::recovery_directory() const {
                QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/recovery")
         .toString();
 }
+void EditorController::filter_layers() {
+    auto* c = canvas();
+    if (!c)
+        return;
+    auto* name = window_->findChild<QLineEdit*>("layerNameFilter");
+    auto* kind = window_->findChild<QComboBox*>("layerKindFilter");
+    auto* flags = window_->findChild<QComboBox*>("layerFlagsFilter");
+    const auto& state = c->display_state();
+    const auto labels = state.metadata["layerLabels"].toObject();
+    std::function<bool(QTreeWidgetItem*)> match = [&](QTreeWidgetItem* item) {
+        const auto* layer = find_layer(state.layers, item->data(0, Qt::UserRole).toUuid());
+        bool child = false;
+        for (int i = 0; i < item->childCount(); ++i)
+            child = match(item->child(i)) || child;
+        if (!layer)
+            return child;
+        const QString label = labels[layer->id.toString()].toString();
+        const int condition = flags->currentIndex();
+        const QStringList colors{"#b94b4b", "#bd8448", "#b4a34b", "#4d9a68", "#4e83b7", "#9272b3"};
+        const bool state_match =
+            condition == 0 || (condition == 1 && layer->visible) ||
+            (condition == 2 && !layer->visible) ||
+            (condition == 3 && (!layer->mask.isNull() || layer->vector_enabled)) ||
+            (condition == 4 && (!layer->effects.empty() || layer->styles.active())) ||
+            (condition == 5 && !label.isEmpty()) ||
+            (condition >= 6 && label == colors.value(condition - 6));
+        const bool own =
+            layer->name.contains(name->text(), Qt::CaseInsensitive) &&
+            (kind->currentData().toInt() < 0 || kind->currentData().toInt() == int(layer->kind)) &&
+            state_match;
+        item->setHidden(!own && !child);
+        item->setBackground(0, label.isEmpty() ? QBrush{} : QBrush(QColor(label)));
+        return own || child;
+    };
+    for (int i = 0; i < layers_->topLevelItemCount(); ++i)
+        match(layers_->topLevelItem(i));
+}
 void EditorController::refresh(bool rebuild_tree) {
     if (refreshing_)
         return;
@@ -422,6 +742,9 @@ void EditorController::refresh(bool rebuild_tree) {
             selected.insert(id);
     if (rebuild_tree)
         layers_->clear();
+    const QString selected_channel =
+        channels_->currentItem() ? channels_->currentItem()->text() : QString{};
+    channels_->clear();
     paths_->clear();
     history_->clear();
     auto* c = canvas();
@@ -436,6 +759,20 @@ void EditorController::refresh(bool rebuild_tree) {
         for (QTreeWidgetItemIterator it(layers_); *it; ++it)
             if (selected.contains((*it)->data(0, Qt::UserRole).toUuid()))
                 (*it)->setSelected(true);
+        filter_layers();
+        const auto channel_names = document_channel_names(s);
+        for (int component = 0; component < channel_names.size(); ++component) {
+            auto* item = new QListWidgetItem(channel_names[component], channels_);
+            item->setData(Qt::UserRole + 1, component);
+        }
+        for (auto it = s.saved_selections.begin(); it != s.saved_selections.end(); ++it) {
+            auto* item = new QListWidgetItem(it.key(), channels_);
+            item->setData(Qt::UserRole, it.key());
+            item->setData(Qt::UserRole + 1, -1);
+        }
+        for (int index = 0; index < channels_->count(); ++index)
+            if (channels_->item(index)->text() == selected_channel)
+                channels_->setCurrentRow(index);
         paths_->addItems(s.paths.keys());
         history_->addItems(c->project().history_names());
         history_->setCurrentRow(int(c->project().history_position()));
@@ -626,8 +963,19 @@ bool EditorController::open(const QString& path, bool place) {
     const QPointer<CanvasView> placement_target(canvas());
     if (path.isEmpty())
         return false;
-    if (QFileInfo(path).suffix().compare("huelith", Qt::CaseInsensitive) == 0) {
-        const auto state = load_project(path);
+    if (QFileInfo(path).suffix().compare("pdf", Qt::CaseInsensitive) == 0)
+        return open_pdf(path, place);
+    const auto suffix = QFileInfo(path).suffix().toLower();
+    const bool photoshop = suffix == "psd" || suffix == "psb";
+    if (photoshop || suffix == "huelith") {
+        QStringList warnings;
+        const int policy=read_canvas_preferences().psd_policy;
+        const auto state = photoshop ? read_photoshop(path, warnings,policy==2) : load_project(path);
+        if(policy==1&&!warnings.isEmpty())throw EditError(tr("已按导入首选项停止：")+warnings.join("；"));
+        if (!warnings.isEmpty() && QMessageBox::warning(window_, tr("Photoshop 导入兼容性"),
+                tr("以下属性无法保留。原文件不会被修改。\n%1").arg(warnings.join("\n")),
+                QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok)
+            return false;
         if (place && canvas()) {
             Layer nested;
             nested.name = state.name;
@@ -645,12 +993,13 @@ bool EditorController::open(const QString& path, bool place) {
             if (!window_->create_document(spec))
                 return false;
             canvas()->load_state(state, true);
-            canvas()->filename = path;
+            if (!photoshop) canvas()->filename = path;
         }
     } else {
         Layer layer;
         layer.name = QFileInfo(path).completeBaseName();
         layer.kind = LayerKind::source;
+        layer.source_id = QUuid::createUuid();
         layer.linked_path = QFileInfo(path).absoluteFilePath();
         layer.source_metadata = read_photo_metadata(path);
         QFile file(path);
@@ -855,7 +1204,7 @@ void EditorController::autosave() {
         for (const auto& [snapshot, path] : snapshots) {
             try {
                 if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-                    throw EditError(QStringLiteral("无法创建恢复目录"));
+                    throw EditError(QObject::tr("无法创建恢复目录"));
                 save_project(snapshot, path);
                 errors.append(QString{});
             } catch (const std::exception& error) {
@@ -946,6 +1295,8 @@ void EditorController::layer_action(const QString& operation) {
             layer.background = false;
             layer.name = tr("图层 0");
         } else if (operation == tr("复制图层")) {
+            if (layer.kind == LayerKind::source && layer.source_id.isNull())
+                layer.source_id = QUuid::createUuid();
             auto copy = duplicate_layer(layer);
             copy.name += tr(" 副本");
             s.layers.push_back(copy);
@@ -1080,29 +1431,77 @@ void EditorController::selection_action(const QString& operation) {
 void EditorController::configure_menus() {
     auto add = [this](QMenu* menu, const QString& title, const QString& shortcut,
                       const std::function<void()>& callback) {
-        auto* action = menu->addAction(title);
+        auto* action = menu->addAction(tr(title.toUtf8().constData()));
+        action->setProperty("shortcutKey", title);
         if (!shortcut.isEmpty())
             action->setShortcut(QKeySequence(shortcut));
         connect(action, &QAction::triggered, this, [this, callback] { guarded(callback); });
         return action;
     };
     auto* file = window_->menus_->actions().front()->menu();
-    add(file, tr("打开…"), "Ctrl+O", [this] {
+    add(file, QStringLiteral("打开…"), "Ctrl+O", [this] {
         const auto paths = QFileDialog::getOpenFileNames(
             window_, tr("打开图片或工程"), {},
-            tr("图片 / RAW / 工程 (*.png *.jpg *.jpeg *.tif *.tiff *.cr3 *.cr2 *.crw *.nef *.nrw *.arw *.sr2 *.srf *.dng "
-               "*.raf *.rw2 *.orf *.pef *.raw *.rwl *.srw *.3fr *.fff *.iiq *.huelith);;所有文件 (*)"));
+            tr("图片 / RAW / 工程 (*.png *.jpg *.jpeg *.tif *.tiff *.cr3 *.cr2 *.crw *.nef *.nrw "
+               "*.arw *.sr2 *.srf *.dng "
+               "*.raf *.rw2 *.orf *.pef *.raw *.rwl *.srw *.3fr *.fff *.iiq *.huelith "
+               "*.pdf *.psd *.psb);;所有文件 (*)"));
         open_files(paths);
     });
-    add(file, tr("置入…"), {}, [this] {
+    add(file, QStringLiteral("置入…"), {}, [this] {
         open(QFileDialog::getOpenFileName(window_, tr("置入当前图片"), {},
-                                          tr("图片 / 工程 (*.png *.jpg *.jpeg *.huelith)")),
+                                          tr("图片 / 工程 (*.png *.jpg *.jpeg *.psd *.psb *.huelith)")),
              true);
     });
-    add(file, tr("保存工程"), "Ctrl+S", [this] { save(canvas()); });
-    add(file, tr("另存工程…"), "Ctrl+Shift+S", [this] { save(canvas(), true); });
-    add(file, tr("导出 PNG / JPEG…"), "Ctrl+Alt+Shift+S", [this] { show_export(); });
-    add(file, tr("批量导出与队列…"), {}, [this] {
+    add(file, QStringLiteral("保存工程"), "Ctrl+S", [this] { save(canvas()); });
+    add(file, QStringLiteral("另存工程…"), "Ctrl+Shift+S", [this] { save(canvas(), true); });
+    add(file, QStringLiteral("导出 Photoshop 分层副本…"), {}, [this] {
+        auto* c = canvas(); if (!c) return;
+        c->commit_transform();
+        const auto path = QFileDialog::getSaveFileName(window_, tr("导出分层副本（8 位 sRGB）"), {},
+                                                        tr("Photoshop (*.psd);;大型文档 (*.psb)"));
+        if (path.isEmpty()) return;
+        if (QMessageBox::question(window_, tr("分层兼容副本"),
+            tr("导出 8 位 sRGB 分层副本，保留基本图层组、剪贴关系和独立像素蒙版。文字、智能对象和效果仍栅格化；带样式的图层蒙版随外观合并。无法保留的跨层调整或复杂组会提示，不覆盖原 PSD。继续？")) != QMessageBox::Yes) return;
+        write_photoshop(c->project().state(), path);
+    });
+    add(file, QStringLiteral("内容凭证…"), {}, [this] { show_credentials(); });
+    add(file, QStringLiteral("存储副本…"), {}, [this] {
+        auto* c = canvas();
+        if (!c)
+            return;
+        c->commit_transform();
+        auto path =
+            QFileDialog::getSaveFileName(window_, tr("存储工程副本"), {}, "Huelith (*.huelith)");
+        if (path.isEmpty())
+            return;
+        if (!path.endsWith(".huelith", Qt::CaseInsensitive))
+            path += ".huelith";
+        if (!c->filename.isEmpty() &&
+            QFileInfo(path).absoluteFilePath().compare(QFileInfo(c->filename).absoluteFilePath(),
+                                                       Qt::CaseInsensitive) == 0)
+            throw EditError(tr("副本请选择不同于当前工程的文件名"));
+        const auto canonical = [](const QString& value) {
+            const QFileInfo info(value);
+            return (info.canonicalFilePath().isEmpty() ? info.absoluteFilePath()
+                                                       : info.canonicalFilePath())
+                .toCaseFolded();
+        };
+        const auto destination = canonical(path);
+        if (!c->filename.isEmpty() && destination == canonical(c->filename))
+            throw EditError(tr("副本不能覆盖当前工程"));
+        const auto protect = [&](auto&& self, const std::vector<Layer>& layers) -> void {
+            for (const auto& layer : layers) {
+                if (!layer.linked_path.isEmpty() && destination == canonical(layer.linked_path))
+                    throw EditError(tr("副本不能覆盖关联源文件"));
+                self(self, layer.children);
+            }
+        };
+        protect(protect, c->project().state().layers);
+        save_project(c->project().snapshot(), path);
+    });
+    add(file, QStringLiteral("导出 PNG / JPEG…"), "Ctrl+Alt+Shift+S", [this] { show_export(); });
+    add(file, QStringLiteral("批量导出与队列…"), {}, [this] {
         if (!export_queue_)
             export_queue_ = new ExportDialog(window_);
         QList<CanvasView*> sources;
@@ -1113,12 +1512,21 @@ void EditorController::configure_menus() {
         export_queue_->show();
         export_queue_->raise();
     });
+    add(file, QStringLiteral("快速导出当前文档"), {}, [this] {
+        auto* c = canvas();
+        if (!c)
+            return;
+        c->commit_transform();
+        if (!export_queue_)
+            export_queue_ = new ExportDialog(window_);
+        export_queue_->quick_export(c);
+    });
     recent_ = file->addMenu(tr("最近打开"));
     recent_->setObjectName("recentFilesMenu");
     const auto recent = QSettings().value("recentProjects").toStringList();
     for (const auto& item : recent)
         add(recent_, item, {}, [this, item] { open(item); });
-    add(file, tr("打开自动恢复…"), {}, [this] {
+    add(file, QStringLiteral("打开自动恢复…"), {}, [this] {
         const auto path = QFileDialog::getOpenFileName(
             window_, tr("选择恢复副本"), recovery_directory(), tr("Huelith 工程 (*.huelith)"));
         if (open(path)) {
@@ -1127,31 +1535,192 @@ void EditorController::configure_menus() {
             refresh();
         }
     });
+    add(file,tr("生成工作流（ComfyUI）…"),{},[this]{show_comfy();});
+    auto* automation = file->addMenu(tr("自动化"));
+    add(automation,tr("开始录制动作"),{},[this]{auto* c=canvas();if(!c)return;
+        if(c->property("actionRecording").toBool())throw EditError(tr("当前文档正在录制"));
+        c->setProperty("recordedSteps",QJsonArray{});c->setProperty("actionRecording",true);
+        c->setProperty("actionRecordedRevision",QVariant::fromValue<qulonglong>(c->project().revision()));
+        window_->statusBar()->showMessage(tr("正在录制本页操作：图层曝光、不透明度、图像尺寸。其他编辑会插入停止步骤。"));});
+    add(automation,tr("结束录制并编辑动作…"),{},[this]{auto* c=canvas();if(!c||!c->property("actionRecording").toBool())return;
+        c->setProperty("actionRecording",false);auto steps=c->property("recordedSteps").toJsonArray();
+        if(steps.isEmpty())throw EditError(tr("尚未录制编辑步骤"));
+        QSettings().setValue("actions/steps",QString::fromUtf8(QJsonDocument(steps).toJson()));actions_dialog(false);});
+    add(automation,tr("编辑与播放动作…"),{},[this]{actions_dialog(false);});
+    add(automation,tr("动作批处理…"),{},[this]{actions_dialog(true);});
     auto* edit = window_->menus_->addMenu(tr("编辑(&E)"));
-    add(edit, tr("撤销"), "Ctrl+Z", [this] {
+    add(edit, QStringLiteral("撤销"), "Ctrl+Z", [this] {
         if (auto* c = canvas()) {
             c->cancel_transform();
             c->project().undo();
             c->refresh();
         }
     });
-    add(edit, tr("重做"), "Ctrl+Shift+Z", [this] {
+    add(edit, QStringLiteral("重做"), "Ctrl+Shift+Z", [this] {
         if (auto* c = canvas()) {
             c->cancel_transform();
             c->project().redo();
             c->refresh();
         }
     });
-    add(edit, tr("复制"), "Ctrl+C", [this] { copy_pixels(false, false); });
-    add(edit, tr("复制合成"), "Ctrl+Shift+C", [this] { copy_pixels(true, false); });
-    add(edit, tr("剪切"), "Ctrl+X", [this] { copy_pixels(false, true); });
-    add(edit, tr("粘贴为新图层"), "Ctrl+V", [this] { paste_pixels(false, false); });
-    add(edit, tr("原位粘贴"), "Ctrl+Shift+V", [this] { paste_pixels(true, false); });
-    add(edit, tr("贴入选区"), "Ctrl+Alt+Shift+V", [this] { paste_pixels(false, true); });
+    add(edit, QStringLiteral("复制"), "Ctrl+C", [this] { copy_pixels(false, false); });
+    add(edit, QStringLiteral("复制合成"), "Ctrl+Shift+C", [this] { copy_pixels(true, false); });
+    add(edit, QStringLiteral("剪切"), "Ctrl+X", [this] { copy_pixels(false, true); });
+    add(edit, QStringLiteral("粘贴为新图层"), "Ctrl+V", [this] { paste_pixels(false, false); });
+    add(edit, QStringLiteral("原位粘贴"), "Ctrl+Shift+V", [this] { paste_pixels(true, false); });
+    add(edit, QStringLiteral("贴入选区外"), {}, [this] { paste_pixels(false, true, true); });
+    add(edit, QStringLiteral("贴入选区"), "Ctrl+Alt+Shift+V", [this] { paste_pixels(false, true); });
     auto* layers = window_->menus_->addMenu(tr("图层(&L)"));
     auto* create = layers->addMenu(tr("新建"));
-    add(layers, tr("智能效果…"), {}, [this] { show_effects(); });
-    add(layers, tr("图层样式…"), {}, [this] { show_layer_styles(); });
+    add(layers, QStringLiteral("智能效果…"), {}, [this] { show_effects(); });
+    add(layers, QStringLiteral("图层样式…"), {}, [this] { show_layer_styles(); });
+    for (bool unlink : {false, true})
+        add(layers, unlink ? tr("取消图层链接") : tr("链接选中图层"), {}, [this, unlink] {
+            auto* c = canvas();
+            if (!c)
+                return;
+            auto selected = c->selected_layers;
+            if (selected.empty())
+                selected.push_back(c->active_layer);
+            if (!unlink && selected.size() < 2)
+                throw EditError(tr("请先选择至少两个图层"));
+            c->edit(unlink ? tr("取消图层链接") : tr("链接图层"), [&](State& state) {
+                auto groups = state.metadata["layerLinks"].toArray();
+                QSet<QString> members;
+                for (const auto& id : selected)
+                    members.insert(id.toString());
+                QJsonArray remaining;
+                for (const auto& value : groups) {
+                    const auto group = value.toArray();
+                    bool intersects = false;
+                    for (const auto& id : group)
+                        intersects |= members.contains(id.toString());
+                    if (!intersects) {
+                        remaining.append(group);
+                        continue;
+                    }
+                    QJsonArray retained;
+                    for (const auto& id : group) {
+                        if (unlink) {
+                            if (!members.contains(id.toString()))
+                                retained.append(id);
+                        } else
+                            members.insert(id.toString());
+                    }
+                    if (unlink && retained.size() > 1)
+                        remaining.append(retained);
+                }
+                if (!unlink) {
+                    QJsonArray group;
+                    for (const auto& id : members)
+                        group.append(id);
+                    remaining.append(group);
+                }
+                state.metadata["layerLinks"] = remaining;
+            });
+        });
+    auto* label_menu = layers->addMenu(tr("颜色标记"));
+    const QStringList label_colors{"",        "#b94b4b", "#bd8448", "#b4a34b",
+                                   "#4d9a68", "#4e83b7", "#9272b3"};
+    const QStringList label_names{tr("无标记"), tr("红色"), tr("橙色"), tr("黄色"),
+                                  tr("绿色"),   tr("蓝色"), tr("紫色")};
+    for (int index = 0; index < label_colors.size(); ++index) {
+        const auto color = label_colors[index];
+        const auto title = label_names[index];
+        add(label_menu, title, {}, [this, color] {
+            if (auto* c = canvas())
+                c->edit(tr("图层颜色标记"), [&](State& state) {
+                    auto labels = state.metadata["layerLabels"].toObject();
+                    auto ids = c->selected_layers;
+                    if (ids.empty())
+                        ids.push_back(c->active_layer);
+                    for (const auto& id : ids) {
+                        if (color.isEmpty())
+                            labels.remove(id.toString());
+                        else
+                            labels[id.toString()] = color;
+                    }
+                    state.metadata["layerLabels"] = labels;
+                });
+        });
+    }
+    auto* comps = layers->addMenu(tr("图层复合"));
+    add(comps, QStringLiteral("保存当前图层复合…"), {}, [this] {
+        auto* c = canvas();
+        if (!c)
+            return;
+        bool ok = false;
+        const auto name =
+            QInputDialog::getText(window_, tr("图层复合"), tr("名称"), QLineEdit::Normal, {}, &ok)
+                .trimmed();
+        if (!ok || name.isEmpty())
+            return;
+        c->edit(tr("保存图层复合"), [&](State& state) {
+            QJsonObject entries;
+            std::function<void(const std::vector<Layer>&)> capture =
+                [&](const std::vector<Layer>& layers) {
+                    for (const auto& layer : layers) {
+                        const auto& t = layer.transform;
+                        const auto& m = layer.mask_transform;
+                        entries[layer.id.toString()] = QJsonObject{
+                            {"visible", layer.visible},
+                            {"opacity", layer.opacity},
+                            {"blend", int(layer.blend)},
+                            {"styles", styles_json(layer.styles)},
+                            {"transform", QJsonArray{t.m11(), t.m12(), t.m13(), t.m21(), t.m22(),
+                                                     t.m23(), t.m31(), t.m32(), t.m33()}},
+                            {"maskTransform",
+                             QJsonArray{m.m11(), m.m12(), m.m13(), m.m21(), m.m22(), m.m23(),
+                                        m.m31(), m.m32(), m.m33()}}};
+                        capture(layer.children);
+                    }
+                };
+            capture(state.layers);
+            auto records = state.metadata["layerComps"].toObject();
+            records[name] = entries;
+            state.metadata["layerComps"] = records;
+        });
+    });
+    for (bool remove : {false, true})
+        add(comps, remove ? tr("删除图层复合…") : tr("应用图层复合…"), {}, [this, remove] {
+            auto* c = canvas();
+            if (!c)
+                return;
+            const auto records = c->project().state().metadata["layerComps"].toObject();
+            if (records.isEmpty())
+                return;
+            bool ok = false;
+            const auto name = QInputDialog::getItem(window_, tr("图层复合"), tr("选择"),
+                                                    records.keys(), 0, false, &ok);
+            if (!ok)
+                return;
+            c->edit(remove ? tr("删除图层复合") : tr("应用图层复合"), [&](State& state) {
+                auto all = state.metadata["layerComps"].toObject();
+                if (remove) {
+                    all.remove(name);
+                    state.metadata["layerComps"] = all;
+                    return;
+                }
+                const auto entries = all[name].toObject();
+                const auto matrix = [](const QJsonArray& a) {
+                    if (a.size() != 9)
+                        throw EditError(QObject::tr("图层复合变换数据损坏"));
+                    return QTransform(a[0].toDouble(), a[1].toDouble(), a[2].toDouble(),
+                                      a[3].toDouble(), a[4].toDouble(), a[5].toDouble(),
+                                      a[6].toDouble(), a[7].toDouble(), a[8].toDouble());
+                };
+                for (auto it = entries.begin(); it != entries.end(); ++it)
+                    if (auto* layer = find_layer(state.layers, QUuid(it.key()))) {
+                        const auto data = it.value().toObject();
+                        layer->visible = data["visible"].toBool();
+                        layer->opacity = float(data["opacity"].toDouble());
+                        layer->blend = Blend(data["blend"].toInt());
+                        layer->styles = styles_from_json(data["styles"].toObject());
+                        layer->transform = matrix(data["transform"].toArray());
+                        layer->mask_transform = matrix(data["maskTransform"].toArray());
+                    }
+            });
+        });
     for (int kind = 0; kind <= int(LayerKind::composition); ++kind)
         add(create, kind_name(static_cast<LayerKind>(kind)), {},
             [this, kind] { create_layer(kind); });
@@ -1167,7 +1736,7 @@ void EditorController::configure_menus() {
                 return;
             layer_action(text);
         });
-    add(layers, tr("替换 / 重新定位源…"), {}, [this] {
+    add(layers, QStringLiteral("替换 / 重新定位源…"), {}, [this] {
         auto* c = canvas();
         if (!c)
             return;
@@ -1178,58 +1747,348 @@ void EditorController::configure_menus() {
         const auto image = import_image(path);
         c->edit(tr("替换源"), [&](State& s) {
             auto& l = editable(c, s);
+            if (l.kind != LayerKind::source)
+                throw EditError(tr("请先转换为智能对象"));
             l.pixels = image;
             l.linked_path = path;
             l.linked_hash.clear();
+            l.raw_source.clear();
+            l.raw_recipe = {};
+            l.source_metadata = read_photo_metadata(path);
+            synchronize_source(s, l);
         });
     });
-    add(edit, tr("自由变换"), "Ctrl+T", [this] {
+    add(layers, QStringLiteral("转换为智能对象"), {}, [this] {
+        if (auto* c = canvas())
+            c->edit(tr("转换为智能对象"), [&](State& s) {
+                auto& layer = editable(c, s);
+                if (layer.kind != LayerKind::pixels && layer.kind != LayerKind::repair &&
+                    layer.kind != LayerKind::source)
+                    throw EditError(tr("请选择像素、修复或图像源图层"));
+                layer.kind = LayerKind::source;
+                if (layer.source_id.isNull())
+                    layer.source_id = QUuid::createUuid();
+            });
+    });
+    add(layers, QStringLiteral("通过拷贝新建智能对象（独立）"), {}, [this] {
+        if (auto* c = canvas())
+            c->edit(tr("独立智能对象副本"), [&](State& s) {
+                const auto& layer = editable(c, s);
+                if (layer.kind != LayerKind::source)
+                    throw EditError(tr("请选择智能对象"));
+                auto copy = duplicate_layer(layer);
+                copy.source_id = QUuid::createUuid();
+                copy.name += tr(" 独立副本");
+                s.layers.push_back(copy);
+                c->active_layer = copy.id;
+            });
+    });
+    add(layers, QStringLiteral("更新链接内容"), {}, [this] {
+        auto* c = canvas();
+        if (!c)
+            return;
+        const auto* layer = find_layer(c->project().state().layers, c->active_layer);
+        if (!layer || layer->kind != LayerKind::source || layer->linked_path.isEmpty())
+            throw EditError(tr("请选择有链接源文件的智能对象"));
+        QFile file(layer->linked_path);
+        if (!file.open(QIODevice::ReadOnly) || file.size() > 512LL * 1024 * 1024)
+            throw EditError(tr("源文件缺失或超过 512 MB，请使用替换 / 重新定位源"));
+        const auto bytes = file.readAll();
+        const auto hash = QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
+        if (is_raw_file(layer->linked_path)) {
+            auto source = *layer;
+            source.raw_source = bytes;
+            source.linked_hash = hash;
+            const auto id = layer->id;
+            const auto revision = c->project().revision();
+            const QPointer<CanvasView> document(c);
+            RawDialog dialog({source}, window_);
+            if (dialog.exec() != QDialog::Accepted)
+                return;
+            if (!document || document->project().revision() != revision)
+                throw EditError(tr("原文档已变化，请重新更新链接"));
+            document->edit(tr("更新 RAW 链接"), [&](State& state) {
+                auto* target = find_layer(state.layers, id);
+                *target = dialog.results().front();
+                synchronize_source(state, *target);
+            });
+            return;
+        }
+        const auto pixels = import_image(layer->linked_path);
+        c->edit(tr("更新链接内容"), [&](State& s) {
+            auto& target = editable(c, s);
+            target.pixels = pixels;
+            target.linked_hash = hash;
+            synchronize_source(s, target);
+        });
+    });
+    add(layers, QStringLiteral("打包工程与链接资源…"), {}, [this] {
+        auto* c = canvas();
+        if (!c)
+            return;
+        const auto directory = QFileDialog::getExistingDirectory(window_, tr("选择空的打包目录"));
+        if (directory.isEmpty())
+            return;
+        if (!QDir(directory)
+                 .entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden)
+                 .isEmpty())
+            throw EditError(tr("请选择空目录，避免覆盖已有文件"));
+        auto snapshot = c->project().snapshot();
+        const auto gather = [&](auto&& self, std::vector<Layer>& items) -> void {
+            for (auto& item : items) {
+                if (!item.linked_path.isEmpty()) {
+                    QFile source(item.linked_path);
+                    if (!source.open(QIODevice::ReadOnly) || source.size() > 512LL * 1024 * 1024)
+                        throw EditError(tr("无法打包源文件：%1").arg(item.linked_path));
+                    const auto relative = QString("resources/%1.%2")
+                                              .arg(item.id.toString(QUuid::WithoutBraces),
+                                                   QFileInfo(item.linked_path).suffix());
+                    if (!QDir(directory).mkpath("resources"))
+                        throw EditError(tr("无法创建资源目录"));
+                    if (!QFile::copy(item.linked_path, QDir(directory).filePath(relative)))
+                        throw EditError(tr("复制资源失败：%1").arg(item.linked_path));
+                    item.linked_path = relative;
+                }
+                self(self, item.children);
+            }
+        };
+        gather(gather, snapshot.state.layers);
+        const auto output = QDir(directory).filePath("document.huelith");
+        save_project(snapshot, output);
+        window_->statusBar()->showMessage(tr("已打包到 %1").arg(output));
+    });
+    add(edit, QStringLiteral("自由变换"), "Ctrl+T", [this] {
         if (auto* c = canvas()) {
             c->begin_transform();
             c->setFocus();
         }
     });
-    add(layers, tr("数值变换…"), {}, [this] {
+    add(layers, QStringLiteral("数值变换…"), {}, [this] {
         auto* c = canvas();
         if (!c)
             return;
-        bool ok{};
-        const auto text =
-            QInputDialog::getText(window_, tr("变换当前内容 / 蒙版"),
-                                  tr("平移 X,Y；缩放 X,Y；旋转角度（五个数，用逗号分隔）"),
-                                  QLineEdit::Normal, "0,0,1,1,0", &ok);
-        if (!ok)
-            return;
-        const auto fields = text.split(',');
-        if (fields.size() != 5)
-            throw EditError(tr("请输入五个数值"));
-        std::array<double, 5> values{};
-        for (int i = 0; i < 5; ++i) {
-            values[static_cast<std::size_t>(i)] = fields[i].toDouble(&ok);
-            if (!ok)
-                throw EditError(tr("无效数值"));
+        QDialog dialog(window_);
+        dialog.setWindowTitle(tr("变换当前内容 / 蒙版"));
+        auto* layout = new QFormLayout(&dialog);
+        std::array<ExpressionSpinBox*, 5> fields{};
+        const auto& original = c->project().state();
+        const auto targets = c->mask_target || c->selected_layers.empty()
+                                 ? std::vector<QUuid>{c->active_layer}
+                                 : root_targets(original, c->selected_layers);
+        QRectF bounds;
+        if (c->mask_target) {
+            const auto* layer = find_layer(original.layers, c->active_layer);
+            if (layer && !layer->mask.isNull())
+                bounds = (layer->mask_transform * parent_matrix(original, layer->id))
+                             .mapRect(QRectF(layer->mask.rect()));
+        } else {
+            for (const auto& id : targets)
+                bounds = bounds.united(layer_bounds(original, id));
         }
+        if (bounds.isEmpty())
+            return;
+        const QStringList labels{tr("X（像素）"), tr("Y（像素）"), tr("宽度（像素）"),
+                                 tr("高度（像素）"), tr("旋转（度）")};
+        const double initial[]{bounds.x(), bounds.y(), bounds.width(), bounds.height(), 0};
+        for (int i = 0; i < 5; ++i) {
+            fields[i] = new ExpressionSpinBox(&dialog);
+            fields[i]->setObjectName(QString("transformValue%1").arg(i));
+            fields[i]->setDecimals(4);
+            fields[i]->setRange(i == 2 || i == 3 ? 0.0001 : -1000000, 1000000);
+            fields[i]->setValue(initial[i]);
+            if (i < 4)
+                fields[i]->setUnitContext(c->project().state().ppi, 1,
+                                          i == 2   ? bounds.width()
+                                          : i == 3 ? bounds.height()
+                                                   : 1);
+            layout->addRow(labels[i], fields[i]);
+        }
+        auto* anchor = new QComboBox(&dialog);
+        anchor->setObjectName("transformAnchor");
+        anchor->addItems({tr("左上"), tr("上中"), tr("右上"), tr("左中"), tr("中心"), tr("右中"),
+                          tr("左下"), tr("下中"), tr("右下")});
+        layout->addRow(tr("参照点"), anchor);
+        connect(anchor, &QComboBox::currentIndexChanged, &dialog, [=](int index) {
+            fields[0]->setValue(bounds.x() + bounds.width() * (index % 3) / 2.);
+            fields[1]->setValue(bounds.y() + bounds.height() * (index / 3) / 2.);
+        });
+        auto* linked = new QCheckBox(tr("锁定宽高比例"), &dialog);
+        linked->setChecked(true);
+        layout->addRow(linked);
+        connect(fields[2], &QDoubleSpinBox::valueChanged, &dialog, [=](double value) {
+            if (linked->isChecked()) {
+                const QSignalBlocker block(fields[3]);
+                fields[3]->setValue(value * bounds.height() / bounds.width());
+            }
+        });
+        connect(fields[3], &QDoubleSpinBox::valueChanged, &dialog, [=](double value) {
+            if (linked->isChecked()) {
+                const QSignalBlocker block(fields[2]);
+                fields[2]->setValue(value * bounds.width() / bounds.height());
+            }
+        });
+        auto* buttons =
+            new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        layout->addRow(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+            for (auto* field : fields)
+                if (!field->hasAcceptableInput()) {
+                    field->setFocus();
+                    return;
+                }
+            dialog.accept();
+        });
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        std::array<double, 5> values{};
+        for (int i = 0; i < 5; ++i)
+            values[i] = fields[i]->value();
+        const QPointF origin(bounds.x() + bounds.width() * (anchor->currentIndex() % 3) / 2.,
+                             bounds.y() + bounds.height() * (anchor->currentIndex() / 3) / 2.);
         QTransform transform;
         transform.translate(values[0], values[1]);
         transform.rotate(values[4]);
-        transform.scale(values[2], values[3]);
-        c->edit(tr("数值变换"), [&](State& s) {
-            auto& l = editable(c, s);
-            if (c->mask_target)
-                l.mask_transform = l.mask_transform * transform;
-            else {
-                l.transform = l.transform * transform;
-                if (l.mask_linked)
-                    l.mask_transform = l.mask_transform * transform;
-            }
+        transform.scale(values[2] / bounds.width(), values[3] / bounds.height());
+        transform.translate(-origin.x(), -origin.y());
+        c->edit(tr("数值变换"), [&](State& state) {
+            transform_targets(state, targets, transform, c->mask_target);
         });
     });
     auto* selection = window_->menus_->addMenu(tr("选择(&S)"));
-    add(selection, tr("选择并遮住…"), "Ctrl+Alt+R", [this] { show_selection_refine(); });
+    add(selection, QStringLiteral("快速选择画笔"), {}, [this] {
+        if (auto* c = canvas()) {
+            c->set_tool(CanvasTool::brush);
+            if (!c->quick_mask)
+                c->toggle_quick_mask();
+            c->setProperty("quickSelection", true);
+            c->range_operation = RangeOp::add;
+            window_->statusBar()->showMessage(tr("在目标上涂抹扩展选区；Alt 减去，切换工具结束"));
+        }
+    });
+    add(selection, QStringLiteral("磁性套索"), {}, [this] {
+        if (auto* c = canvas()) {
+            c->set_tool(CanvasTool::lasso);
+            c->setProperty("magneticLasso", true);
+            window_->statusBar()->showMessage(
+                tr("沿物体边缘拖动，松开闭合选区；切换工具退出磁性套索"));
+        }
+    });
+    for (bool contiguous : {false, true})
+        add(selection, contiguous ? tr("扩大相邻颜色…") : tr("选取相似颜色…"), {},
+            [this, contiguous] {
+                auto* c = canvas();
+                if (!c)
+                    return;
+                if (c->project().state().selection.isNull())
+                    throw EditError(tr("请先建立一个选区"));
+                bool ok = false;
+                const int tolerance = QInputDialog::getInt(window_, tr("颜色容差"),
+                                                           tr("容差（0—255）"), 24, 0, 255, 1, &ok);
+                if (!ok)
+                    return;
+                c->edit(contiguous ? tr("扩大相邻颜色") : tr("相似颜色"), [&](State& state) {
+                    const auto image = display_image(render(state));
+                    const int w = image.width(), h = image.height();
+                    std::array<bool, 32768> colors{};
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x)
+                            if (state.selection.constScanLine(y)[x] >= 128) {
+                                const auto rgb = image.pixel(x, y);
+                                colors[(qRed(rgb) >> 3) * 1024 + (qGreen(rgb) >> 3) * 32 +
+                                       (qBlue(rgb) >> 3)] = true;
+                            }
+                    auto accepted = colors;
+                    const int radius = (tolerance + 7) / 8;
+                    // Separable dilation bounds the work even when the selection spans many
+                    // colours.
+                    for (int stride : {1024, 32, 1}) {
+                        const auto source = accepted;
+                        for (int index = 0; index < 32768; ++index) {
+                            const int coordinate = (index / stride) % 32;
+                            for (int offset = std::max(-radius, -coordinate);
+                                 offset <= std::min(radius, 31 - coordinate); ++offset)
+                                if (source[index + offset * stride]) {
+                                    accepted[index] = true;
+                                    break;
+                                }
+                        }
+                    }
+                    QImage mask = state.selection.copy();
+                    std::vector<QPoint> queue;
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x) {
+                            if (contiguous) {
+                                if (mask.constScanLine(y)[x] >= 128)
+                                    queue.emplace_back(x, y);
+                            } else {
+                                const auto rgb = image.pixel(x, y);
+                                if (accepted[(qRed(rgb) >> 3) * 1024 + (qGreen(rgb) >> 3) * 32 +
+                                             (qBlue(rgb) >> 3)])
+                                    mask.scanLine(y)[x] = 255;
+                            }
+                        }
+                    for (std::size_t i = 0; i < queue.size(); ++i) {
+                        const auto point = queue[i];
+                        for (const auto delta :
+                             {QPoint(-1, 0), QPoint(1, 0), QPoint(0, -1), QPoint(0, 1)}) {
+                            const auto next = point + delta;
+                            if (next.x() < 0 || next.y() < 0 || next.x() >= w || next.y() >= h ||
+                                mask.constScanLine(next.y())[next.x()] >= 128)
+                                continue;
+                            const auto rgb = image.pixel(next);
+                            if (accepted[(qRed(rgb) >> 3) * 1024 + (qGreen(rgb) >> 3) * 32 +
+                                         (qBlue(rgb) >> 3)]) {
+                                mask.scanLine(next.y())[next.x()] = 255;
+                                queue.push_back(next);
+                            }
+                        }
+                    }
+                    state.selection = mask;
+                });
+            });
+    add(selection, QStringLiteral("选择并遮住…"), "Ctrl+Alt+R", [this] { show_selection_refine(); });
     for (const auto& [name, target] :
          {std::pair{tr("主体"), 4}, {tr("背景"), 5}, {tr("对象…"), 6},
           {tr("天空"), 0}, {tr("草地"), 1}, {tr("植被"), 2}, {tr("人物…"), 3}})
         add(selection, name, {}, [this, target] { semantic_selection(target); });
+    for (bool horizontal : {true, false})
+        add(selection, horizontal ? tr("单行选区…") : tr("单列选区…"), {}, [this, horizontal] {
+            auto* c = canvas();
+            if (!c)
+                return;
+            bool ok = false;
+            const int extent =
+                horizontal ? c->project().state().size.height() : c->project().state().size.width();
+            const int position =
+                QInputDialog::getInt(window_, tr("一像素选区"), tr("位置（像素，从0开始）"),
+                                     extent / 2, 0, extent - 1, 1, &ok);
+            if (!ok)
+                return;
+            c->edit(tr("一像素选区"), [&](State& state) {
+                QImage mask(state.size, QImage::Format_Grayscale8);
+                mask.fill(0);
+                if (horizontal)
+                    std::fill_n(mask.scanLine(position), mask.width(), uchar(255));
+                else
+                    for (int y = 0; y < mask.height(); ++y)
+                        mask.scanLine(y)[position] = 255;
+                combine_range(state, mask, c->range_operation);
+            });
+        });
+    add(selection, QStringLiteral("焦点范围…"), {}, [this] {
+        auto* c = canvas();
+        if (!c)
+            return;
+        bool ok = false;
+        const double threshold = QInputDialog::getDouble(
+            window_, tr("焦点范围"), tr("清晰细节阈值（越低选取越多）"), 12, 1, 100, 1, &ok);
+        if (!ok)
+            return;
+        c->edit(tr("焦点范围"), [&](State& state) {
+            combine_range(state, focus_range(state, threshold), c->range_operation);
+        });
+    });
     selection->addSeparator();
     for (const auto& text :
          {tr("全选"), tr("取消选区"), tr("反选"), tr("羽化"), tr("扩张"), tr("收缩"), tr("平滑"),
@@ -1242,7 +2101,7 @@ void EditorController::configure_menus() {
                                    : QString{},
             [this, text] { selection_action(text); });
     auto* view = window_->menus_->actions().at(1)->menu();
-    add(view, tr("旋转视图…"), {}, [this] {
+    add(view, QStringLiteral("旋转视图…"), {}, [this] {
         if (auto* c = canvas()) {
             bool ok{};
             const auto angle = QInputDialog::getDouble(window_, tr("旋转视图"), tr("角度"),
@@ -1254,7 +2113,7 @@ void EditorController::configure_menus() {
             }
         }
     });
-    add(view, tr("复位视图旋转"), {}, [this] {
+    add(view, QStringLiteral("复位视图旋转"), {}, [this] {
         if (auto* c = canvas()) {
             c->rotation = 0;
             c->update();
@@ -1336,14 +2195,14 @@ void EditorController::configure_menus() {
         action->setCheckable(true);
         action->setChecked(label == tr("显示参考线"));
     }
-    add(view, tr("清除参考线"), {}, [this] {
+    add(view, QStringLiteral("清除参考线"), {}, [this] {
         if (auto* c = canvas())
             c->edit(tr("清除参考线"), [](State& state) {
                 state.horizontal_guides.clear();
                 state.vertical_guides.clear();
             });
     });
-    add(view, tr("添加参考线…"), {}, [this] {
+    add(view, QStringLiteral("添加参考线…"), {}, [this] {
         if (auto* c = canvas()) {
             bool ok{};
             const auto text =
@@ -1363,7 +2222,7 @@ void EditorController::configure_menus() {
             });
         }
     });
-    add(view, tr("创建比较快照…"), {}, [this] {
+    add(view, QStringLiteral("创建比较快照…"), {}, [this] {
         if (auto* c = canvas()) {
             bool ok{};
             const auto name = QInputDialog::getText(window_, tr("快照"), tr("名称"),
@@ -1372,7 +2231,7 @@ void EditorController::configure_menus() {
                 c->edit(tr("保存快照"), [&](State& s) { s.snapshots.insert(name, render(s)); });
         }
     });
-    add(view, tr("查看比较快照…"), {}, [this] {
+    add(view, QStringLiteral("查看比较快照…"), {}, [this] {
         if (auto* c = canvas()) {
             QStringList items{tr("当前编辑")};
             items += c->project().state().snapshots.keys();
@@ -1385,11 +2244,11 @@ void EditorController::configure_menus() {
             }
         }
     });
-    add(view, tr("保存工作区布局"), {},
+    add(view, QStringLiteral("保存工作区布局"), {},
         [this] { QSettings().setValue("workspaceM1", window_->saveState(1)); });
-    add(view, tr("恢复已存工作区"), {},
+    add(view, QStringLiteral("恢复已存工作区"), {},
         [this] { window_->restoreState(QSettings().value("workspaceM1").toByteArray(), 1); });
-    add(layers, tr("编辑嵌套合成…"), {}, [this] {
+    add(layers, QStringLiteral("编辑嵌套合成…"), {}, [this] {
         auto* parent = canvas();
         if (!parent)
             return;
@@ -1445,10 +2304,11 @@ void EditorController::configure_menus() {
                     target->pixels = source_pixels;
                 else
                     target->children = result;
+                synchronize_source(state, *target);
             });
         }
     });
-    add(layers, tr("填充颜色 / 渐变…"), {}, [this] {
+    add(layers, QStringLiteral("填充颜色 / 渐变…"), {}, [this] {
         auto* c = canvas();
         if (!c)
             return;
@@ -1471,7 +2331,7 @@ void EditorController::configure_menus() {
             l.gradient = gradient;
         });
     });
-    add(selection, tr("重命名路径…"), {}, [this] {
+    add(selection, QStringLiteral("重命名路径…"), {}, [this] {
         auto* c = canvas();
         auto* item = paths_->currentItem();
         if (!c || !item)
@@ -1488,13 +2348,13 @@ void EditorController::configure_menus() {
                 state.paths.insert(name, value);
             });
     });
-    add(selection, tr("隐藏当前路径"), {}, [this] {
+    add(selection, QStringLiteral("隐藏当前路径"), {}, [this] {
         if (auto* c = canvas()) {
             c->set_path({});
             c->update();
         }
     });
-    add(selection, tr("删除已存路径"), {}, [this] {
+    add(selection, QStringLiteral("删除已存路径"), {}, [this] {
         auto* c = canvas();
         auto* item = paths_->currentItem();
         if (!c || !item)
@@ -1507,15 +2367,15 @@ void EditorController::configure_menus() {
     for (const auto& operation : {tr("左对齐画布"), tr("水平居中画布"), tr("右对齐"), tr("顶对齐"),
                                   tr("垂直居中画布"), tr("底对齐"), tr("水平分布"), tr("垂直分布")})
         add(layers, operation, {}, [this, operation] { align_layers(operation); });
-    add(selection, tr("变换选区…"), {}, [this] {
+    add(selection, QStringLiteral("变换选区…"), {}, [this] {
         if (auto* c = canvas()) {
             c->begin_transform(true);
             c->setFocus();
         }
     });
-    add(view, tr("设置菜单快捷键…"), "Ctrl+Alt+Shift+K", [this] { show_shortcuts(); });
-    add(view, tr("恢复未保存文档…"), {}, [this] { offer_recovery(); });
-    add(view, tr("网格间距…"), {}, [this] {
+    add(view, QStringLiteral("设置菜单快捷键…"), "Ctrl+Alt+Shift+K", [this] { show_shortcuts(); });
+    add(view, QStringLiteral("恢复未保存文档…"), {}, [this] { offer_recovery(); });
+    add(view, QStringLiteral("网格间距…"), {}, [this] {
         if (auto* c = canvas()) {
             bool ok{};
             const double spacing = QInputDialog::getDouble(window_, tr("网格"), tr("间距（像素）"),
@@ -1561,7 +2421,7 @@ void EditorController::configure_menus() {
             if (!action->isSeparator() && action->text() == name)
                 file->addAction(action);
     }
-    subgroup(edit, tr("选择性粘贴"), {tr("原位粘贴"), tr("贴入选区")});
+    subgroup(edit, tr("选择性粘贴"), {tr("原位粘贴"), tr("贴入选区"), tr("贴入选区外")});
     auto* transform_menu = edit->addMenu(tr("变换"));
     move_actions(layers, transform_menu, {tr("数值变换…")});
     auto* comparison_menu = edit->addMenu(tr("比较快照"));
@@ -1600,6 +2460,8 @@ void EditorController::configure_menus() {
     for (auto* menu : {file, edit, layers, selection, view})
         window_->menus_->addMenu(menu);
     window_->menus_->addAction(top.at(2));
+    auto* help=window_->menus_->addMenu(tr("帮助(&H)"));
+    add(help,tr("帮助与诊断…"),"F1",[this]{show_help();});
     for (auto* action : window_->findChildren<QAction*>()) {
         action->setProperty("defaultShortcut", action->shortcut().toString());
         const auto value = QSettings().value("shortcuts/" + (action->property("shortcutKey").isValid() ? action->property("shortcutKey").toString() : action->text()));
@@ -1710,9 +2572,8 @@ void EditorController::configure_menus() {
     }
     const auto choose_color = [this](bool foreground) {
         if (auto* c = canvas()) {
-            const auto selected = QColorDialog::getColor(
-                foreground ? c->foreground : c->background, window_,
-                foreground ? tr("前景色") : tr("背景色"), QColorDialog::DontUseNativeDialog);
+            const auto selected = pick_document_color(foreground ? c->foreground : c->background,
+                                                      c->project().state(), window_);
             if (selected.isValid()) {
                 (foreground ? c->foreground : c->background) = selected;
                 refresh_tools();
@@ -1904,6 +2765,13 @@ void EditorController::configure_menus() {
     brush_settings_button->setText(tr("画笔设置…"));
     options->addWidget(brush_settings_button)->setObjectName("brushSettingsOptions");
     connect(brush_settings_button, &QToolButton::clicked, this, &EditorController::show_brush_settings);
+    auto* tool_presets = new QToolButton(options);
+    tool_presets->setObjectName("toolPresetsButton");
+    tool_presets->setText(tr("工具预设…"));
+    options->addWidget(tool_presets);
+    auto* tool_preset_action = new QAction(tr("工具预设…"), window_);
+    connect(tool_preset_action, &QAction::triggered, this, &EditorController::show_tool_presets);
+    tool_presets->setDefaultAction(tool_preset_action);
     for (const auto& entry : {std::pair{"autoSelect", tr("自动选择：图层")},
                               std::pair{"transformControls", tr("显示变换控件")},
                               std::pair{"keepAspect", tr("保持比例")}}) {

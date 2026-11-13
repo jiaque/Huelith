@@ -27,12 +27,12 @@ AiResult enhance_image(const QImage& image, const EnhanceOptions& options,
                        const std::atomic_bool* cancelled, const AiProgress& progress) {
     if (image.isNull() || !std::isfinite(options.strength) || options.strength < 0 || options.strength > 1 ||
         (options.mode == EnhanceMode::super_resolution && options.scale != 2 && options.scale != 4))
-        throw EditError(QStringLiteral("增强参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "增强参数无效"));
     if (options.mode == EnhanceMode::denoise && options.strength == 0)
         return {image, {{"bypassed", true}}, {}};
     const int factor = options.mode == EnhanceMode::super_resolution ? options.scale : 1;
     if (qint64(image.width()) * image.height() * factor * factor > huelith::editing::maximum_image_pixels)
-        throw EditError(QStringLiteral("结果为 %1 × %2，超过当前工程的 5.12 亿像素上限。请选择较小倍数或先裁剪。")
+        throw EditError(QCoreApplication::translate("Huelith", "结果为 %1 × %2，超过当前工程的 5.12 亿像素上限。请选择较小倍数或先裁剪。")
             .arg(image.width() * factor).arg(image.height() * factor));
     return run_ai_job({{"operation", "enhance"}, {"mode", int(options.mode)}, {"scale", options.scale},
                        {"strength", options.strength}, {"directml", options.directml},
@@ -48,19 +48,19 @@ AiResult infer_enhancement(const QImage& source, const EnhanceOptions& options, 
         name == "midas-small.onnx" ? "2d8c6cb8f415229daf1eb041024208e2608c9f98e17c81cc7c6ecb449c56fd58" : "";
     QFile file(model);
     if (expected.isEmpty() || !file.open(QIODevice::ReadOnly))
-        throw EditError(QStringLiteral("内置增强模型缺失：%1").arg(name));
+        throw EditError(QCoreApplication::translate("Huelith", "内置增强模型缺失：%1").arg(name));
     QCryptographicHash hash(QCryptographicHash::Sha256);
     hash.addData(&file);
     if (hash.result().toHex() != expected)
-        throw EditError(QStringLiteral("增强模型校验失败，请重新安装内置模型"));
+        throw EditError(QCoreApplication::translate("Huelith", "增强模型校验失败，请重新安装内置模型"));
     const bool depth = options.mode == EnhanceMode::depth;
     const int scale = options.mode == EnhanceMode::super_resolution ? options.scale : 1;
     const int native = options.mode == EnhanceMode::super_resolution ? 4 : 1;
     // Bound full-image storage before multiplying integer dimensions or allocating model tensors.
     if (qint64(source.width()) * source.height() * scale * scale > huelith::editing::maximum_image_pixels)
-        throw EditError(QStringLiteral("增强结果超过当前工程的 5.12 亿像素上限"));
+        throw EditError(QCoreApplication::translate("Huelith", "增强结果超过当前工程的 5.12 亿像素上限"));
     const auto rgb = convert_image(source, QColorSpace::SRgb, QImage::Format_RGBA32FPx4);
-    if (rgb.isNull()) throw EditError(QStringLiteral("增强颜色空间转换失败"));
+    if (rgb.isNull()) throw EditError(QCoreApplication::translate("Huelith", "增强颜色空间转换失败"));
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "HuelithEnhance");
     Ort::SessionOptions settings;
     settings.SetIntraOpNumThreads(4);
@@ -73,7 +73,7 @@ AiResult infer_enhancement(const QImage& source, const EnhanceOptions& options, 
     }
     Ort::Session session(env, model.toStdWString().c_str(), settings);
     if (session.GetInputCount() != 1 || session.GetOutputCount() != 1)
-        throw EditError(QStringLiteral("增强模型输入输出数量不匹配"));
+        throw EditError(QCoreApplication::translate("Huelith", "增强模型输入输出数量不匹配"));
     Ort::AllocatorWithDefaultOptions allocator;
     const auto input_name = session.GetInputNameAllocated(0, allocator);
     const auto output_name = session.GetOutputNameAllocated(0, allocator);
@@ -100,11 +100,11 @@ AiResult infer_enhancement(const QImage& source, const EnhanceOptions& options, 
         auto results = run(values, 256, 256);
         const auto info = results[0].GetTensorTypeAndShapeInfo();
         if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || info.GetElementCount() != 65536)
-            throw EditError(QStringLiteral("深度模型输出不兼容"));
+            throw EditError(QCoreApplication::translate("Huelith", "深度模型输出不兼容"));
         const auto* data = results[0].GetTensorData<float>();
         float low = data[0], high = data[0];
         for (int i = 0; i < 65536; ++i) {
-            if (!std::isfinite(data[i])) throw EditError(QStringLiteral("深度模型输出无效"));
+            if (!std::isfinite(data[i])) throw EditError(QCoreApplication::translate("Huelith", "深度模型输出无效"));
             low = std::min(low, data[i]); high = std::max(high, data[i]);
         }
         QImage mask(256, 256, QImage::Format_Grayscale8);
@@ -119,7 +119,7 @@ AiResult infer_enhancement(const QImage& source, const EnhanceOptions& options, 
     constexpr int core = 128, overlap = 32, halo = 32, tile = core + 2 * halo;
     const int ow = rgb.width() * scale, oh = rgb.height() * scale;
     auto output = allocate_image(ow, oh, QImage::Format_RGBA32FPx4);
-    if (output.isNull()) throw EditError(QStringLiteral("增强结果内存不足"));
+    if (output.isNull()) throw EditError(QCoreApplication::translate("Huelith", "增强结果内存不足"));
     output.fill(Qt::transparent);
     output.setColorSpace(QColorSpace::SRgb);
     std::vector<float> values(std::size_t(tile) * tile * 3);
@@ -133,7 +133,7 @@ AiResult infer_enhancement(const QImage& source, const EnhanceOptions& options, 
                 for (int x = 0; x < tile; ++x)
                     for (int c = 0; c < 3; ++c) {
                         const auto value = row[std::clamp(tx + x - halo, 0, rgb.width() - 1) * 4 + c];
-                        if (!std::isfinite(value)) throw EditError(QStringLiteral("增强输入包含无效像素"));
+                        if (!std::isfinite(value)) throw EditError(QCoreApplication::translate("Huelith", "增强输入包含无效像素"));
                         values[std::size_t(c) * tile * tile + y * tile + x] = std::clamp(value, 0.F, 1.F);
                     }
             }
@@ -141,7 +141,7 @@ AiResult infer_enhancement(const QImage& source, const EnhanceOptions& options, 
             const auto info = results[0].GetTensorTypeAndShapeInfo();
             if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
                 info.GetShape() != std::vector<int64_t>{1, 3, tile * native, tile * native})
-                throw EditError(QStringLiteral("增强模型输出尺寸不兼容"));
+                throw EditError(QCoreApplication::translate("Huelith", "增强模型输出尺寸不兼容"));
             const auto* data = results[0].GetTensorData<float>();
             const int width = std::min(core, rgb.width() - tx) * scale;
             const int height = std::min(core, rgb.height() - ty) * scale;
@@ -163,7 +163,7 @@ AiResult infer_enhancement(const QImage& source, const EnhanceOptions& options, 
                             for (int xx = 0; xx < ratio; ++xx)
                                 sum += data[std::size_t(c) * tile * tile * native * native +
                                             (halo * native + y * ratio + yy) * tile * native + halo * native + x * ratio + xx];
-                        if (!std::isfinite(sum)) throw EditError(QStringLiteral("增强模型输出包含无效像素"));
+                        if (!std::isfinite(sum)) throw EditError(QCoreApplication::translate("Huelith", "增强模型输出包含无效像素"));
                         row[(tx * scale + x) * 4 + c] += weight * sum / (ratio * ratio);
                     }
                 }

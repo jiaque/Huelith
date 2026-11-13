@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "merge_storage.h"
 #include "huelith/editing/image_storage.h"
 #include "huelith/editing/photo_merge.h"
@@ -24,7 +25,7 @@ cv::Mat rgba(const QImage& image) {
 }
 QImage image_from(const cv::Mat& pixels) {
     auto image = allocate_image(pixels.cols, pixels.rows, QImage::Format_RGBA32FPx4_Premultiplied);
-    if (image.isNull()) throw EditError(QStringLiteral("合成结果内存不足"));
+    if (image.isNull()) throw EditError(QCoreApplication::translate("Huelith", "合成结果内存不足"));
     image.setColorSpace(working_space());
     for (int y = 0; y < pixels.rows; ++y)
         std::memcpy(image.scanLine(y), pixels.ptr(y), std::size_t(pixels.cols) * 16);
@@ -37,7 +38,7 @@ cv::Mat display_bgr(const QImage& image) {
 }
 void size_guard(cv::Size size) {
     if (size.width < 1 || size.height < 1 || qint64(size.width) * size.height > huelith::editing::maximum_image_pixels)
-        throw EditError(QStringLiteral("合成范围超过当前 5.12 亿像素工程上限"));
+        throw EditError(QCoreApplication::translate("Huelith", "合成范围超过当前 5.12 亿像素工程上限"));
 }
 cv::Mat alignment(const cv::Mat& source, const cv::Mat& reference) {
     const double factor = std::min(1., 1200. / std::max(reference.cols, reference.rows));
@@ -48,7 +49,7 @@ cv::Mat alignment(const cv::Mat& source, const cv::Mat& reference) {
     auto detector = cv::ORB::create(5000);
     std::vector<cv::KeyPoint> ka, kb; cv::Mat da, db;
     detector->detectAndCompute(a, cv::noArray(), ka, da); detector->detectAndCompute(b, cv::noArray(), kb, db);
-    if (da.empty() || db.empty()) throw EditError(QStringLiteral("照片纹理不足，无法自动对齐；可关闭对齐使用已对齐照片"));
+    if (da.empty() || db.empty()) throw EditError(QCoreApplication::translate("Huelith", "照片纹理不足，无法自动对齐；可关闭对齐使用已对齐照片"));
     std::vector<std::vector<cv::DMatch>> pairs;
     cv::BFMatcher(cv::NORM_HAMMING).knnMatch(da, db, pairs, 2);
     std::vector<cv::Point2f> pa, pb;
@@ -56,17 +57,17 @@ cv::Mat alignment(const cv::Mat& source, const cv::Mat& reference) {
         if (pair.size() == 2 && pair[0].distance < .75F * pair[1].distance) {
             pa.push_back(ka[std::size_t(pair[0].queryIdx)].pt); pb.push_back(kb[std::size_t(pair[0].trainIdx)].pt);
         }
-    if (pa.size() < 8) throw EditError(QStringLiteral("照片重叠特征不足，无法可靠对齐"));
+    if (pa.size() < 8) throw EditError(QCoreApplication::translate("Huelith", "照片重叠特征不足，无法可靠对齐"));
     cv::Mat inliers;
     auto affine = cv::estimateAffinePartial2D(pa, pb, inliers, cv::RANSAC, 3., 2000, .995);
     if (affine.empty() || cv::countNonZero(inliers) < 8)
-        throw EditError(QStringLiteral("照片对齐失败，请选择同一场景的图组"));
+        throw EditError(QCoreApplication::translate("Huelith", "照片对齐失败，请选择同一场景的图组"));
     cv::Mat transform = cv::Mat::eye(3, 3, CV_64F);
     affine.copyTo(transform(cv::Rect(0, 0, 3, 2)));
     transform.at<double>(0, 2) /= factor; transform.at<double>(1, 2) /= factor;
     const double determinant = cv::determinant(transform);
     if (!std::isfinite(determinant) || determinant < .25 || determinant > 4)
-        throw EditError(QStringLiteral("对齐变换异常，已中止合成"));
+        throw EditError(QCoreApplication::translate("Huelith", "对齐变换异常，已中止合成"));
     return transform;
 }
 cv::Rect covered_crop(const cv::Mat& mask) {
@@ -86,7 +87,7 @@ cv::Rect covered_crop(const cv::Mat& mask) {
             stack.push_back(x);
         }
     }
-    if (best.empty()) throw EditError(QStringLiteral("照片没有共同覆盖区域"));
+    if (best.empty()) throw EditError(QCoreApplication::translate("Huelith", "照片没有共同覆盖区域"));
     return best;
 }
 }
@@ -109,7 +110,7 @@ AiResult infer_photo_merge(const QJsonObject& request, const AiProgress& progres
     const auto mode = PhotoMergeMode(request["mode"].toInt());
     const int reference = request["reference"].toInt();
     if (paths.size() < 2 || paths.size() > 16 || reference < 0 || reference >= paths.size())
-        throw EditError(QStringLiteral("请选择 2–16 张照片和有效参考图"));
+        throw EditError(QCoreApplication::translate("Huelith", "请选择 2–16 张照片和有效参考图"));
     std::vector<cv::Mat> display, linear;
     qint64 pixel_count{};
     for (const auto& item : paths) {
@@ -119,7 +120,7 @@ AiResult infer_photo_merge(const QJsonObject& request, const AiProgress& progres
         if (extension == "png" || extension == "jpg" || extension == "jpeg" || extension == "tif" || extension == "tiff") image = import_image(path);
         else { const std::atomic_bool cancelled{false}; image = develop_raw(path, RawOptions{}, cancelled).image; }
         pixel_count += qint64(image.width()) * image.height();
-        if (pixel_count > maximum_image_pixels * 16) throw EditError(QStringLiteral("图组总像素超过本次合成内存预算，请减少照片数量"));
+        if (pixel_count > maximum_image_pixels * 16) throw EditError(QCoreApplication::translate("Huelith", "图组总像素超过本次合成内存预算，请减少照片数量"));
         const int edge=request["previewEdge"].toInt();
         if(edge>0 && std::max(image.width(),image.height())>edge)image=image.scaled(edge,edge,Qt::KeepAspectRatio,Qt::SmoothTransformation);
         display.push_back(display_bgr(image)); linear.push_back(rgba(image));
@@ -131,7 +132,7 @@ AiResult infer_photo_merge(const QJsonObject& request, const AiProgress& progres
         stitcher->setRegistrationResol(.8);
         stitcher->setPanoConfidenceThresh(.5);
         if (stitcher->estimateTransform(display) != cv::Stitcher::OK || stitcher->component().size() != linear.size())
-            throw EditError(QStringLiteral("全景对齐失败：照片必须有足够重叠，且全部属于同一全景"));
+            throw EditError(QCoreApplication::translate("Huelith", "全景对齐失败：照片必须有足够重叠，且全部属于同一全景"));
         const auto cameras = stitcher->cameras();
         std::vector<double> focal;
         for (const auto& camera : cameras) focal.push_back(camera.focal / stitcher->workScale());
@@ -212,7 +213,7 @@ AiResult infer_photo_merge(const QJsonObject& request, const AiProgress& progres
     const auto size=linear[std::size_t(reference)].size();
     std::vector<cv::Mat> aligned, masks;
     for(std::size_t i=0;i<linear.size();++i) {
-        if(linear[i].size()!=size)throw EditError(QStringLiteral("HDR / 景深图组必须具有相同像素尺寸"));
+        if(linear[i].size()!=size)throw EditError(QCoreApplication::translate("Huelith", "HDR / 景深图组必须具有相同像素尺寸"));
         auto transform=cv::Mat::eye(3,3,CV_64F);
         cv::Mat matrix=transform;
         if(int(i)!=reference && request["align"].toBool())matrix=alignment(display[i],display[std::size_t(reference)]);
@@ -229,11 +230,11 @@ AiResult infer_photo_merge(const QJsonObject& request, const AiProgress& progres
     if(mode==PhotoMergeMode::hdr) {
         deghost_mask=allocate_image(size.width,size.height,QImage::Format_Grayscale8);deghost_mask.fill(0);
         const auto ev=request["ev"].toArray();
-        if(ev.size()!=paths.size())throw EditError(QStringLiteral("HDR 需要每张照片的相对曝光 EV"));
+        if(ev.size()!=paths.size())throw EditError(QCoreApplication::translate("Huelith", "HDR 需要每张照片的相对曝光 EV"));
         std::vector<float> factors;
         for(const auto& value:ev) {
             const double offset=value.toDouble(999)-ev[reference].toDouble();
-            if(!std::isfinite(offset)||std::abs(offset)>20)throw EditError(QStringLiteral("曝光 EV 无效"));
+            if(!std::isfinite(offset)||std::abs(offset)>20)throw EditError(QCoreApplication::translate("Huelith", "曝光 EV 无效"));
             factors.push_back(float(std::exp2(offset)));
         }
         const double threshold=request["deghost"].toInt()==1?.4:request["deghost"].toInt()==2?.2:.1;
@@ -286,7 +287,7 @@ AiResult infer_photo_merge(const QJsonObject& request, const AiProgress& progres
         }
         for(int y=0;y<size.height;++y)for(int x=0;x<size.width;++x)
             if(weights.at<float>(y,x)>0)output.at<cv::Vec4f>(y,x)/=weights.at<float>(y,x);
-    } else throw EditError(QStringLiteral("未知合成方式"));
+    } else throw EditError(QCoreApplication::translate("Huelith", "未知合成方式"));
     if(request["crop"].toBool()){const auto crop=covered_crop(covered);output=output(crop).clone();
         if(!deghost_mask.isNull())deghost_mask=deghost_mask.copy(crop.x,crop.y,crop.width,crop.height);}
     if(progress)progress(int(paths.size())+3,int(paths.size())+3);

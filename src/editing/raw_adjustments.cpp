@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/image_storage.h"
 #include "huelith/editing/raw_adjustments.h"
 #include "huelith/editing/healing.h"
@@ -19,7 +20,7 @@ namespace {
 double number(const QJsonObject& object, const char* key, double fallback = 0) {
     const double value = object.value(QLatin1String(key)).toDouble(fallback);
     if (!std::isfinite(value) || value < -4 || value > 4)
-        throw EditError(QStringLiteral("局部蒙版坐标无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "局部蒙版坐标无效"));
     return value;
 }
 QPointF point(const QJsonObject& object, QSize size, const char* x, const char* y) {
@@ -29,14 +30,14 @@ QPointF point(const QJsonObject& object, QSize size, const char* x, const char* 
 QImage raw_local_mask(QSize size, const QJsonObject& local, const QJsonObject& geometry,
                       const QImage& reference) {
     if (size.isEmpty() || qint64(size.width()) * size.height() > huelith::editing::maximum_image_pixels)
-        throw EditError(QStringLiteral("局部蒙版尺寸无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "局部蒙版尺寸无效"));
     QImage mask(size, QImage::Format_ARGB32_Premultiplied);
     mask.fill(Qt::transparent);
     QPainter painter(&mask);
     painter.setRenderHint(QPainter::Antialiasing);
     const auto components = local.value("components").toArray();
     if (components.size() > 4096)
-        throw EditError(QStringLiteral("局部蒙版笔画数量超限"));
+        throw EditError(QCoreApplication::translate("Huelith", "局部蒙版笔画数量超限"));
     for (const auto& value : components) {
         const auto component = value.toObject();
         if (!component.value("enabled").toBool(true))
@@ -45,10 +46,10 @@ QImage raw_local_mask(QSize size, const QJsonObject& local, const QJsonObject& g
             component.value("operation")
                 .toString(component.value("subtract").toBool() ? "subtract" : "add");
         if (operation != "add" && operation != "subtract" && operation != "intersect")
-            throw EditError(QStringLiteral("未知蒙版组合操作"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知蒙版组合操作"));
         const double density = number(component, "density", 1);
         if (density < 0 || density > 1)
-            throw EditError(QStringLiteral("蒙版密度无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "蒙版密度无效"));
         if (operation == "intersect" || component.value("invert").toBool() || density != 1) {
             auto single = component;
             single.remove("operation");
@@ -95,26 +96,26 @@ QImage raw_local_mask(QSize size, const QJsonObject& local, const QJsonObject& g
         painter.setPen(Qt::NoPen);
         if (mode == "luminance" || mode == "color") {
             if (reference.isNull() || reference.size() != size)
-                throw EditError(QStringLiteral("范围蒙版缺少对应的源预览"));
+                throw EditError(QCoreApplication::translate("Huelith", "范围蒙版缺少对应的源预览"));
             const auto encoded = display_image(reference).convertToFormat(QImage::Format_ARGB32);
             const double low = number(component, "low", 0), high = number(component, "high", 1),
                          smooth = number(component, "smooth", .1);
             if (low < 0 || high > 1 || low > high || smooth < 0 || smooth > 1)
-                throw EditError(QStringLiteral("明度范围边界无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "明度范围边界无效"));
             const double tolerance = component.value("range").toDouble(50);
             if (!std::isfinite(tolerance) || tolerance < 0 || tolerance > 100)
-                throw EditError(QStringLiteral("颜色范围无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "颜色范围无效"));
             const auto colors = component.value("colors").toArray();
             if (mode == "color" && colors.size() > 5)
-                throw EditError(QStringLiteral("颜色范围最多5个样本"));
+                throw EditError(QCoreApplication::translate("Huelith", "颜色范围最多5个样本"));
             std::vector<PointColor> samples;
             for (const auto& sample : colors) {
                 const auto rgb = sample.toArray();
                 if (rgb.size() != 3)
-                    throw EditError(QStringLiteral("颜色样本无效"));
+                    throw EditError(QCoreApplication::translate("Huelith", "颜色样本无效"));
                 for (const auto& channel : rgb)
                     if (!channel.isDouble() || channel.toDouble() < 0 || channel.toDouble() > 1)
-                        throw EditError(QStringLiteral("颜色样本无效"));
+                        throw EditError(QCoreApplication::translate("Huelith", "颜色样本无效"));
                 auto color = sample_point_color(
                     QColor::fromRgbF(rgb[0].toDouble(), rgb[1].toDouble(), rgb[2].toDouble()));
                 color.range = tolerance;
@@ -156,17 +157,17 @@ QImage raw_local_mask(QSize size, const QJsonObject& local, const QJsonObject& g
         } else if (mode == "bitmap") {
             const auto encoded = component.value("png").toString().toLatin1();
             if (encoded.size() > 2 * 1024 * 1024)
-                throw EditError(QStringLiteral("局部蒙版数据过大"));
+                throw EditError(QCoreApplication::translate("Huelith", "局部蒙版数据过大"));
             auto bytes = QByteArray::fromBase64(encoded, QByteArray::AbortOnBase64DecodingErrors);
             QBuffer buffer(&bytes);
             buffer.open(QIODevice::ReadOnly);
             QImageReader reader(&buffer, "PNG");
             const auto dimensions = reader.size();
             if (dimensions.isEmpty() || dimensions.width() > 1024 || dimensions.height() > 1024)
-                throw EditError(QStringLiteral("局部蒙版图像尺寸无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "局部蒙版图像尺寸无效"));
             auto coverage = reader.read().convertToFormat(QImage::Format_Grayscale8);
             if (coverage.isNull())
-                throw EditError(QStringLiteral("局部蒙版图像损坏"));
+                throw EditError(QCoreApplication::translate("Huelith", "局部蒙版图像损坏"));
             QImage alpha(coverage.size(), QImage::Format_ARGB32_Premultiplied);
             for (int y = 0; y < coverage.height(); ++y) {
                 auto* row = reinterpret_cast<QRgb*>(alpha.scanLine(y));
@@ -201,13 +202,13 @@ QImage raw_local_mask(QSize size, const QJsonObject& local, const QJsonObject& g
         } else if (mode == "brush") {
             const double flow = number(component, "flow", 1);
             if (flow < 0 || flow > 1)
-                throw EditError(QStringLiteral("笔刷流量无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "笔刷流量无效"));
             const QColor coverage = QColor::fromRgbF(1, 1, 1, flow);
             const double radius = std::clamp(number(component, "radius", .03), .0001, 1.) *
                                   std::min(size.width(), size.height());
             const auto points = component.value("points").toArray();
             if (points.size() > 16384)
-                throw EditError(QStringLiteral("局部笔画采样数量超限"));
+                throw EditError(QCoreApplication::translate("Huelith", "局部笔画采样数量超限"));
             std::optional<QPointF> previous;
             for (const auto& sample : points) {
                 const auto p = point(sample.toObject(), size, "x", "y");
@@ -226,7 +227,7 @@ QImage raw_local_mask(QSize size, const QJsonObject& local, const QJsonObject& g
                 previous = p;
             }
         } else
-            throw EditError(QStringLiteral("未知局部蒙版类型"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知局部蒙版类型"));
     }
     painter.end();
     QImage result(size, QImage::Format_Grayscale8);
@@ -246,7 +247,7 @@ QRect raw_crop_rect(QSize size, const QJsonObject& recipe) {
     const auto a = point(object, size, "x", "y"), b = point(object, size, "endX", "endY");
     const auto rect = QRectF(a, b).normalized().toAlignedRect().intersected(constrained);
     if (rect.isEmpty())
-        throw EditError(QStringLiteral("RAW 裁剪范围为空"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 裁剪范围为空"));
     return rect;
 }
 QImage apply_raw_adjustments(const QImage& source, const QJsonObject& recipe, bool crop,
@@ -255,7 +256,7 @@ QImage apply_raw_adjustments(const QImage& source, const QJsonObject& recipe, bo
     const auto orientation=recipe.value("quarterTurns");
     const int turns=orientation.toInt();
     if(!orientation.isUndefined() && (!orientation.isDouble() || orientation.toDouble()!=turns || turns<0 || turns>3))
-        throw EditError(QStringLiteral("RAW 方向参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 方向参数无效"));
     auto settings = tone_from_json(recipe.value("tone").toObject());
     if (!recipe.contains("tone"))
         settings.exposure = recipe.value("exposure").toDouble();
@@ -273,12 +274,12 @@ QImage apply_raw_adjustments(const QImage& source, const QJsonObject& recipe, bo
         return result;
     const auto locals = recipe.value("locals").toArray();
     if (locals.size() > 64)
-        throw EditError(QStringLiteral("局部调整数量超过 64 个"));
+        throw EditError(QCoreApplication::translate("Huelith", "局部调整数量超过 64 个"));
     const QImage range_reference = result;
     for (int index = 0; index < locals.size(); ++index) {
         const auto value = locals[index];
         if (cancelled && cancelled->load())
-            throw EditError(QStringLiteral("图像处理已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "图像处理已取消"));
         const auto local = value.toObject();
         if (!local.value("enabled").toBool(true))
             continue;

@@ -11,6 +11,7 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QImageReader>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QListWidget>
@@ -19,6 +20,7 @@
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <chrono>
 #include <future>
 
@@ -46,10 +48,22 @@ void EditorController::show_layer_styles() {
         QListWidget list;
         list.setObjectName("styleEffects");
         list.setFixedWidth(170);
-        const QStringList names{tr("描边"),   tr("投影"),   tr("内阴影"),
-                                tr("外发光"), tr("内发光"), tr("颜色叠加")};
-        for (int i = 0; i < names.size(); ++i) {
-            auto* item = new QListWidgetItem(names[i], &list);
+        const QStringList names{tr("描边"),     tr("投影"),     tr("内阴影"),   tr("外发光"),
+                                tr("内发光"),   tr("颜色叠加"), tr("渐变叠加"), tr("图案叠加"),
+                                tr("斜面浮雕"), tr("光泽")};
+        for (int kind = 6; kind < 10; ++kind)
+            if (std::none_of(styles.entries.begin(), styles.entries.end(),
+                             [&](const auto& s) { return s.kind == kind; })) {
+                LayerStyle added;
+                added.kind = kind;
+                if (kind == 6 || kind == 7) {
+                    added.size = 100;
+                    added.global_light = false;
+                }
+                styles.entries.push_back(added);
+            }
+        for (int i = 0; i < int(styles.entries.size()); ++i) {
+            auto* item = new QListWidgetItem(names[styles.entries[i].kind], &list);
             item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
             item->setCheckState(styles.entries[i].enabled ? Qt::Checked : Qt::Unchecked);
         }
@@ -69,6 +83,9 @@ void EditorController::show_layer_styles() {
         QPushButton color(tr("颜色…"));
         color.setObjectName("styleColor");
         form.addRow(tr("颜色"), &color);
+        QPushButton color2(tr("第二颜色 / 高光…")), pattern(tr("载入图案…"));
+        form.addRow(&color2);
+        form.addRow(&pattern);
         auto number = [&](const char* name, const QString& title, double minimum, double maximum) {
             auto* spin = new QDoubleSpinBox(&dialog);
             spin->setObjectName(name);
@@ -81,6 +98,11 @@ void EditorController::show_layer_styles() {
         auto* distance = number("styleDistance", tr("距离 px"), 0, 1000);
         auto* spread = number("styleSpread", tr("扩展 / 阻塞 %"), 0, 100);
         auto* angle = number("styleAngle", tr("角度"), -360, 360);
+        auto* style_scale = number("styleScale", tr("全部样式缩放 %"), 1, 1000);
+        QComboBox contour;
+        contour.setObjectName("styleContour");
+        contour.addItems({tr("线性"), tr("平滑"), tr("内凹"), tr("外凸")});
+        form.addRow(tr("等高线"), &contour);
         QCheckBox global(tr("使用全局光"));
         global.setObjectName("styleGlobalLight");
         form.addRow(&global);
@@ -113,8 +135,10 @@ void EditorController::show_layer_styles() {
         const auto proxy = preview_state(base.state, 512);
         auto refresh = [&] {
             updating = true;
-            const int index = std::max(0, list.currentRow());
-            const auto& s = styles.entries[index];
+            const auto& s = styles.entries[std::max(0, list.currentRow())];
+            const int index = s.kind;
+            style_scale->setValue(styles.scale * 100);
+            contour.setCurrentIndex(s.contour);
             mode.setCurrentIndex(int(s.blend));
             opacity->setValue(s.opacity * 100);
             size->setValue(s.size);
@@ -123,16 +147,29 @@ void EditorController::show_layer_styles() {
             global.setChecked(s.global_light);
             angle->setValue(s.global_light ? styles.global_angle : s.angle);
             position.clear();
-            position.addItems(index == 0 ? QStringList{tr("外部"), tr("内部"), tr("居中")}
-                                         : QStringList{tr("边缘"), tr("中心")});
+            position.addItems(index == 0   ? QStringList{tr("外部"), tr("内部"), tr("居中")}
+                              : index == 6 ? QStringList{tr("线性"), tr("径向")}
+                                           : QStringList{tr("边缘"), tr("中心")});
             position.setCurrentIndex(std::min(s.position, position.count() - 1));
             color.setStyleSheet(QString("background:%1;").arg(s.color.name()));
             form.setRowVisible(size, index != 5);
-            form.setRowVisible(distance, index == 1 || index == 2);
+            color2.setStyleSheet(QString("background:%1;").arg(s.color2.name()));
+            form.setRowVisible(&color2, index == 6 || index == 8);
+            form.setRowVisible(&pattern, index == 7);
+            pattern.setText(
+                s.pattern.isNull()
+                    ? tr("载入图案…")
+                    : tr("替换图案（%1 × %2）…").arg(s.pattern.width()).arg(s.pattern.height()));
+            form.setRowVisible(distance, index == 1 || index == 2 || index == 8 || index == 9);
             form.setRowVisible(spread, index >= 1 && index <= 4);
-            form.setRowVisible(angle, index == 1 || index == 2);
-            form.setRowVisible(&global, index == 1 || index == 2);
-            form.setRowVisible(&position, index == 0 || index == 4);
+            form.setRowVisible(angle,
+                               index == 1 || index == 2 || index == 6 || index == 8 || index == 9);
+            form.setRowVisible(&global, index == 1 || index == 2 || index == 8);
+            form.setRowVisible(&position, index == 0 || index == 4 || index == 6);
+            if (auto* label = qobject_cast<QLabel*>(form.labelForField(size)))
+                label->setText(index == 6 || index == 7 ? tr("缩放 %") : tr("大小 px"));
+            if (auto* label = qobject_cast<QLabel*>(form.labelForField(distance)))
+                label->setText(index == 8 ? tr("深度") : tr("距离 px"));
             updating = false;
         };
         auto apply = [&] {
@@ -144,6 +181,8 @@ void EditorController::show_layer_styles() {
             s.size = size->value();
             s.distance = distance->value();
             s.spread = spread->value() / 100;
+            styles.scale = style_scale->value() / 100;
+            s.contour = contour.currentIndex();
             s.global_light = global.isChecked();
             s.position = position.currentIndex();
             if (s.global_light)
@@ -157,10 +196,24 @@ void EditorController::show_layer_styles() {
             styles.entries[list.row(item)].enabled = item->checkState() == Qt::Checked;
             dirty = true;
         });
-        for (auto* spin : {opacity, size, distance, spread, angle})
+        for (auto* spin : {opacity, size, distance, spread, angle, style_scale})
             connect(spin, &QDoubleSpinBox::valueChanged, &dialog, [&](double) { apply(); });
         connect(&mode, &QComboBox::currentIndexChanged, &dialog, [&](int) { apply(); });
         connect(&position, &QComboBox::currentIndexChanged, &dialog, [&](int) { apply(); });
+        connect(&contour, &QComboBox::currentIndexChanged, &dialog, [&](int) { apply(); });
+        QPushButton duplicate(tr("添加同类效果"));
+        middle->addWidget(&duplicate);
+        connect(&duplicate, &QPushButton::clicked, &dialog, [&] {
+            if (list.currentRow() < 0 || styles.entries.size() >= 32)
+                return;
+            const auto copy = styles.entries[list.currentRow()];
+            styles.entries.push_back(copy);
+            auto* item = new QListWidgetItem(names[copy.kind], &list);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(copy.enabled ? Qt::Checked : Qt::Unchecked);
+            list.setCurrentRow(list.count() - 1);
+            dirty = true;
+        });
         connect(&global, &QCheckBox::toggled, &dialog, [&](bool) { apply(); });
         connect(&enabled, &QCheckBox::toggled, &dialog, [&](bool) { dirty = true; });
         connect(&color, &QPushButton::clicked, &dialog, [&] {
@@ -171,6 +224,38 @@ void EditorController::show_layer_styles() {
                 dirty = true;
                 refresh();
             }
+        });
+        connect(&color2, &QPushButton::clicked, &dialog, [&] {
+            auto& s = styles.entries[list.currentRow()];
+            const auto picked = QColorDialog::getColor(s.color2, &dialog, tr("第二颜色 / 高光"));
+            if (picked.isValid()) {
+                s.color2 = picked;
+                dirty = true;
+                refresh();
+            }
+        });
+        connect(&pattern, &QPushButton::clicked, &dialog, [&] {
+            const auto path = QFileDialog::getOpenFileName(&dialog, tr("图案"), {},
+                                                           "Images (*.png *.jpg *.jpeg)");
+            if (path.isEmpty())
+                return;
+            QImageReader reader(path);
+            const auto source_size = reader.size();
+            if (source_size.isEmpty() ||
+                qint64(source_size.width()) * source_size.height() > 32000000) {
+                error.setText(tr("图案尺寸无效或超过 3200 万像素"));
+                return;
+            }
+            if (source_size.width() > 512 || source_size.height() > 512)
+                reader.setScaledSize(source_size.scaled(512, 512, Qt::KeepAspectRatio));
+            auto image = reader.read();
+            if (image.isNull()) {
+                error.setText(reader.errorString());
+                return;
+            }
+            styles.entries[list.currentRow()].pattern = image;
+            dirty = true;
+            refresh();
         });
         connect(&save, &QPushButton::clicked, &dialog, [&] {
             const auto path = QFileDialog::getSaveFileName(&dialog, tr("保存图层样式"), {},
@@ -190,12 +275,19 @@ void EditorController::show_layer_styles() {
                 return;
             try {
                 QFile file(path);
-                if (!file.open(QIODevice::ReadOnly) || file.size() > 65536)
+                if (!file.open(QIODevice::ReadOnly) || file.size() > 64 * 1024 * 1024)
                     throw EditError(tr("样式文件不可读或过大"));
                 styles = styles_from_json(QJsonDocument::fromJson(file.readAll()).object());
-                for (int i = 0; i < 6; ++i)
-                    list.item(i)->setCheckState(styles.entries[i].enabled ? Qt::Checked
-                                                                          : Qt::Unchecked);
+                {
+                    const QSignalBlocker blocker(&list);
+                    list.clear();
+                    for (const auto& s : styles.entries) {
+                        auto* item = new QListWidgetItem(names[s.kind], &list);
+                        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+                        item->setCheckState(s.enabled ? Qt::Checked : Qt::Unchecked);
+                    }
+                    list.setCurrentRow(0);
+                }
                 dirty = true;
                 refresh();
             } catch (const std::exception& e) {

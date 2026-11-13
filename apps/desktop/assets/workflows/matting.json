@@ -1,0 +1,71 @@
+{
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "source.png"
+    }
+  },
+  "3": {
+    "class_type": "LoadImageMask",
+    "inputs": {
+      "image": "mask.png",
+      "channel": "red"
+    }
+  },
+  "4": {
+    "class_type": "CreateTrimap",
+    "inputs": {
+      "mask": [
+        "3",
+        0
+      ],
+      "kernel_size": 9
+    }
+  },
+  "5": {
+    "class_type": "MattingModelLoader",
+    "inputs": {
+      "model_name": "vitmatte_small (103 MB)"
+    }
+  },
+  "6": {
+    "class_type": "ApplyMatting",
+    "inputs": {
+      "matting_model": [
+        "5",
+        0
+      ],
+      "matting_preprocessor": [
+        "5",
+        1
+      ],
+      "image": [
+        "2",
+        0
+      ],
+      "trimap": [
+        "4",
+        0
+      ]
+    }
+  },
+  "8": {
+    "class_type": "MaskToImage",
+    "inputs": {
+      "mask": [
+        "6",
+        1
+      ]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "8",
+        0
+      ],
+      "filename_prefix": "Huelith-matte"
+    }
+  }
+}

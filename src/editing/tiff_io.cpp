@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/image_storage.h"
 #include "huelith/editing/tiff_io.h"
 #include <QFile>
@@ -33,7 +34,7 @@ TIFF* open_device(QIODevice& device, const char* mode) {
 }
 void check(int status) {
     if (status != 1)
-        throw EditError(QStringLiteral("TIFF 数据读写失败"));
+        throw EditError(QCoreApplication::translate("Huelith", "TIFF 数据读写失败"));
 }
 } // namespace
 QImage read_tiff(const QString& path) {
@@ -42,7 +43,7 @@ QImage read_tiff(const QString& path) {
         throw EditError(file.errorString());
     Tiff handle(open_device(file, "r"), TIFFClose);
     if (!handle)
-        throw EditError(QStringLiteral("TIFF 头无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "TIFF 头无效"));
     auto* tiff = handle.get();
     uint32_t width{}, height{};
     uint16_t bits{}, samples{}, planar{}, photometric{}, orientation{}, format{};
@@ -54,29 +55,39 @@ QImage read_tiff(const QString& path) {
     TIFFGetFieldDefaulted(tiff, TIFFTAG_ORIENTATION, &orientation);
     TIFFGetFieldDefaulted(tiff, TIFFTAG_SAMPLEFORMAT, &format);
     check(TIFFGetField(tiff, TIFFTAG_PHOTOMETRIC, &photometric));
-    if (!width || !height || uint64_t(width) * height > huelith::editing::maximum_image_pixels || (bits != 8 && bits != 16) ||
-        (samples != 3 && samples != 4) || planar != PLANARCONFIG_CONTIG ||
-        photometric != PHOTOMETRIC_RGB || format != SAMPLEFORMAT_UINT || orientation < 1 ||
-        orientation > 8 || TIFFIsTiled(tiff))
-        throw EditError(QStringLiteral("当前支持条带式 RGB/RGBA 8/16 位 TIFF；此文件布局不受支持"));
+    const bool cmyk = photometric == PHOTOMETRIC_SEPARATED;
+    uint16_t inkset{};
+    TIFFGetFieldDefaulted(tiff, TIFFTAG_INKSET, &inkset);
+    if (!width || !height || uint64_t(width) * height > huelith::editing::maximum_image_pixels ||
+        (bits != 8 && bits != 16) || (samples != 3 && samples != 4) ||
+        planar != PLANARCONFIG_CONTIG || (photometric != PHOTOMETRIC_RGB && !cmyk) ||
+        (cmyk && (bits != 8 || samples != 4 || inkset != INKSET_CMYK)) ||
+        format != SAMPLEFORMAT_UINT || orientation < 1 || orientation > 8 || TIFFIsTiled(tiff))
+        throw EditError(QCoreApplication::translate("Huelith", "当前支持条带式 RGB/RGBA 8/16 位及带 ICC 的 CMYK 8 位 TIFF；此布局不受支持"));
     uint16_t extra_count{}, *extra{};
     TIFFGetFieldDefaulted(tiff, TIFFTAG_EXTRASAMPLES, &extra_count, &extra);
-    if (samples == 4 &&
+    if (!cmyk && samples == 4 &&
         (extra_count != 1 || !extra ||
          (extra[0] != EXTRASAMPLE_ASSOCALPHA && extra[0] != EXTRASAMPLE_UNASSALPHA)))
-        throw EditError(QStringLiteral("TIFF 透明度语义不明确"));
-    const bool associated = samples == 4 && extra[0] == EXTRASAMPLE_ASSOCALPHA;
-    auto image = allocate_image(int(width), int(height),
-                 associated ? QImage::Format_RGBA64_Premultiplied : QImage::Format_RGBA64);
+        throw EditError(QCoreApplication::translate("Huelith", "TIFF 透明度语义不明确"));
+    const bool associated = !cmyk && samples == 4 && extra[0] == EXTRASAMPLE_ASSOCALPHA;
+    auto image = allocate_image(
+        int(width), int(height),
+        cmyk ? QImage::Format_CMYK8888
+             : (associated ? QImage::Format_RGBA64_Premultiplied : QImage::Format_RGBA64));
     if (image.isNull())
-        throw EditError(QStringLiteral("TIFF 内存不足"));
+        throw EditError(QCoreApplication::translate("Huelith", "TIFF 内存不足"));
     const auto line_size = TIFFScanlineSize64(tiff);
     const auto expected = uint64_t(width) * samples * (bits / 8);
     if (line_size != expected)
-        throw EditError(QStringLiteral("TIFF 行数据尺寸无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "TIFF 行数据尺寸无效"));
     std::vector<uint16_t> line((std::size_t(line_size) + 1) / 2);
     for (uint32_t y = 0; y < height; ++y) {
         check(TIFFReadScanline(tiff, line.data(), y));
+        if (cmyk) {
+            std::memcpy(image.scanLine(int(y)), line.data(), std::size_t(line_size));
+            continue;
+        }
         auto* output = reinterpret_cast<QRgba64*>(image.scanLine(int(y)));
         for (uint32_t x = 0; x < width; ++x) {
             std::array<quint16, 4> value{0, 0, 0, 65535};
@@ -93,13 +104,15 @@ QImage read_tiff(const QString& path) {
     void* profile{};
     if (TIFFGetField(tiff, TIFFTAG_ICCPROFILE, &profile_length, &profile)) {
         if (profile_length > 16 * 1024 * 1024)
-            throw EditError(QStringLiteral("TIFF ICC 配置过大"));
+            throw EditError(QCoreApplication::translate("Huelith", "TIFF ICC 配置过大"));
         const auto space = QColorSpace::fromIccProfile(
             QByteArray(static_cast<const char*>(profile), profile_length));
-        if (!space.isValid())
-            throw EditError(QStringLiteral("TIFF ICC 配置无效"));
+        if (!space.isValid() || (cmyk && space.colorModel() != QColorSpace::ColorModel::Cmyk))
+            throw EditError(QCoreApplication::translate("Huelith", "TIFF ICC 配置无效"));
         image.setColorSpace(space);
     } else {
+        if (cmyk)
+            throw EditError(QCoreApplication::translate("Huelith", "CMYK TIFF 缺少 ICC，无法准确解释颜色"));
         image.setColorSpace(QColorSpace::SRgb);
     }
     if (orientation == 2)
@@ -122,21 +135,28 @@ void write_tiff(const QImage& source, const QString& path, int bits,
                 const std::atomic_bool& cancelled, double ppi) {
     if (source.isNull() || (bits != 8 && bits != 16) || !source.colorSpace().isValid() ||
         !std::isfinite(ppi) || ppi <= 0 || ppi > 100000)
-        throw EditError(QStringLiteral("TIFF 输出参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "TIFF 输出参数无效"));
+    const bool cmyk = source.colorSpace().colorModel() == QColorSpace::ColorModel::Cmyk;
+    if (cmyk && (bits != 8 || source.format() != QImage::Format_CMYK8888))
+        throw EditError(QCoreApplication::translate("Huelith", "CMYK TIFF 需要 8 位 CMYK 像素"));
     const auto image =
-        convert_image(source, source.colorSpace(), bits == 16 ? QImage::Format_RGBA64 : QImage::Format_RGBA8888);
+        cmyk ? source
+             : convert_image(source, source.colorSpace(),
+                             bits == 16 ? QImage::Format_RGBA64 : QImage::Format_RGBA8888);
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))
         throw EditError(file.errorString());
     Tiff handle(open_device(file, image.sizeInBytes() > 3500000000LL ? "w8" : "w"), TIFFClose);
     if (!handle)
-        throw EditError(QStringLiteral("无法创建 TIFF"));
+        throw EditError(QCoreApplication::translate("Huelith", "无法创建 TIFF"));
     auto* tiff = handle.get();
     check(TIFFSetField(tiff, TIFFTAG_IMAGEWIDTH, uint32_t(image.width())));
     check(TIFFSetField(tiff, TIFFTAG_IMAGELENGTH, uint32_t(image.height())));
     check(TIFFSetField(tiff, TIFFTAG_BITSPERSAMPLE, bits));
     check(TIFFSetField(tiff, TIFFTAG_SAMPLESPERPIXEL, 4));
-    check(TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB));
+    check(TIFFSetField(tiff, TIFFTAG_PHOTOMETRIC, cmyk ? PHOTOMETRIC_SEPARATED : PHOTOMETRIC_RGB));
+    if (cmyk)
+        check(TIFFSetField(tiff, TIFFTAG_INKSET, INKSET_CMYK));
     check(TIFFSetField(tiff, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG));
     check(TIFFSetField(tiff, TIFFTAG_COMPRESSION, COMPRESSION_ADOBE_DEFLATE));
     check(TIFFSetField(tiff, TIFFTAG_PREDICTOR, PREDICTOR_HORIZONTAL));
@@ -145,19 +165,20 @@ void write_tiff(const QImage& source, const QString& path, int bits,
     check(TIFFSetField(tiff, TIFFTAG_YRESOLUTION, ppi));
     check(TIFFSetField(tiff, TIFFTAG_RESOLUTIONUNIT, RESUNIT_INCH));
     uint16_t extra = EXTRASAMPLE_UNASSALPHA;
-    check(TIFFSetField(tiff, TIFFTAG_EXTRASAMPLES, 1, &extra));
+    if (!cmyk)
+        check(TIFFSetField(tiff, TIFFTAG_EXTRASAMPLES, 1, &extra));
     const auto profile = image.colorSpace().iccProfile();
     check(TIFFSetField(tiff, TIFFTAG_ICCPROFILE, uint32_t(profile.size()), profile.constData()));
     for (int y = 0; y < image.height(); ++y) {
         if (cancelled.load())
-            throw EditError(QStringLiteral("TIFF 导出已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "TIFF 导出已取消"));
         QByteArray row(reinterpret_cast<const char*>(image.constScanLine(y)), image.bytesPerLine());
         check(TIFFWriteScanline(tiff, row.data(), uint32_t(y)));
     }
     check(TIFFWriteDirectory(tiff));
     handle.reset();
     if (cancelled.load())
-        throw EditError(QStringLiteral("TIFF 导出已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "TIFF 导出已取消"));
     if (!file.commit())
         throw EditError(file.errorString());
 }

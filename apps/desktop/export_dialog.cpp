@@ -1,6 +1,8 @@
-#include "huelith/editing/image_storage.h"
 #include "export_dialog.h"
 #include "canvas_view.h"
+#include "credential_workflow.h"
+#include "huelith/editing/image_storage.h"
+#include "huelith/editing/layout_regions.h"
 #include "window_header.h"
 #include <QCheckBox>
 #include <QColorDialog>
@@ -25,35 +27,57 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <algorithm>
+#include <cmath>
 
 namespace huelith::desktop {
 namespace {
-QString output_name(QString pattern, QString name, int size, int index) {
+QString output_name(QString pattern, QString name, QString size, int index) {
     name.replace(QRegularExpression(R"([<>:"/\\|?*\x00-\x1f])"), "_");
     pattern.replace("{name}", name);
-    pattern.replace("{size}", size == 0 ? QStringLiteral("original") : QString::number(size));
+    pattern.replace("{size}", size);
     pattern.replace("{index}", QString::number(index).rightJustified(3, '0'));
     if (pattern.trimmed().isEmpty() ||
         pattern.contains(QRegularExpression(R"([<>:"/\\|?*{}\x00-\x1f])")) ||
         pattern.endsWith('.') || pattern.endsWith(' '))
-        throw editing::EditError(QStringLiteral("命名规则包含无效字符或未知占位符"));
+        throw editing::EditError(QObject::tr("命名规则包含无效字符或未知占位符"));
     return pattern;
 }
-QList<int> parse_sizes(QString text) {
+struct ExportSize {
+    int edge{};
+    double scale{1};
+    QString label;
+};
+QList<ExportSize> parse_sizes(QString text) {
     text.replace(QChar(0xff0c), ',');
-    QList<int> result;
+    QList<ExportSize> result;
     for (const auto& part : text.split(',', Qt::SkipEmptyParts)) {
         bool ok{};
         const auto token = part.trimmed();
-        const int value = token == QStringLiteral("原图") ? 0 : token.toInt(&ok);
-        if ((token != QStringLiteral("原图") && !ok) || value < 0 || value > 65536)
-            throw editing::EditError(
-                QStringLiteral("尺寸请输入原图或 1–65536 的长边像素，以逗号分隔"));
-        if (!result.contains(value))
+        ExportSize value;
+        if (token == QStringLiteral("原图") || token == QObject::tr("原图") ||
+            token.compare("original", Qt::CaseInsensitive) == 0 || token == "0")
+            value.label = "original";
+        else if (token.endsWith('x', Qt::CaseInsensitive) || token.endsWith('%')) {
+            value.scale = token.chopped(1).toDouble(&ok);
+            if (token.endsWith('%'))
+                value.scale /= 100;
+            if (!ok || !std::isfinite(value.scale) || value.scale < .01 || value.scale > 16)
+                throw editing::EditError(QObject::tr("倍率请输入 0.01x–16x 或 1%–1600%"));
+            value.label = QString::number(value.scale) + "x";
+        } else {
+            value.edge = token.toInt(&ok);
+            if (!ok || value.edge < 1 || value.edge > 65536)
+                throw editing::EditError(
+                    QObject::tr("请输入原图、长边像素或倍率（例如 0.5x, 2x），以逗号分隔"));
+            value.label = QString::number(value.edge);
+        }
+        if (std::none_of(result.begin(), result.end(),
+                         [&](const auto& existing) { return existing.label == value.label; }))
             result.append(value);
     }
     if (result.isEmpty() || result.size() > 12)
-        throw editing::EditError(QStringLiteral("请选择 1–12 个导出尺寸"));
+        throw editing::EditError(QObject::tr("请选择 1–12 个导出尺寸"));
     return result;
 }
 } // namespace
@@ -72,6 +96,13 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
     files_->setMaximumWidth(220);
     setup->addWidget(files_);
     auto* form = new QFormLayout;
+    scope_ = new QComboBox(this);
+    scope_->setObjectName("exportScope");
+    scope_->addItems({tr("整个文档"), tr("选中图层（分别导出）"), tr("全部画板"), tr("全部切片")});
+    form->addRow(tr("导出范围"), scope_);
+    credentials_ = new QCheckBox(tr("附加 C2PA 内容凭证（需要外部签名程序）"), this);
+    credentials_->setObjectName("exportCredentials");
+    form->addRow(credentials_);
     directory_ = new QLineEdit(QSettings().value("exportQueue/directory").toString(), this);
     directory_->setObjectName("exportQueueDirectory");
     auto* directory_row = new QHBoxLayout;
@@ -85,9 +116,9 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
         if (!path.isEmpty())
             directory_->setText(path);
     });
-    sizes_ = new QLineEdit(QSettings().value("exportQueue/sizes", "原图, 2048").toString(), this);
+    sizes_ = new QLineEdit(QSettings().value("exportQueue/sizes", tr("原图, 2048")).toString(), this);
     sizes_->setObjectName("exportQueueSizes");
-    form->addRow(tr("长边尺寸"), sizes_);
+    form->addRow(tr("长边 / 倍率"), sizes_);
     naming_ = new QLineEdit(
         QSettings().value("exportQueue/naming", "{name}_{size}_{index}").toString(), this);
     naming_->setObjectName("exportQueueNaming");
@@ -100,7 +131,34 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
     profile_ = new QComboBox(this);
     profile_->setObjectName("exportQueueProfile");
     profile_->addItems({"sRGB", "Adobe RGB", "Display P3", "ProPhoto RGB"});
+    profile_->addItem(tr("自定 ICC（先载入）"));
     form->addRow(tr("输出色彩空间 / 嵌入 ICC"), profile_);
+    auto* load_icc = new QPushButton(tr("载入输出 ICC…"), this);
+    form->addRow(load_icc);
+    connect(load_icc, &QPushButton::clicked, this, [this] {
+        const auto path =
+            QFileDialog::getOpenFileName(this, tr("输出 ICC"), {}, "ICC (*.icc *.icm)");
+        if (path.isEmpty())
+            return;
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly) || file.size() > 4 * 1024 * 1024) {
+            message_->setText(tr("ICC 文件不可读或超过 4 MB"));
+            return;
+        }
+        const auto space = QColorSpace::fromIccProfile(file.readAll());
+        if (!space.isValid() || !space.isValidTarget()) {
+            message_->setText(tr("ICC 不支持输出转换"));
+            return;
+        }
+        custom_profile_ = space;
+        profile_->setItemText(4, space.description());
+        profile_->setCurrentIndex(4);
+        if (space.colorModel() == QColorSpace::ColorModel::Cmyk) {
+            format_->setCurrentIndex(3);
+            alpha_->setChecked(false);
+            message_->setText(tr("CMYK 使用 8 位 TIFF；透明区域按背景填充色合成"));
+        }
+    });
     quality_ = new QSpinBox(this);
     quality_->setObjectName("exportQueueQuality");
     quality_->setRange(1, 100);
@@ -225,13 +283,27 @@ void ExportDialog::update_example() {
                                                               : ".png";
         example_->setText(
             QDir(directory_->text())
-                .filePath(output_name(naming_->text(), tr("照片"), size, 1) + extension));
+                .filePath(output_name(naming_->text(), tr("照片"), size.label, 1) + extension));
         quality_->setEnabled(format_->currentIndex() == 2);
         alpha_->setEnabled(format_->currentIndex() != 2);
         matte_->setEnabled(format_->currentIndex() == 2 || !alpha_->isChecked());
     } catch (const std::exception& error) {
         example_->setText(QString::fromUtf8(error.what()));
     }
+}
+void ExportDialog::quick_export(CanvasView* canvas) {
+    set_sources({canvas});
+    scope_->setCurrentIndex(0);
+    sizes_->setText(tr("原图"));
+    if (!QDir(directory_->text()).exists() || directory_->text().isEmpty()) {
+        const auto path = QFileDialog::getExistingDirectory(this, tr("快速导出目录"));
+        if (path.isEmpty())
+            return;
+        directory_->setText(path);
+    }
+    enqueue();
+    show();
+    raise();
 }
 void ExportDialog::enqueue() {
     try {
@@ -263,37 +335,57 @@ void ExportDialog::enqueue() {
                 continue;
             if (canvas && canvas->transforming())
                 throw editing::EditError(tr("请先确认或取消当前变换，再提交导出快照"));
-            const auto snapshot = canvas?canvas->project().snapshot():snapshots_[i];
-            ++index;
-            for (const auto length : sizes) {
-                editing::ExportOptions options;
-                options.metadata={metadata_[0]->isChecked(),metadata_[1]->isChecked(),metadata_[2]->isChecked(),metadata_[3]->isChecked(),metadata_[4]->isChecked()};
-                for(int m=0;m<5;++m)QSettings().setValue(QString("exportQueue/metadata%1").arg(m),metadata_[m]->isChecked());
-                options.format = format_->currentIndex() == 2   ? "jpg"
-                                 : format_->currentIndex() >= 3 ? "tif"
-                                                                : "png";
-                options.bits =
-                    format_->currentIndex() == 1 || format_->currentIndex() == 4 ? 16 : 8;
-                options.quality = quality_->value();
-                const std::array<QColorSpace::NamedColorSpace, 4> spaces{
-                    QColorSpace::SRgb, QColorSpace::AdobeRgb, QColorSpace::DisplayP3,
-                    QColorSpace::ProPhotoRgb};
-                options.space = QColorSpace(spaces[profile_->currentIndex()]);
-                options.alpha = alpha_->isChecked();
-                options.matte = matte_->property("matte").value<QColor>();
-                options.conflict = static_cast<editing::ExportConflict>(conflict_->currentIndex());
-                options.protected_paths = protected_paths;
-                options.size =
-                    length == 0 ? snapshot.state.size
-                                : snapshot.state.size.scaled(length, length, Qt::KeepAspectRatio);
-                options.size = options.size.expandedTo(QSize(1, 1));
-                if (qint64(options.size.width()) * options.size.height() > huelith::editing::maximum_image_pixels)
-                    throw editing::EditError(tr("输出超过 5.12 亿像素预算"));
-                options.path =
-                    QDir(directory_->text())
-                        .filePath(output_name(naming_->text(), snapshot.state.name, length, index) +
-                                  "." + options.format);
-                prepared.emplace_back(snapshot, std::move(options));
+            const auto original = canvas ? canvas->project().snapshot() : snapshots_[i];
+            for (const auto& snapshot :
+                 editing::export_regions(original, scope_->currentIndex(),
+                                         canvas ? canvas->selected_layers : std::vector<QUuid>{})) {
+                ++index;
+                for (const auto& size : sizes) {
+                    editing::ExportOptions options;
+                    options.credentials = credentials_->isChecked();
+                    options.credential_settings = configured_credentials();
+                    if (options.credentials && options.credential_settings.signer.isEmpty())
+                        throw editing::EditError(tr("请先在“文件 → 内容凭证”中配置外部签名程序"));
+                    options.metadata = {metadata_[0]->isChecked(), metadata_[1]->isChecked(),
+                                        metadata_[2]->isChecked(), metadata_[3]->isChecked(),
+                                        metadata_[4]->isChecked()};
+                    for (int m = 0; m < 5; ++m)
+                        QSettings().setValue(QString("exportQueue/metadata%1").arg(m),
+                                             metadata_[m]->isChecked());
+                    options.format = format_->currentIndex() == 2   ? "jpg"
+                                     : format_->currentIndex() >= 3 ? "tif"
+                                                                    : "png";
+                    options.bits =
+                        format_->currentIndex() == 1 || format_->currentIndex() == 4 ? 16 : 8;
+                    options.quality = quality_->value();
+                    const std::array<QColorSpace::NamedColorSpace, 4> spaces{
+                        QColorSpace::SRgb, QColorSpace::AdobeRgb, QColorSpace::DisplayP3,
+                        QColorSpace::ProPhotoRgb};
+                    options.space = profile_->currentIndex() == 4
+                                        ? custom_profile_
+                                        : QColorSpace(spaces[profile_->currentIndex()]);
+                    if (!options.space.isValid())
+                        throw editing::EditError(tr("请先载入有效的自定 ICC"));
+                    options.alpha = alpha_->isChecked();
+                    options.matte = matte_->property("matte").value<QColor>();
+                    options.conflict =
+                        static_cast<editing::ExportConflict>(conflict_->currentIndex());
+                    options.protected_paths = protected_paths;
+                    options.size =
+                        size.edge == 0
+                            ? QSize(qRound(snapshot.state.size.width() * size.scale),
+                                    qRound(snapshot.state.size.height() * size.scale))
+                            : snapshot.state.size.scaled(size.edge, size.edge, Qt::KeepAspectRatio);
+                    options.size = options.size.expandedTo(QSize(1, 1));
+                    if (qint64(options.size.width()) * options.size.height() >
+                        huelith::editing::maximum_image_pixels)
+                        throw editing::EditError(tr("输出超过 5.12 亿像素预算"));
+                    options.path = QDir(directory_->text())
+                                       .filePath(output_name(naming_->text(), snapshot.state.name,
+                                                             size.label, index) +
+                                                 "." + options.format);
+                    prepared.emplace_back(snapshot, std::move(options));
+                }
             }
         }
         if (prepared.empty())
@@ -315,24 +407,32 @@ void ExportDialog::enqueue() {
 }
 QJsonObject ExportDialog::output_preset() const {
     return {{"version", 1},
-            {"metadata",QJsonArray{metadata_[0]->isChecked(),metadata_[1]->isChecked(),metadata_[2]->isChecked(),metadata_[3]->isChecked(),metadata_[4]->isChecked()}},
+            {"scope", scope_->currentIndex()},
+            {"credentials", credentials_->isChecked()},
+            {"metadata", QJsonArray{metadata_[0]->isChecked(), metadata_[1]->isChecked(),
+                                    metadata_[2]->isChecked(), metadata_[3]->isChecked(),
+                                    metadata_[4]->isChecked()}},
             {"sizes", sizes_->text()},
             {"naming", naming_->text()},
             {"format", format_->currentIndex()},
             {"profile", profile_->currentIndex()},
+            {"icc", QString::fromLatin1(custom_profile_.iccProfile().toBase64())},
             {"quality", quality_->value()},
             {"conflict", conflict_->currentIndex()},
             {"alpha", alpha_->isChecked()},
             {"matte", matte_->property("matte").value<QColor>().name()}};
 }
 void ExportDialog::apply_output_preset(const QJsonObject& preset) {
+    const int scope = preset.value("scope").toInt();
+    if (scope < 0 || scope > 3)
+        throw editing::EditError(tr("导出范围无效"));
     parse_sizes(preset.value("sizes").toString());
-    output_name(preset.value("naming").toString(), "sample", 2048, 1);
+    output_name(preset.value("naming").toString(), "sample", "2048", 1);
     const QColor color(preset.value("matte").toString());
     if (preset.value("version").toInt() != 1 || !color.isValid() || color.alpha() != 255 ||
         !preset.value("alpha").isBool())
         throw editing::EditError(tr("导出预设无效"));
-    for (const auto& bound : {std::pair{"format", 4}, std::pair{"profile", 3},
+    for (const auto& bound : {std::pair{"format", 4}, std::pair{"profile", 4},
                               std::pair{"conflict", 2}, std::pair{"quality", 100}}) {
         const auto value = preset.value(bound.first);
         const int number = value.toInt(-1);
@@ -340,12 +440,23 @@ void ExportDialog::apply_output_preset(const QJsonObject& preset) {
             value.toDouble() != number || (QString(bound.first) == "quality" && number == 0))
             throw editing::EditError(tr("导出预设参数无效"));
     }
-    sizes_->setText(preset.value("sizes").toString());
     const auto metadata=preset.value("metadata").toArray();
     if(!metadata.isEmpty()&&metadata.size()!=5)throw editing::EditError(tr("元数据预设无效"));
+    const auto bytes = QByteArray::fromBase64(preset.value("icc").toString().toLatin1());
+    const auto space = QColorSpace::fromIccProfile(bytes);
+    if (preset.value("profile").toInt() == 4 &&
+        (bytes.size() > 4 * 1024 * 1024 || !space.isValid() || !space.isValidTarget()))
+        throw editing::EditError(tr("预设中的 ICC 无效"));
+    scope_->setCurrentIndex(scope);
+    credentials_->setChecked(preset.value("credentials").toBool(false));
+    sizes_->setText(preset.value("sizes").toString());
     for(int i=0;i<5;++i)metadata_[i]->setChecked(metadata.isEmpty()?i!=4:metadata[i].toBool());
     naming_->setText(preset.value("naming").toString());
     format_->setCurrentIndex(preset.value("format").toInt());
+    if (preset.value("profile").toInt() == 4) {
+        custom_profile_ = space;
+        profile_->setItemText(4, space.description());
+    }
     profile_->setCurrentIndex(preset.value("profile").toInt());
     quality_->setValue(preset.value("quality").toInt());
     conflict_->setCurrentIndex(preset.value("conflict").toInt());

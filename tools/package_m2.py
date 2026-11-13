@@ -82,9 +82,9 @@ def main():
         shutil.copy2(file, destination/file.name)
     shutil.copytree(build/'lensfun', destination/'lensfun')
     shutil.copytree(build/'tools/exiftool', destination/'tools/exiftool')
-    shutil.copy2(ROOT/'docs/m2-e/delivery.md',destination/'M2-E交付说明.md')
-    shutil.copy2(ROOT/'docs/m2/large-image-work-windows-2026-10-12.md',destination/'大图与独立窗口说明.md')
-    shutil.copy2(ROOT/'docs/m2/multibrand-raw-2026-10-12.md',destination/'多品牌RAW支持与验收.md')
+    if not (build/'tools/c2patool/c2patool.exe').is_file():
+        raise FileNotFoundError('C2PA tool missing; run tools/prepare-c2patool.ps1 and rebuild')
+    shutil.copytree(build/'tools/c2patool', destination/'tools/c2patool')
     licenses = destination/'licenses'
     licenses.mkdir()
     shutil.copy2(ROOT/'research/m2/metadata/manifest.json',licenses/'ExifTool-runtime.json')
@@ -98,8 +98,9 @@ def main():
         'Database: Creative Commons Attribution-ShareAlike 3.0; original XML files retained.\n'
         'License: https://creativecommons.org/licenses/by-sa/3.0/\n'
         'Library: LGPL-3.0, dynamically linked; see lensfun.txt.\n', encoding='utf-8')
-    deploy = subprocess.run([str(qt / 'bin/windeployqt.exe'), '--release', '--no-translations',
-                             str(destination / 'Huelith.exe')], capture_output=True, text=True)
+    deploy = subprocess.run([str(qt / 'bin/windeployqt.exe'), '--release', '--no-libraries', '--no-translations',
+                             '--dir', str(destination), *(str(qt/'bin'/name) for name in
+                             ('Qt6Widgets.dll','Qt6Svg.dll','Qt6Network.dll','Qt6PrintSupport.dll'))], capture_output=True, text=True)
     (evidence / 'deploy.log').write_text(deploy.stdout + '\n' + deploy.stderr, encoding='utf-8')
     deploy.check_returncode()
     crt = Path('D:/Program Files/Microsoft Visual Studio/2022/BuildTools/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT')
@@ -137,7 +138,7 @@ def main():
         # Ship user instructions only; design mockups, research and local
         # validation records are not runtime dependencies or release content.
         (destination/'M3').mkdir()
-        for name in ('usage.md', 'delivery.md', 'layer-enhancement.md'):
+        for name in ('usage.md', 'layer-enhancement.md'):
             shutil.copy2(ROOT/'docs/m3'/name, destination/'M3'/name)
     (licenses/'enhancement-models.json').write_text(json.dumps(enhancement_manifest,indent=2),encoding='utf-8')
     shutil.copy2(ROOT/'research/m2/instances/runtime/torchvision-0.28.0.dist-info/LICENSE', licenses/'Torchvision.txt')
@@ -160,11 +161,21 @@ def main():
         'Model SHA256: '+SEMANTIC_SHA+'\n', encoding='utf-8')
     (destination / 'translations').mkdir(exist_ok=True)
     shutil.copy2(qt / 'translations/qtbase_zh_CN.qm', destination / 'translations/qtbase_zh_CN.qm')
-    (destination / 'README.txt').write_text('Huelith M2-E 本机验收版（此前 M2 冻结工作包保留）\n双击本目录 Huelith.exe。移动软件时请保留整个目录。\n\n常用操作\n1. 文件 > 打开：选择 CR3 等 RAW 进入显影窗口。AI降噪默认关闭；启用后默认内置模型。\n2. RAW右侧光线/颜色/效果/曲线/混合器/分级/细节/光学/校正，蒙版工具可局部处理。\n   拖动使用代理预览，停止后细化；100%检查完整细节。打开保留源配方，完成保存旁车。\n3. 主窗口：Alt临时反向缩放，空格拖动，Ctrl+0适合窗口，Ctrl+1显示100%。\n   编辑 > 首选项 > 工具与画面操控，可启用滚轮缩放及拖动缩放。\n4. T输入文字；Ctrl+Enter提交，Esc取消。U创建形状；图层 > 合并形状提供四种路径运算。\n   文字/形状保持可编辑，绘画前可在图层菜单显式栅格化；撤销可恢复。\n5. 仿制工具的“仿制源…”可设置缩放/旋转/镜像/叠加。液化可保存网格、使用冻结和背景。\n   裁剪关闭“删除裁剪的像素”可保留画布外内容。\n6. 滤镜 > 智能效果：管理调色、LUT、可搜索/重命名/删除的预设库。\n7. 窗口 > 排列：浮动当前文档、合并回标签栏；浮动时继续使用共享图层和编辑菜单。\n   首选项 > 界面与工作区：整体缩放75%～200%重启生效，字体大小立即生效。\n8. 文件 > 批量导出与队列：PNG/JPEG/TIFF、位深/ICC/尺寸/命名预设，可取消和重试。\n\n已知边界\n24MP仿制图章移动约203ms，仍非60fps；困难暗植被与细毛选区可能需要手工修正。\n变形文字编辑暂显示原始轮廓，完成后保留原变形。有明确提示，不会默默栅格化。\nPS/ACR作为交互参考，未安装PS进行同机对拍，不宣称Adobe私有算法/全部功能逐像素等价。\nM2-E：图像 > AI 增强：2×/4×超分、RGB降噪、深度范围选区。文件 > 自动：HDR、全景、景深合成。\n增强沿用工程、PNG/JPEG/TIFF；不生成增强DNG。大图支持超过6400万像素；本机验证至3.84亿像素工程，使用磁盘缓存和流式保存。RAW、增强、合成窗口可独立最小化，主窗口可继续操作。\nRAW底部“保存DNG副本”保留RGB Bayer / X-Trans传感器数据和显影设置，原片不变；其他软件不保证识别Huelith配方。\n文件 > 布局与模板 > EXIF照片边框：可编辑文字/自有标志，批量生成副本。单张/批量导出均可选择EXIF/IPTC/XMP/版权/GPS。\nRAW“相机亮度”提供内嵌JPEG亮度参考；解码失败可明确选择受限内嵌预览。HDR-PQ不按sRGB误解码。\n实际验收、功能范围及已知边界见随包M2-E交付说明.md。\n\n本机样例：D:\\project\\wifi\\Huelith\\research\\m0\\samples\\r10-5871.CR3\n工程文档目录：D:\\project\\wifi\\Huelith\\docs\\m2\\README.md\n', encoding='utf-8')
-    if args.stage == 'M3':
-        readme=destination/'README.txt'
-        old=readme.read_text(encoding='utf-8')
-        readme.write_text('Huelith M3 交互优化版\n双击 Huelith.exe，打开照片后选择 滤镜 > 人像精修。\n图层 > AI 增强：单层2×/4×超分、RGB降噪、深度选区；操作见 M3/layer-enhancement.md。\n本版：拖动持续预览、一次拖动一次撤销、部位折叠分组与双击重置、公共范围/保护、同画布液化/预设、清晰的图层显隐和窗口Logo。\n使用方法、适用边界和验收说明见 M3/usage.md 与 M3/delivery.md。\n请保留整个文件夹，模型已内置，首次无需下载。\n\n此前功能说明：\n'+old,encoding='utf-8')
+    (destination / 'README.txt').write_text(
+        'Huelith\n双击 Huelith.exe。移动软件时请保留整个目录。\n\n'
+        '支持图层编辑、RAW 显影、人像精修、蒙版、文字与形状、批量导出。\n'
+        '滤镜 > 人像精修：打开人像编辑窗口。\n'
+        '空格拖动画布，Ctrl+0 适合窗口，Ctrl+1 显示 100%。\n'
+        '生成式工作流需要连接自行配置的本机或远程 ComfyUI 服务。\n'
+        '工程保存保留可编辑内容；PSD/PSB 兼容范围以导入导出提示为准。\n'
+        '语言：首选项 > 界面与工作区 > 界面语言，重启后生效。\n\n'
+        'Launch Huelith.exe. Keep this entire folder when moving the application.\n'
+        'Features: layers, RAW development, portrait retouching, masks, text, shapes, and batch export.\n'
+        'Filter > Portrait Retouch opens the portrait workspace.\n'
+        'Space-drag to pan; Ctrl+0 fits the image; Ctrl+1 shows 100%.\n'
+        'Generative workflows require your own local or remote ComfyUI service.\n'
+        'Save a project to retain editable content. PSD/PSB compatibility is explained during import/export.\n'
+        'Language: Preferences > Interface and Workspace > Interface Language. Restart to apply.\n', encoding='utf-8')
     environment = os.environ.copy()
     for key in ('QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QPA_PLATFORM', 'PYTHONPATH'):
         environment.pop(key, None)

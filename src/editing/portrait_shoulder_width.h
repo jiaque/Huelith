@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #pragma once
 #include "huelith/editing/project.h"
 #include <QJsonArray>
@@ -19,9 +20,9 @@ public:
         const auto point=[&](int i){
             const auto p=pose[i].toArray();
             if(p.size()<3 || p[2].toDouble()<.6){
-                const auto side=i%2?QStringLiteral("人物左侧"):QStringLiteral("人物右侧");
-                const auto joint=i<13?QStringLiteral("肩部"):i<15?QStringLiteral("肘部"):i<17?QStringLiteral("手腕"):QStringLiteral("髋部");
-                throw EditError(side+joint+QStringLiteral("定位不足；可在定位修正中拖动对应关键点，或仅调整可靠一侧；被遮挡部位请使用手动液化"));
+                const auto side=i%2?QCoreApplication::translate("Huelith", "人物左侧"):QCoreApplication::translate("Huelith", "人物右侧");
+                const auto joint=i<13?QCoreApplication::translate("Huelith", "肩部"):i<15?QCoreApplication::translate("Huelith", "肘部"):i<17?QCoreApplication::translate("Huelith", "手腕"):QCoreApplication::translate("Huelith", "髋部");
+                throw EditError(side+joint+QCoreApplication::translate("Huelith", "定位不足；可在定位修正中拖动对应关键点，或仅调整可靠一侧；被遮挡部位请使用手动液化"));
             }
             return QPointF(p[0].toDouble()*(size.width()-1),p[1].toDouble()*(size.height()-1));
         };

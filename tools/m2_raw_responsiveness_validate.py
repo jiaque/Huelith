@@ -15,7 +15,7 @@ def main():
     handles = [os.add_dll_directory(str(qt / 'bin')),
                os.add_dll_directory(str(ROOT / 'build/windows-release'))]
     os.environ['QT_PLUGIN_PATH'] = str(qt / 'plugins')
-    os.environ['QT_QPA_PLATFORM'] = 'windows'
+    os.environ.setdefault('QT_QPA_PLATFORM', 'windows')
     lib = ctypes.CDLL(str(ROOT / 'build/windows-release/huelith_python_driver.dll'))
     fn = lib.huelith_python_command
     fn.argtypes, fn.restype = [ctypes.c_char_p], ctypes.c_char_p

@@ -1,6 +1,8 @@
+#include <QCoreApplication>
 #include "huelith/editing/brush.h"
 #include "huelith/editing/project.h"
 #include <QBuffer>
+#include <QDataStream>
 #include <QImageReader>
 #include <QJsonArray>
 #include <QPainter>
@@ -9,6 +11,110 @@
 #include <cmath>
 #include <numbers>
 namespace huelith::editing {
+std::vector<std::pair<QString, BrushSettings>> import_abr(const QByteArray& bytes) {
+    if (bytes.size() > 32 * 1024 * 1024)
+        throw EditError("ABR 文件超过 32 MB");
+    QDataStream file(bytes);
+    quint16 version{}, count{};
+    file >> version >> count;
+    if (version != 1 && version != 2)
+        throw EditError(
+            QCoreApplication::translate("Huelith", "暂不支持 ABR v%1；支持 v1/v2 的 8 位采样笔尖，或导入 PNG 笔尖").arg(version));
+    if (!count || count > 256)
+        throw EditError("ABR 笔尖数量无效");
+    std::vector<std::pair<QString, BrushSettings>> result;
+    for (int index = 0; index < count; ++index) {
+        quint16 type{};
+        quint32 length{};
+        file >> type >> length;
+        if (file.status() != QDataStream::Ok || length > quint64(file.device()->bytesAvailable()))
+            throw EditError("ABR 笔尖数据不完整");
+        if (type != 2)
+            throw EditError("此 ABR 含计算型或未知笔尖，尚不支持；未导入任何预设");
+        QByteArray block = file.device()->read(length);
+        QDataStream data(block);
+        quint32 unused{};
+        quint16 spacing{};
+        data >> unused >> spacing;
+        QString name = QCoreApplication::translate("Huelith", "ABR 笔尖 %1").arg(index + 1);
+        if (version == 2) {
+            quint32 chars{};
+            data >> chars;
+            if (chars > 1024 || chars * 2 > quint64(data.device()->bytesAvailable()))
+                throw EditError("ABR 笔尖名称无效");
+            QString title;
+            for (quint32 i = 0; i < chars; ++i) {
+                quint16 c{};
+                data >> c;
+                if (c)
+                    title += QChar(c);
+            }
+            if (!title.trimmed().isEmpty())
+                name = title.trimmed().left(80);
+        }
+        quint8 antialias{};
+        data >> antialias;
+        for (int i = 0; i < 4; ++i) {
+            qint16 bound{};
+            data >> bound;
+        }
+        qint32 top{}, left{}, bottom{}, right{};
+        quint16 depth{};
+        quint8 compression{};
+        data >> top >> left >> bottom >> right >> depth >> compression;
+        const qint64 width = qint64(right) - left, height = qint64(bottom) - top;
+        if (data.status() != QDataStream::Ok || width < 1 || height < 1 || width > 4096 ||
+            height > 4096 || depth != 8 || compression > 1)
+            throw EditError("ABR 需要 8 位采样笔尖，尺寸不超过 4096，压缩为原始或 PackBits");
+        QImage mask(int(width), int(height), QImage::Format_Grayscale8);
+        std::vector<quint16> lengths;
+        if (compression) {
+            lengths.resize(height);
+            for (auto& size : lengths)
+                data >> size;
+        }
+        for (int y = 0; y < height; ++y) {
+            const auto size = compression ? lengths[y] : width;
+            const auto row = data.device()->read(size);
+            if (data.status() != QDataStream::Ok || row.size() != size)
+                throw EditError("ABR 像素数据不完整");
+            auto* output = mask.scanLine(y);
+            if (!compression)
+                std::copy(row.begin(), row.end(), output);
+            else {
+                qsizetype read = 0;
+                int written = 0;
+                while (read < row.size()) {
+                    const int token = qint8(row[read++]);
+                    if (token == -128)
+                        continue;
+                    const int run = token < 0 ? 1 - token : token + 1;
+                    if (written + run > width || read + (token < 0 ? 1 : run) > row.size())
+                        throw EditError("ABR 压缩行损坏");
+                    if (token < 0) {
+                        std::fill_n(output + written, run, uchar(row[read++]));
+                    } else {
+                        std::copy_n(row.constData() + read, run, output + written);
+                        read += run;
+                    }
+                    written += run;
+                }
+                if (written != width)
+                    throw EditError("ABR 压缩行像素不足");
+            }
+        }
+        BrushSettings settings;
+        settings.tip = 6;
+        settings.custom_tip =
+            std::max(width, height) > 1024
+                ? mask.scaled(1024, 1024, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                : mask;
+        settings.diameter = std::min(5000., double(std::max(width, height)));
+        settings.spacing = std::clamp(spacing / 100., .01, 10.);
+        result.emplace_back(name, settings);
+    }
+    return result;
+}
 namespace {
 struct Number {
     const char* key;
@@ -31,7 +137,12 @@ constexpr std::array numbers{Number{"diameter", &BrushSettings::diameter, 1, 500
                              Number{"flowJitter", &BrushSettings::flow_jitter, 0, 1},
                              Number{"textureDepth", &BrushSettings::texture_depth, 0, 1},
                              Number{"textureScale", &BrushSettings::texture_scale, .1, 20},
-                             Number{"smoothing", &BrushSettings::smoothing, 0, 1}};
+                             Number{"smoothing", &BrushSettings::smoothing, 0, 1},
+                             Number{"dualScale", &BrushSettings::dual_scale, .1, 2},
+                             Number{"dualAngle", &BrushSettings::dual_angle, -180, 180},
+                             Number{"dualDepth", &BrushSettings::dual_depth, 0, 1},
+                             Number{"mixerWet", &BrushSettings::mixer_wet, 0, 1},
+                             Number{"mixerLoad", &BrushSettings::mixer_load, 0, 1}};
 constexpr std::array flags{std::pair{"flipX", &BrushSettings::flip_x},
                            std::pair{"flipY", &BrushSettings::flip_y},
                            std::pair{"scatterBoth", &BrushSettings::scatter_both},
@@ -42,7 +153,11 @@ constexpr std::array flags{std::pair{"flipX", &BrushSettings::flip_x},
                            std::pair{"catchUp", &BrushSettings::catch_up},
                            std::pair{"catchUpEnd", &BrushSettings::catch_up_end},
                            std::pair{"adjustZoom", &BrushSettings::adjust_zoom},
-                           std::pair{"airbrush", &BrushSettings::airbrush}};
+                           std::pair{"airbrush", &BrushSettings::airbrush},
+                           std::pair{"dualEnabled", &BrushSettings::dual_enabled},
+                           std::pair{"tiltAngle", &BrushSettings::tilt_angle},
+                           std::pair{"tiltRoundness", &BrushSettings::tilt_roundness},
+                           std::pair{"mixerEnabled", &BrushSettings::mixer_enabled}};
 double hash(int x, int y) {
     std::uint32_t v = std::uint32_t(x) * 0x9e3779b9U ^ std::uint32_t(y) * 0x85ebca6bU;
     v ^= v >> 16;
@@ -57,17 +172,23 @@ void validate_brush(const BrushSettings& s) {
     for (const auto& number : numbers) {
         const double value = s.*number.field;
         if (!std::isfinite(value) || value < number.low || value > number.high)
-            throw EditError(QString("画笔参数超出范围：%1").arg(number.key));
+            throw EditError(QCoreApplication::translate("Huelith", "画笔参数超出范围：%1").arg(number.key));
     }
     if (s.tip < 0 || s.tip > 6 || s.count < 1 || s.count > 16 || s.texture < 0 || s.texture > 3)
         throw EditError("画笔类型或数量无效");
+    if (s.dual_tip < 0 || s.dual_tip > 5)
+        throw EditError("第二笔尖类型无效");
     if (s.tip == 6 &&
         (s.custom_tip.isNull() || s.custom_tip.width() > 1024 || s.custom_tip.height() > 1024))
         throw EditError("自定义笔尖必须为不超过1024像素的有效图像");
 }
 QJsonObject brush_json(const BrushSettings& s) {
     validate_brush(s);
-    QJsonObject j{{"version", 1}, {"tip", s.tip}, {"count", s.count}, {"texture", s.texture}};
+    QJsonObject j{{"version", 1},
+                  {"tip", s.tip},
+                  {"count", s.count},
+                  {"texture", s.texture},
+                  {"dualTip", s.dual_tip}};
     for (const auto& number : numbers)
         j.insert(QLatin1String(number.key), s.*number.field);
     for (const auto& [key, field] : flags)
@@ -107,7 +228,8 @@ BrushSettings brush_from_json(const QJsonObject& j) {
         }
     for (const auto& [key, field] :
          {std::pair{"tip", &BrushSettings::tip}, std::pair{"count", &BrushSettings::count},
-          std::pair{"texture", &BrushSettings::texture}})
+          std::pair{"texture", &BrushSettings::texture},
+          std::pair{"dualTip", &BrushSettings::dual_tip}})
         if (j.contains(QLatin1String(key))) {
             const auto value = j.value(QLatin1String(key));
             if (!value.isDouble() || value.toDouble() != std::floor(value.toDouble()))
@@ -183,6 +305,30 @@ QImage brush_tip(const BrushSettings& s, int edge) {
             row[x] = qRgba(a, a, a, a);
         }
     }
+    if (s.dual_enabled && s.dual_depth > 0) {
+        BrushSettings secondary;
+        secondary.tip = s.dual_tip;
+        secondary.hardness = s.hardness;
+        const auto second = brush_tip(secondary, edge);
+        QImage mask(tip.size(), tip.format());
+        mask.fill(Qt::transparent);
+        QPainter painter(&mask);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.translate(edge * .5, edge * .5);
+        painter.rotate(s.dual_angle);
+        const double extent = edge * s.dual_scale;
+        painter.drawImage(QRectF(-extent * .5, -extent * .5, extent, extent), second);
+        painter.end();
+        for (int y = 0; y < edge; ++y) {
+            auto* row = reinterpret_cast<QRgb*>(tip.scanLine(y));
+            const auto* overlay = reinterpret_cast<const QRgb*>(mask.constScanLine(y));
+            for (int x = 0; x < edge; ++x) {
+                const int alpha = qRound(
+                    qAlpha(row[x]) * (1 - s.dual_depth + s.dual_depth * qAlpha(overlay[x]) / 255.));
+                row[x] = qRgba(alpha, alpha, alpha, alpha);
+            }
+        }
+    }
     return tip;
 }
 void BrushStroke::reset(const BrushSettings& settings, std::uint32_t seed, double zoom) {
@@ -197,6 +343,12 @@ void BrushStroke::reset(const BrushSettings& settings, std::uint32_t seed, doubl
     until_next_ = 0;
     smooth_radius_ = 50 * settings.smoothing / (settings.adjust_zoom ? zoom : 1);
     air_time_ = 0;
+    tilt_ = {};
+    mixer_source_ = {};
+}
+void BrushStroke::set_mixer_source(QImage source, QColor pigment) {
+    mixer_source_ = source.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    pigment_ = loaded_color_ = pigment;
 }
 double BrushStroke::uniform() {
     random_ ^= random_ << 13;
@@ -209,16 +361,50 @@ void BrushStroke::stamp(QImage& coverage, QPointF position, double pressure, dou
         settings_.pressure_size ? std::max(settings_.minimum_size, pressure) : 1;
     const int count =
         std::max(1, qRound(settings_.count * (1 - settings_.count_jitter * uniform())));
+    QImage stamp_tip = tip_;
+    if (settings_.mixer_enabled && !mixer_source_.isNull()) {
+        // Carry pigment along the stroke and pick up the visible surface beneath each dab.
+        // The spacing factor keeps pickup comparable when the stamp spacing changes.
+        const auto point = position.toPoint();
+        if (mixer_source_.rect().contains(point)) {
+            const QColor beneath = mixer_source_.pixelColor(point);
+            const double pickup = 1 - std::pow(1 - settings_.mixer_wet, settings_.spacing);
+            const double reload = settings_.mixer_load * settings_.spacing;
+            const auto mix = [&](double carried, double sampled, double loaded) {
+                return std::clamp((carried * (1 - pickup * beneath.alphaF()) +
+                                   sampled * pickup * beneath.alphaF()) *
+                                          (1 - std::min(1., reload)) +
+                                      loaded * std::min(1., reload),
+                                  0., 1.);
+            };
+            pigment_ =
+                QColor::fromRgbF(mix(pigment_.redF(), beneath.redF(), loaded_color_.redF()),
+                                 mix(pigment_.greenF(), beneath.greenF(), loaded_color_.greenF()),
+                                 mix(pigment_.blueF(), beneath.blueF(), loaded_color_.blueF()));
+        }
+        QPainter tint(&stamp_tip);
+        tint.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        tint.fillRect(stamp_tip.rect(), pigment_);
+    }
     QPainter painter(&coverage);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     for (int i = 0; i < count; ++i) {
         const double diameter = std::max(
             1., settings_.diameter * pressure_size *
                     std::max(settings_.minimum_size, 1 - settings_.size_jitter * uniform()));
-        const double angle = settings_.angle + (settings_.direction_angle ? direction : 0) +
+        const double tilt_length = std::hypot(tilt_.x(), tilt_.y());
+        const double tilt_angle = settings_.tilt_angle && tilt_length > .1
+                                      ? std::atan2(tilt_.y(), tilt_.x()) * 180 / std::numbers::pi
+                                      : 0;
+        const double angle = settings_.angle + tilt_angle +
+                             (settings_.direction_angle ? direction : 0) +
                              (uniform() * 2 - 1) * settings_.angle_jitter;
-        const double roundness =
-            std::max(.01, settings_.roundness * (1 - settings_.roundness_jitter * uniform()));
+        const double roundness = std::max(
+            .01,
+            settings_.roundness * (1 - settings_.roundness_jitter * uniform()) *
+                (settings_.tilt_roundness
+                     ? std::max(.15, std::cos(std::min(85., tilt_length) * std::numbers::pi / 180))
+                     : 1));
         const double scatter = (uniform() * 2 - 1) * settings_.scatter * settings_.diameter;
         const double forward = settings_.scatter_both
                                    ? (uniform() * 2 - 1) * settings_.scatter * settings_.diameter
@@ -232,7 +418,7 @@ void BrushStroke::stamp(QImage& coverage, QPointF position, double pressure, dou
         painter.scale(settings_.flip_x ? -1 : 1, settings_.flip_y ? -roundness : roundness);
         painter.setOpacity(settings_.flow * (1 - settings_.flow_jitter * uniform()) *
                            (settings_.pressure_flow ? pressure : 1));
-        painter.drawImage(QRectF(-diameter / 2, -diameter / 2, diameter, diameter), tip_);
+        painter.drawImage(QRectF(-diameter / 2, -diameter / 2, diameter, diameter), stamp_tip);
         painter.restore();
         ++stamps_;
     }
@@ -270,7 +456,11 @@ void BrushStroke::segment(QImage& coverage, QPointF position, double pressure) {
     previous_ = position;
     previous_pressure_ = pressure;
 }
-void BrushStroke::add(QImage& coverage, QPointF position, double pressure) {
+void BrushStroke::add(QImage& coverage, QPointF position, double pressure, QPointF tilt) {
+    if (!std::isfinite(tilt.x()) || !std::isfinite(tilt.y()) || std::abs(tilt.x()) > 90 ||
+        std::abs(tilt.y()) > 90)
+        throw EditError("画笔倾斜角度无效");
+    tilt_ = tilt;
     if (!std::isfinite(position.x()) || !std::isfinite(position.y()) || !std::isfinite(pressure))
         throw EditError("笔画坐标无效");
     pressure = std::clamp(pressure, 0., 1.);
@@ -332,51 +522,51 @@ std::vector<std::pair<QString, BrushSettings>> builtin_brushes() {
         BrushSettings s;
         s.diameter = size;
         s.hardness = 1;
-        add(QString("硬圆 %1").arg(size), s);
+        add(QCoreApplication::translate("Huelith", "硬圆 %1").arg(size), s);
         s.hardness = 0;
-        add(QString("柔圆 %1").arg(size), s);
+        add(QCoreApplication::translate("Huelith", "柔圆 %1").arg(size), s);
     }
     BrushSettings s;
     s.hardness = 1;
     s.roundness = .2;
     s.angle = -45;
-    add("扁平书法", s);
+    add(QCoreApplication::translate("Huelith", "扁平书法"), s);
     s = {};
     s.tip = 1;
     s.hardness = 1;
-    add("方形硬笔", s);
+    add(QCoreApplication::translate("Huelith", "方形硬笔"), s);
     s.roundness = .25;
     s.angle = 30;
-    add("斜角记号笔", s);
+    add(QCoreApplication::translate("Huelith", "斜角记号笔"), s);
     s = {};
     s.tip = 2;
     s.texture = 1;
     s.hardness = .7;
-    add("粉笔", s);
+    add(QCoreApplication::translate("Huelith", "粉笔"), s);
     s.diameter = 8;
     s.flow = .4;
     s.texture_depth = .8;
-    add("铅笔纹理", s);
+    add(QCoreApplication::translate("Huelith", "铅笔纹理"), s);
     s = {};
     s.tip = 3;
     s.roundness = .5;
     s.direction_angle = true;
-    add("干刷纤维", s);
+    add(QCoreApplication::translate("Huelith", "干刷纤维"), s);
     s.flow = .3;
     s.texture = 2;
     s.texture_depth = .8;
-    add("画布干刷", s);
+    add(QCoreApplication::translate("Huelith", "画布干刷"), s);
     s = {};
     s.tip = 4;
     s.hardness = 1;
     s.spacing = 1.3;
     s.scatter = .3;
     s.angle_jitter = 180;
-    add("星形散点", s);
+    add(QCoreApplication::translate("Huelith", "星形散点"), s);
     s.tip = 5;
     s.roundness = .5;
     s.size_jitter = .5;
-    add("叶形散点", s);
+    add(QCoreApplication::translate("Huelith", "叶形散点"), s);
     s = {};
     s.spacing = .3;
     s.scatter = 2;
@@ -385,19 +575,19 @@ std::vector<std::pair<QString, BrushSettings>> builtin_brushes() {
     s.size_jitter = .8;
     s.flow = .35;
     s.diameter = 15;
-    add("喷溅颗粒", s);
+    add(QCoreApplication::translate("Huelith", "喷溅颗粒"), s);
     s = {};
     s.hardness = 0;
     s.flow = .08;
     s.pressure_flow = true;
     s.spacing = .03;
     s.diameter = 100;
-    add("柔和喷绘", s);
+    add(QCoreApplication::translate("Huelith", "柔和喷绘"), s);
     s = {};
     s.diameter = 3;
     s.hardness = 1;
     s.pressure_size = false;
-    add("精细硬笔", s);
+    add(QCoreApplication::translate("Huelith", "精细硬笔"), s);
     return result;
 }
 } // namespace huelith::editing

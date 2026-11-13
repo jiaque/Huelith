@@ -16,7 +16,7 @@ namespace {
 QByteArray execute(QStringList arguments,const std::atomic_bool* cancelled) {
     const auto exe=qEnvironmentVariable("HUELITH_EXIFTOOL_PATH",
         QCoreApplication::applicationDirPath()+"/tools/exiftool/exiftool.exe");
-    if(!QFileInfo::exists(exe))throw EditError(QStringLiteral("内置元数据组件缺失，请使用完整安装包"));
+    if(!QFileInfo::exists(exe))throw EditError(QCoreApplication::translate("Huelith", "内置元数据组件缺失，请使用完整安装包"));
     QProcess process;process.setProgram(exe);
     arguments.prepend("");arguments.prepend("-config");
     process.setArguments(arguments);process.start();
@@ -25,11 +25,11 @@ QByteArray execute(QStringList arguments,const std::atomic_bool* cancelled) {
     do {
         process.waitForFinished(25);output+=process.readAllStandardOutput();error+=process.readAllStandardError();
         if((cancelled&&cancelled->load())||elapsed.elapsed()>30000||output.size()>16*1024*1024||error.size()>65536){
-            process.kill();process.waitForFinished();throw EditError(QStringLiteral("元数据操作已取消或超过资源限额"));
+            process.kill();process.waitForFinished();throw EditError(QCoreApplication::translate("Huelith", "元数据操作已取消或超过资源限额"));
         }
     }while(process.state()!=QProcess::NotRunning);
     if(process.exitStatus()!=QProcess::NormalExit||process.exitCode()!=0)
-        throw EditError(QStringLiteral("元数据处理失败：%1").arg(QString::fromUtf8(error).left(2000)));
+        throw EditError(QCoreApplication::translate("Huelith", "元数据处理失败：%1").arg(QString::fromUtf8(error).left(2000)));
     return output;
 }
 bool rights(const QString& name) {
@@ -56,14 +56,14 @@ QJsonObject read_photo_metadata(const QString& path,const std::atomic_bool* canc
         "-EXIF:all","-IPTC:all","-XMP:all","-Canon:HDR-PQ","--XMP-crs:all",QFileInfo(path).absoluteFilePath()},cancelled);
     QJsonParseError error;const auto document=QJsonDocument::fromJson(bytes,&error);
     if(error.error!=QJsonParseError::NoError||!document.isArray()||document.array().size()!=1)
-        throw EditError(QStringLiteral("元数据读取结果无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "元数据读取结果无效"));
     QJsonObject result;const auto data=document.array().first().toObject();
     for(auto i=data.begin();i!=data.end();++i)if(safe_tag(i.key()))result.insert(i.key(),i.value());
     if(data.contains("Canon:HDR-PQ"))result.insert("Camera:HDRPQ",data["Canon:HDR-PQ"]);
     return result;
 }
 QByteArray extract_embedded_jpeg(const QByteArray& raw) {
-    QTemporaryDir directory;if(!directory.isValid())throw EditError(QStringLiteral("无法创建预览临时目录"));
+    QTemporaryDir directory;if(!directory.isValid())throw EditError(QCoreApplication::translate("Huelith", "无法创建预览临时目录"));
     QFile file(directory.filePath("source.raw"));
     if(!file.open(QIODevice::WriteOnly)||file.write(raw)!=raw.size())throw EditError(file.errorString());file.close();
     for(const auto& tag:{"-PreviewImage","-JpgFromRaw","-ThumbnailImage"}){
@@ -89,7 +89,7 @@ void write_photo_metadata(const QString& staged,const QJsonObject& metadata,cons
         selected.insert("ExifIFD:ExifImageWidth",size.width());selected.insert("ExifIFD:ExifImageHeight",size.height());
         selected.insert("ExifIFD:ColorSpace",srgb?1:65535);}
     selected.insert("SourceFile",QFileInfo(staged).absoluteFilePath());
-    QTemporaryDir directory;if(!directory.isValid())throw EditError(QStringLiteral("无法创建元数据临时目录"));
+    QTemporaryDir directory;if(!directory.isValid())throw EditError(QCoreApplication::translate("Huelith", "无法创建元数据临时目录"));
     QFile file(directory.filePath("metadata.json"));
     const auto bytes=QJsonDocument(QJsonArray{selected}).toJson(QJsonDocument::Compact);
     if(!file.open(QIODevice::WriteOnly)||file.write(bytes)!=bytes.size())throw EditError(file.errorString());file.close();
@@ -121,23 +121,23 @@ QString exif_caption_template(const QString& pattern,const QJsonObject& metadata
 }
 State exif_border(const State& source,int margin,int caption_height,int font_pixels,QColor background,QColor text,const QString& caption,const QImage& logo) {
     if(margin<0||margin>8000||caption_height<1||caption_height>8000||font_pixels<1||font_pixels>2048||caption.size()>4096||!background.isValid()||!text.isValid())
-        throw EditError(QStringLiteral("EXIF 边框参数无效"));
-    State result=source;result.name+=QStringLiteral(" · EXIF 边框");
+        throw EditError(QCoreApplication::translate("Huelith", "EXIF 边框参数无效"));
+    State result=source;result.name+=QCoreApplication::translate("Huelith", " · EXIF 边框");
     result.size+=QSize(2*margin,2*margin+caption_height);
-    if(qint64(result.size.width())*result.size.height()>huelith::editing::maximum_image_pixels)throw EditError(QStringLiteral("边框结果超过 5.12 亿像素预算，请先缩小图片"));
+    if(qint64(result.size.width())*result.size.height()>huelith::editing::maximum_image_pixels)throw EditError(QCoreApplication::translate("Huelith", "边框结果超过 5.12 亿像素预算，请先缩小图片"));
     // A clipped group preserves the original canvas boundary and editable original layers.
     Layer picture;picture.kind=LayerKind::group;picture.name=source.name;picture.children=source.layers;
     picture.transform.translate(margin,margin);picture.vector_enabled=true;picture.vector_mask.addRect(QRectF(QPointF(),source.size));
     picture.frame=QRectF(QPointF(),source.size);
-    Layer paper;paper.kind=LayerKind::fill;paper.name=QStringLiteral("边框颜色");paper.fill=background;
-    Layer label;label.kind=LayerKind::text;label.name=QStringLiteral("EXIF · 可编辑文字");label.text.paragraph=true;
+    Layer paper;paper.kind=LayerKind::fill;paper.name=QCoreApplication::translate("Huelith", "边框颜色");paper.fill=background;
+    Layer label;label.kind=LayerKind::text;label.name=QCoreApplication::translate("Huelith", "EXIF · 可编辑文字");label.text.paragraph=true;
     label.text.box=QSizeF(source.size.width(),caption_height);
     label.text.html=QString("<p align='center' style='font-family:Microsoft YaHei;font-size:%1px;color:%2'>%3</p>")
         .arg(font_pixels).arg(text.name(),caption.toHtmlEscaped());
     label.transform.translate(margin,margin+source.size.height());
     result.layers={paper,picture,label};result.selection={};result.saved_selections.clear();result.snapshots.clear();result.paths.clear();
     if(!logo.isNull()){
-        Layer mark;mark.kind=LayerKind::pixels;mark.name=QStringLiteral("自有标志");mark.pixels=to_working(logo);
+        Layer mark;mark.kind=LayerKind::pixels;mark.name=QCoreApplication::translate("Huelith", "自有标志");mark.pixels=to_working(logo);
         const double scale=std::min(source.size.width()*.2/logo.width(),caption_height*.8/logo.height());
         mark.transform=QTransform(scale,0,0,scale,margin,margin+source.size.height()+(caption_height-logo.height()*scale)/2);
         const double inset=logo.width()*scale+std::max(4,font_pixels);

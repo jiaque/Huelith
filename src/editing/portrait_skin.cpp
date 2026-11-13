@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/portrait_effects.h"
 #include "huelith/editing/project.h"
 #include "huelith/editing/image_storage.h"
@@ -126,7 +127,7 @@ QImage portrait_color_region(const QImage& source,const QJsonObject& recipe,QRec
         person.textureV2=settings["textureVersion"].toInt(1)>=2;
         person.body=QImage::fromData(QByteArray::fromBase64(record["bodyMask"].toString().toLatin1()),"PNG").convertToFormat(QImage::Format_Grayscale8);
         const bool allowed=!record["unmatched"].toBool() && !record["matchAmbiguous"].toBool();
-        for(std::size_t i=0;i<keys.size();++i){const QString key=QLatin1String(keys[i]);const double v=params[key].toDouble();if(!std::isfinite(v) || std::abs(v)>100)throw EditError(QStringLiteral("肤质参数无效"));person.values[i]=allowed && !settings["disabledParameters"].toObject()[key].toBool() && enabled[key.section('.',0,0)].toBool(true)?v*.01*amount*std::clamp(settings["strength"].toDouble(100),0.,100.)*.01:0.;if(person.values[i]!=0){active=true;person.masks[i]=portrait_effect_mask(record,key,mask_size);}}
+        for(std::size_t i=0;i<keys.size();++i){const QString key=QLatin1String(keys[i]);const double v=params[key].toDouble();if(!std::isfinite(v) || std::abs(v)>100)throw EditError(QCoreApplication::translate("Huelith", "肤质参数无效"));person.values[i]=allowed && !settings["disabledParameters"].toObject()[key].toBool() && enabled[key.section('.',0,0)].toBool(true)?v*.01*amount*std::clamp(settings["strength"].toDouble(100),0.,100.)*.01:0.;if(person.values[i]!=0){active=true;person.masks[i]=portrait_effect_mask(record,key,mask_size);}}
         const auto face=record["face"].toArray();
         if(person.lightV2 && !person.masks[4].isNull()){
             auto& mask=person.masks[4];cv::Mat bytes(mask.height(),mask.width(),CV_8U,mask.bits(),mask.bytesPerLine()),inside,distance;
@@ -173,7 +174,7 @@ QImage portrait_color_region(const QImage& source,const QJsonObject& recipe,QRec
         const double filterSigma=std::max(person.values[11]!=0?person.bodySigma:0.,(person.oilV2 && person.values[3]!=0) || (person.uniformV2 && person.values[2]!=0) || ((person.balanceV2 && person.values[8]!=0) || person.values[12]!=0)?oilSigma:person.sigma);
         const int halo=std::max({16,int(std::ceil(filterSigma*4))+4,2*int(std::ceil(person.sigma*person.smoothRadius))+int(std::ceil(person.smoothFine*4))+2});
         for(int top=region.top();top<=region.bottom();top+=384)for(int left=region.left();left<=region.right();left+=384){
-            if(cancelled && cancelled->load())throw EditError(QStringLiteral("肤质处理已取消"));
+            if(cancelled && cancelled->load())throw EditError(QCoreApplication::translate("Huelith", "肤质处理已取消"));
             const QRect tile(left,top,std::min(384,region.right()-left+1),std::min(384,region.bottom()-top+1));const auto expanded=tile.adjusted(-halo,-halo,halo,halo).intersected(source.rect());
             cv::Mat input(expanded.height(),expanded.width(),CV_32FC4,const_cast<uchar*>(source.constScanLine(expanded.y()))+qint64(expanded.x())*16,source.bytesPerLine()),low,fine;
             cv::GaussianBlur(input,low,{0,0},person.sigma,person.sigma,cv::BORDER_REFLECT_101);cv::GaussianBlur(input,fine,{0,0},.85,.85,cv::BORDER_REFLECT_101);

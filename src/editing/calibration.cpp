@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/calibration.h"
 #include "huelith/editing/project.h"
 #include <QJsonArray>
@@ -30,7 +31,7 @@ Matrix inverse(const Matrix& m) {
     const double determinant =
         m[0][0] * result[0][0] + m[0][1] * result[1][0] + m[0][2] * result[2][0];
     if (std::abs(determinant) < 1e-10)
-        throw EditError(QStringLiteral("校正原色矩阵不可逆"));
+        throw EditError(QCoreApplication::translate("Huelith", "校正原色矩阵不可逆"));
     for (auto& row : result)
         for (auto& value : row)
             value /= determinant;
@@ -40,12 +41,12 @@ Matrix inverse(const Matrix& m) {
 
 void validate_calibration(const CalibrationSettings& settings) {
     if (settings.process_version != 1)
-        throw EditError(QStringLiteral("未知 RAW 校正处理版本"));
+        throw EditError(QCoreApplication::translate("Huelith", "未知 RAW 校正处理版本"));
     const auto valid = [](double value) { return std::isfinite(value) && std::abs(value) <= 100; };
     if (!valid(settings.shadow_tint) ||
         !std::all_of(settings.hue.begin(), settings.hue.end(), valid) ||
         !std::all_of(settings.saturation.begin(), settings.saturation.end(), valid))
-        throw EditError(QStringLiteral("校正参数必须在 -100 到 100 之间"));
+        throw EditError(QCoreApplication::translate("Huelith", "校正参数必须在 -100 到 100 之间"));
 }
 QJsonObject calibration_json(const CalibrationSettings& settings) {
     validate_calibration(settings);
@@ -64,15 +65,15 @@ CalibrationSettings calibration_from_json(const QJsonObject& json) {
     const auto defaults = calibration_json(settings);
     for (auto it = json.begin(); it != json.end(); ++it)
         if (!defaults.contains(it.key()))
-            throw EditError(QStringLiteral("未知校正配方字段"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知校正配方字段"));
     if (json.contains("processVersion")) {
         if (!json.value("processVersion").isDouble() ||
             json.value("processVersion").toDouble() != 1)
-            throw EditError(QStringLiteral("未知 RAW 校正处理版本"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知 RAW 校正处理版本"));
     }
     if (json.contains("shadowTint")) {
         if (!json.value("shadowTint").isDouble())
-            throw EditError(QStringLiteral("阴影色调格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "阴影色调格式无效"));
         settings.shadow_tint = json.value("shadowTint").toDouble();
     }
     for (const auto& [name, target] :
@@ -81,10 +82,10 @@ CalibrationSettings calibration_from_json(const QJsonObject& json) {
             continue;
         const auto values = json.value(QLatin1String(name)).toArray();
         if (values.size() != 3)
-            throw EditError(QStringLiteral("校正需要红、绿、蓝三原色参数"));
+            throw EditError(QCoreApplication::translate("Huelith", "校正需要红、绿、蓝三原色参数"));
         for (int i = 0; i < 3; ++i) {
             if (!values[i].isDouble())
-                throw EditError(QStringLiteral("原色校正数值无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "原色校正数值无效"));
             (*target)[i] = values[i].toDouble();
         }
     }

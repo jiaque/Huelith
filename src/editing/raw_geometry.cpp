@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/raw_geometry.h"
 #include "huelith/editing/project.h"
 #include <QPolygonF>
@@ -8,10 +9,10 @@ namespace huelith::editing {
 void validate_geometry(const RawGeometry& s) {
     for (double v : {s.vertical, s.horizontal, s.aspect, s.offset_x, s.offset_y})
         if (!std::isfinite(v) || std::abs(v) > 100)
-            throw EditError(QStringLiteral("几何参数超出范围"));
+            throw EditError(QCoreApplication::translate("Huelith", "几何参数超出范围"));
     if (!std::isfinite(s.rotation) || std::abs(s.rotation) > 180 || !std::isfinite(s.scale) ||
         s.scale < 10 || s.scale > 400)
-        throw EditError(QStringLiteral("旋转或缩放参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "旋转或缩放参数无效"));
 }
 QJsonObject geometry_json(const RawGeometry& s) {
     validate_geometry(s);
@@ -33,11 +34,11 @@ RawGeometry geometry_from_json(const QJsonObject& j) {
     if (j.isEmpty())
         return s;
     if (j.value("version").toInt() != 1)
-        throw EditError(QStringLiteral("未知几何配方版本"));
+        throw EditError(QCoreApplication::translate("Huelith", "未知几何配方版本"));
     const auto keys = geometry_json(s);
     for (auto it = j.begin(); it != j.end(); ++it)
         if (!keys.contains(it.key()))
-            throw EditError(QStringLiteral("未知几何参数"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知几何参数"));
     for (auto [key, member] : {std::pair{"vertical", &s.vertical},
                                {"horizontal", &s.horizontal},
                                {"rotation", &s.rotation},
@@ -47,7 +48,7 @@ RawGeometry geometry_from_json(const QJsonObject& j) {
                                {"offsetY", &s.offset_y}})
         if (j.contains(QLatin1String(key))) {
             if (!j.value(QLatin1String(key)).isDouble())
-                throw EditError(QStringLiteral("几何数值格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "几何数值格式无效"));
             *member = j.value(QLatin1String(key)).toDouble();
         }
     for (auto [key, member] : {std::pair{"enabled", &s.enabled},
@@ -56,7 +57,7 @@ RawGeometry geometry_from_json(const QJsonObject& j) {
                                {"flipVertical", &s.flip_vertical}})
         if (j.contains(QLatin1String(key))) {
             if (!j.value(QLatin1String(key)).isBool())
-                throw EditError(QStringLiteral("几何开关格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "几何开关格式无效"));
             *member = j.value(QLatin1String(key)).toBool();
         }
     validate_geometry(s);
@@ -94,7 +95,7 @@ QRect geometry_crop_rect(QSize size, const RawGeometry& s) {
     if (polygon.size() > 1 && polygon.first() == polygon.last())
         polygon.removeLast();
     if (polygon.size() < 3)
-        throw EditError(QStringLiteral("几何变换后没有可裁剪的图像区域"));
+        throw EditError(QCoreApplication::translate("Huelith", "几何变换后没有可裁剪的图像区域"));
     QPointF center;
     for (const auto& p : polygon)
         center += p;
@@ -118,26 +119,26 @@ QRect geometry_crop_rect(QSize size, const RawGeometry& s) {
     const int bottom = int(std::floor(center.y() + (size.height() - 1) * low / 2));
     const QRect crop(QPoint(left, top), QPoint(right, bottom));
     if (crop.isEmpty())
-        throw EditError(QStringLiteral("约束裁剪范围为空"));
+        throw EditError(QCoreApplication::translate("Huelith", "约束裁剪范围为空"));
     return crop;
 }
 QImage apply_geometry(const QImage& source, const RawGeometry& s,
                       const std::atomic_bool* cancelled) {
     validate_geometry(s);
     if (cancelled && cancelled->load())
-        throw EditError(QStringLiteral("几何变换已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "几何变换已取消"));
     const auto transform = geometry_transform(source.size(), s);
     if (transform.isIdentity())
         return source;
     if (source.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("几何变换需要浮点图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "几何变换需要浮点图像"));
     QImage result(source.size(), source.format());
     result.setColorSpace(source.colorSpace());
     result.fill(Qt::transparent);
     const auto inverse = transform.inverted();
     for (int y = 0; y < result.height(); ++y) {
         if (cancelled && cancelled->load())
-            throw EditError(QStringLiteral("几何变换已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "几何变换已取消"));
         auto* row = reinterpret_cast<float*>(result.scanLine(y));
         for (int x = 0; x < result.width(); ++x) {
             const auto p = inverse.map(QPointF(x, y));

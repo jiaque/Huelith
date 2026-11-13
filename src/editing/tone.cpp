@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/image_storage.h"
 #include "huelith/editing/tone.h"
 #include "huelith/editing/project.h"
@@ -149,11 +150,11 @@ double vignette_coverage(double nx, double ny, int width, int height, const Tone
 } // namespace
 double evaluate_point_curve(double value, const std::vector<QPointF>& points, bool legacy) {
     if (!std::isfinite(value) || points.size() < 2 || points.size() > 64)
-        throw EditError(QStringLiteral("曲线参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "曲线参数无效"));
     for (std::size_t i = 0; i < points.size(); ++i)
         if (!std::isfinite(points[i].x()) || !std::isfinite(points[i].y()) ||
             (i && points[i].x() <= points[i - 1].x()))
-            throw EditError(QStringLiteral("曲线节点无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "曲线节点无效"));
     return PreparedCurve(points, legacy)(value);
 }
 double evaluate_parametric_curve(double value, const ToneSettings& settings) {
@@ -178,14 +179,14 @@ double evaluate_parametric_curve(double value, const ToneSettings& settings) {
 void validate_tone(const ToneSettings& settings) {
     for (double v : settings.parametric_curve)
         if (!std::isfinite(v) || v < -100 || v > 100)
-            throw EditError(QStringLiteral("参数曲线数量无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "参数曲线数量无效"));
     for (std::size_t i = 0; i < 3; ++i)
         if (!std::isfinite(settings.curve_splits[i]) || settings.curve_splits[i] < .01 ||
             settings.curve_splits[i] > .99 ||
             (i && settings.curve_splits[i] - settings.curve_splits[i - 1] < .009999))
-            throw EditError(QStringLiteral("曲线区域边界必须递增"));
+            throw EditError(QCoreApplication::translate("Huelith", "曲线区域边界必须递增"));
     if (settings.grading_blending < 0)
-        throw EditError(QStringLiteral("分级混合参数必须在 0–100 范围内"));
+        throw EditError(QCoreApplication::translate("Huelith", "分级混合参数必须在 0–100 范围内"));
     validate_calibration(settings.calibration);
     validate_detail(settings.details);
     validate_point_colors(settings.point_colors);
@@ -193,28 +194,28 @@ void validate_tone(const ToneSettings& settings) {
         std::floor(settings.vignette_style) != settings.vignette_style ||
         settings.vignette_midpoint < 0 || settings.vignette_feather < 0 ||
         settings.vignette_highlights < 0 || settings.grain_size < 0 || settings.grain_roughness < 0)
-        throw EditError(QStringLiteral("晕影或颗粒参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "晕影或颗粒参数无效"));
     for (const auto& [name, member] : fields) {
         const double limit = QLatin1String(name) == "sharpening" ? 150 : 100;
         if (!std::isfinite(settings.*member) || std::abs(settings.*member) > limit)
-            throw EditError(QStringLiteral("调色参数无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "调色参数无效"));
     }
     if (std::abs(settings.exposure) > 16 || settings.black_point < 0 || settings.white_point > 1 ||
         settings.white_point - settings.black_point < .001 || settings.gamma < .1 ||
         settings.gamma > 10 || settings.curve.size() < 2 || settings.curve.size() > 64)
-        throw EditError(QStringLiteral("色阶或曲线参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "色阶或曲线参数无效"));
     const auto validate_curve = [](const std::vector<QPointF>& points) {
         if (points.size() < 2 || points.size() > 64)
-            throw EditError(QStringLiteral("曲线控制点数量无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "曲线控制点数量无效"));
         double previous = -1;
         for (const auto point : points) {
             if (!std::isfinite(point.x()) || !std::isfinite(point.y()) || point.x() < 0 ||
                 point.x() > 1 || point.y() < 0 || point.y() > 1 || point.x() - previous < 1e-6)
-                throw EditError(QStringLiteral("曲线控制点必须按输入值严格递增"));
+                throw EditError(QCoreApplication::translate("Huelith", "曲线控制点必须按输入值严格递增"));
             previous = point.x();
         }
         if (points.front().x() != 0 || points.back().x() != 1)
-            throw EditError(QStringLiteral("曲线需要首尾输入端点"));
+            throw EditError(QCoreApplication::translate("Huelith", "曲线需要首尾输入端点"));
     };
     validate_curve(settings.curve);
     for (const auto& channel : settings.channel_curves)
@@ -225,12 +226,12 @@ void validate_tone(const ToneSettings& settings) {
             settings.grading_saturation[i] < 0 || settings.grading_saturation[i] > 100 ||
             !std::isfinite(settings.grading_luminance[i]) ||
             std::abs(settings.grading_luminance[i]) > 100)
-            throw EditError(QStringLiteral("色彩分级参数无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "色彩分级参数无效"));
     }
     for (const auto& band : {settings.hue, settings.saturation_bands, settings.luminance_bands})
         for (const double value : band)
             if (!std::isfinite(value) || std::abs(value) > 100)
-                throw EditError(QStringLiteral("HSL 分色参数无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "HSL 分色参数无效"));
 }
 QJsonObject tone_json(const ToneSettings& settings) {
     validate_tone(settings);
@@ -290,30 +291,30 @@ ToneSettings tone_from_json(const QJsonObject& json) {
     if (json.isEmpty())
         return settings;
     if (json.value("version").toInt() < 1 || json.value("version").toInt() > 8)
-        throw EditError(QStringLiteral("未知调色配方版本"));
+        throw EditError(QCoreApplication::translate("Huelith", "未知调色配方版本"));
     settings.legacy_curve_interpolation = json.value("version").toInt() < 8;
     if (json.contains("legacyCurveInterpolation")) {
         if (!json.value("legacyCurveInterpolation").isBool())
-            throw EditError(QStringLiteral("曲线兼容标记无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "曲线兼容标记无效"));
         settings.legacy_curve_interpolation = json.value("legacyCurveInterpolation").toBool();
     }
     if (json.contains("parametricCurve")) {
         const auto values = json.value("parametricCurve").toArray();
         if (values.size() != 4)
-            throw EditError(QStringLiteral("参数曲线需要四个区域"));
+            throw EditError(QCoreApplication::translate("Huelith", "参数曲线需要四个区域"));
         for (int i = 0; i < 4; ++i) {
             if (!values[i].isDouble())
-                throw EditError(QStringLiteral("参数曲线格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "参数曲线格式无效"));
             settings.parametric_curve[i] = values[i].toDouble();
         }
     }
     if (json.contains("curveSplits")) {
         const auto values = json.value("curveSplits").toArray();
         if (values.size() != 3)
-            throw EditError(QStringLiteral("曲线区域边界无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "曲线区域边界无效"));
         for (int i = 0; i < 3; ++i) {
             if (!values[i].isDouble())
-                throw EditError(QStringLiteral("曲线区域格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "曲线区域格式无效"));
             settings.curve_splits[i] = values[i].toDouble();
         }
     }
@@ -321,18 +322,18 @@ ToneSettings tone_from_json(const QJsonObject& json) {
     settings.legacy_color_transform = json.value("version").toInt() < 7;
     if (json.contains("legacyColorTransform")) {
         if (!json.value("legacyColorTransform").isBool())
-            throw EditError(QStringLiteral("色彩转换兼容标记无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "色彩转换兼容标记无效"));
         settings.legacy_color_transform = json.value("legacyColorTransform").toBool();
     }
     if (json.contains("legacyFilmEffects")) {
         if (!json.value("legacyFilmEffects").isBool())
-            throw EditError(QStringLiteral("效果兼容版本格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "效果兼容版本格式无效"));
         settings.legacy_film_effects = json.value("legacyFilmEffects").toBool();
     }
     settings.details.legacy_sharpening = json.value("version").toInt() < 5;
     if (json.contains("details")) {
         if (!json.value("details").isObject())
-            throw EditError(QStringLiteral("细节配方格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "细节配方格式无效"));
         settings.details = detail_from_json(json.value("details").toObject());
     }
     const auto defaults = tone_json(settings);
@@ -340,46 +341,46 @@ ToneSettings tone_from_json(const QJsonObject& json) {
         const auto sections = json.value("sections").toArray();
         const int expected = json.value("version").toInt() >= 4 ? 9 : 8;
         if (sections.size() != expected)
-            throw EditError(QStringLiteral("调色分组开关数量无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "调色分组开关数量无效"));
         for (int i = 0; i < expected; ++i) {
             if (!sections[i].isBool())
-                throw EditError(QStringLiteral("调色分组开关必须为布尔值"));
+                throw EditError(QCoreApplication::translate("Huelith", "调色分组开关必须为布尔值"));
             settings.sections[i] = sections[i].toBool();
         }
     }
     if (json.contains("calibration")) {
         if (!json.value("calibration").isObject())
-            throw EditError(QStringLiteral("校正配方格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "校正配方格式无效"));
         settings.calibration = calibration_from_json(json.value("calibration").toObject());
     }
     if (json.contains("pointColors")) {
         if (!json.value("pointColors").isArray())
-            throw EditError(QStringLiteral("点颜色配方格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "点颜色配方格式无效"));
         settings.point_colors = point_colors_from_json(json.value("pointColors").toArray());
     }
     if (json.contains("monochrome")) {
         if (!json.value("monochrome").isBool())
-            throw EditError(QStringLiteral("黑白开关格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "黑白开关格式无效"));
         settings.monochrome = json.value("monochrome").toBool();
     }
     for (auto it = json.begin(); it != json.end(); ++it)
         if (!defaults.contains(it.key()))
-            throw EditError(QStringLiteral("未知调色配方字段"));
+            throw EditError(QCoreApplication::translate("Huelith", "未知调色配方字段"));
     for (const auto& [name, member] : fields) {
         if (!json.contains(QLatin1String(name)))
             continue;
         if (!json.value(QLatin1String(name)).isDouble())
-            throw EditError(QStringLiteral("调色数值格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "调色数值格式无效"));
         settings.*member = json.value(QLatin1String(name)).toDouble();
     }
     const auto read_curve = [](const QJsonValue& data) {
         if (!data.isArray())
-            throw EditError(QStringLiteral("曲线格式无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "曲线格式无效"));
         std::vector<QPointF> points;
         for (const auto value : data.toArray()) {
             const auto pair = value.toArray();
             if (pair.size() != 2 || !pair[0].isDouble() || !pair[1].isDouble())
-                throw EditError(QStringLiteral("曲线格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "曲线格式无效"));
             points.emplace_back(pair[0].toDouble(), pair[1].toDouble());
         }
         return points;
@@ -389,7 +390,7 @@ ToneSettings tone_from_json(const QJsonObject& json) {
     if (json.contains("channelCurves")) {
         const auto channels = json.value("channelCurves").toArray();
         if (channels.size() != 3)
-            throw EditError(QStringLiteral("需要三个通道曲线"));
+            throw EditError(QCoreApplication::translate("Huelith", "需要三个通道曲线"));
         for (int c = 0; c < 3; ++c)
             settings.channel_curves[c] = read_curve(channels[c]);
     }
@@ -400,10 +401,10 @@ ToneSettings tone_from_json(const QJsonObject& json) {
             continue;
         const auto values = json.value(QLatin1String(name)).toArray();
         if (values.size() != 3 && values.size() != 4)
-            throw EditError(QStringLiteral("需要阴影、中间调、高光和可选全局分级参数"));
+            throw EditError(QCoreApplication::translate("Huelith", "需要阴影、中间调、高光和可选全局分级参数"));
         for (int c = 0; c < values.size(); ++c) {
             if (!values[c].isDouble())
-                throw EditError(QStringLiteral("色彩分级数值无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "色彩分级数值无效"));
             (*band)[c] = values[c].toDouble();
         }
     }
@@ -414,10 +415,10 @@ ToneSettings tone_from_json(const QJsonObject& json) {
             continue;
         const auto values = json.value(QLatin1String(name)).toArray();
         if (values.size() != 8)
-            throw EditError(QStringLiteral("HSL 分色数量无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "HSL 分色数量无效"));
         for (int i = 0; i < 8; ++i) {
             if (!values[i].isDouble())
-                throw EditError(QStringLiteral("HSL 参数格式无效"));
+                throw EditError(QCoreApplication::translate("Huelith", "HSL 参数格式无效"));
             (*band)[i] = values[i].toDouble();
         }
     }
@@ -481,7 +482,7 @@ QImage apply_tone(const QImage& source, const ToneSettings& settings,
                   [](const PointColor& color) { return color.shift == std::array<double, 3>{}; });
     const auto check_cancel = [cancelled] {
         if (cancelled && cancelled->load())
-            throw EditError(QStringLiteral("图像处理已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "图像处理已取消"));
     };
     check_cancel();
     validate_tone(s);
@@ -493,7 +494,7 @@ QImage apply_tone(const QImage& source, const ToneSettings& settings,
         return source;
     if (source.format() != QImage::Format_RGBA32FPx4_Premultiplied ||
         source.colorSpace() != working_space())
-        throw EditError(QStringLiteral("调色需要线性 Rec.2020 FP32 输入"));
+        throw EditError(QCoreApplication::translate("Huelith", "调色需要线性 Rec.2020 FP32 输入"));
     auto without_exposure = s;
     without_exposure.exposure = 0;
     if (detail_preview == 0 && without_exposure == neutral_settings) {
@@ -506,7 +507,7 @@ QImage apply_tone(const QImage& source, const ToneSettings& settings,
                 for (int c = 0; c < 3; ++c) {
                     row[x * 4 + c] *= gain;
                     if (!std::isfinite(row[x * 4 + c]))
-                        throw EditError(QStringLiteral("曝光结果超出浮点范围"));
+                        throw EditError(QCoreApplication::translate("Huelith", "曝光结果超出浮点范围"));
                 }
         }
         return result;
@@ -649,7 +650,7 @@ QImage apply_tone(const QImage& source, const ToneSettings& settings,
                 const double value = rgb[c] * p[3];
                 if (!std::isfinite(value) ||
                     std::abs(value) > double(std::numeric_limits<float>::max()))
-                    throw EditError(QStringLiteral("调色结果超出浮点范围"));
+                    throw EditError(QCoreApplication::translate("Huelith", "调色结果超出浮点范围"));
                 p[c] = float(value);
             }
         }
@@ -798,7 +799,7 @@ QImage apply_tone(const QImage& source, const ToneSettings& settings,
                                                   : decoded(encoded(value) + noise);
                     p[c] = float(value * p[3]);
                     if (!std::isfinite(p[c]))
-                        throw EditError(QStringLiteral("效果结果超出浮点范围"));
+                        throw EditError(QCoreApplication::translate("Huelith", "效果结果超出浮点范围"));
                 }
             }
         }

@@ -1,4 +1,5 @@
 #pragma once
+#include "huelith/editing/blend.h"
 #include "huelith/editing/tone.h"
 #include <QString>
 #include <QUuid>
@@ -13,6 +14,12 @@ struct CubeLut {
     QString source;
 };
 struct Effect {
+    int filter{}; // 0 none, 1 unsharp, 2 motion, 3 median, 4 noise, 5 twirl, 6 emboss, 7 posterize,
+                  // 8 clouds, 9 oil paint, 10 edges, 11 high pass, 12 zoom blur, 13 wave,
+                  // 14 pinch, 15 mosaic, 16 surface blur.
+    double filter_radius{5}, filter_angle{};
+    quint32 filter_seed{1};
+    Blend blend{Blend::normal};
     QUuid id{QUuid::createUuid()};
     QString name{QStringLiteral("调整")};
     bool enabled{true};

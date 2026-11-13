@@ -1,11 +1,27 @@
+#include "huelith/editing/image_storage.h"
+#include "huelith/editing/photoshop_file.h"
+#include "expression_spin_box.h"
+#include "huelith/editing/credentials.h"
+#include "huelith/editing/document_color.h"
+#include "huelith/editing/layout_regions.h"
+#include "huelith/editing/pdf_import.h"
 #include "huelith/editing/portrait.h"
+#include "huelith/editing/portrait_effects.h"
 #include "huelith/editing/raw_recipe.h"
+#include "huelith/editing/tiff_io.h"
+#include "new_document_dialog.h"
+#include "text_edit_view.h"
 #include "tone_panel.h"
+#include <QInputMethodEvent>
+#include <QPainter>
+#include <QPdfWriter>
+#include <QTextDocument>
+#include <future>
 // Local Python automation adapter. Assertions and test scenarios live in Python;
 // this DLL calls the same C++ targets linked into Huelith, without a test EXE.
 #include "canvas_preferences.h"
+#include "interface_language.h"
 #include "canvas_view.h"
-#include <QGraphicsPixmapItem>
 #include "export_dialog.h"
 #include "huelith/editing/demosaic.h"
 #include "huelith/editing/healing.h"
@@ -15,8 +31,8 @@
 #include "huelith/editing/raw_cache.h"
 #include "huelith/editing/raw_develop.h"
 #include "huelith/editing/raw_geometry.h"
-#include "huelith/editing/semantic.h"
 #include "huelith/editing/selection_refine.h"
+#include "huelith/editing/semantic.h"
 #include "huelith/editing/tiff_io.h"
 #include "huelith/editing/white_balance.h"
 #include "main_window.h"
@@ -40,6 +56,8 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileDialog>
+#include <QFontDatabase>
+#include <QGraphicsPixmapItem>
 #include <QGraphicsView>
 #include <QHelpEvent>
 #include <QInputDialog>
@@ -49,7 +67,10 @@
 #include <QKeyEvent>
 #include <QKeySequenceEdit>
 #include <QLabel>
+#include <QLibraryInfo>
 #include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QProgressDialog>
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
@@ -62,6 +83,7 @@
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QStyleOptionSlider>
 #include <QTabBar>
@@ -74,11 +96,11 @@
 #include <QToolButton>
 #include <QToolTip>
 #include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 #include <QWheelEvent>
 #include <cmath>
 #include <memory>
 #include <optional>
-#include <QLibraryInfo>
 
 QJsonObject design_command(huelith::desktop::MainWindow*, const QJsonObject&);
 QJsonObject brush_command(huelith::desktop::MainWindow*, const QJsonObject&);
@@ -708,6 +730,224 @@ QJsonObject run(const QJsonObject& o) {
             {"sha256", QString::fromLatin1(
                            QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())}};
     }
+    if (op == "text_edit_probe") {
+        auto* canvas = d.window->active_canvas();
+        QJsonArray results;
+        for (int layout = 0; layout < 3; ++layout) {
+            Layer layer;
+            layer.kind = LayerKind::text;
+            layer.text.layout = layout;
+            layer.text.html = QStringLiteral("<p>中文 Latin العربية</p>");
+            layer.text.box = {240, 180};
+            layer.text.paragraph = true;
+            layer.text.baseline.moveTo(0, 80);
+            layer.text.baseline.cubicTo(80, 0, 160, 160, 240, 80);
+            huelith::desktop::TextEditView editor(canvas, layer, false);
+            QApplication::processEvents();
+            QInputMethodEvent preedit(QStringLiteral("ceshi"), {});
+            QApplication::sendEvent(&editor, &preedit);
+            QTextDocument pending;
+            pending.setHtml(editor.result().text.html);
+            if (pending.toPlainText().contains("ceshi"))
+                throw EditError("Preedit committed prematurely");
+            QInputMethodEvent commit;
+            commit.setCommitString(QStringLiteral("测试"));
+            QApplication::sendEvent(&editor, &commit);
+            QTextDocument committed;
+            committed.setHtml(editor.result().text.html);
+            results.append(committed.toPlainText().contains(QStringLiteral("测试")) &&
+                           committed.toPlainText().contains("Latin"));
+            if (o.contains("directory"))
+                editor.grab().save(QDir(o.value("directory").toString())
+                                       .filePath(QString("text-edit-%1.png").arg(layout)));
+        }
+        return {{"ime", results}};
+    }
+    if(op=="pixel_storage_budget_probe"){
+        auto before=pixel_storage_usage();
+        configure_pixel_storage(o.value("folder").toString(),before.resident+65536,before.mapped+65536);
+        bool rejected=false;
+        {auto ram=allocate_image({128,128},QImage::Format_RGBA8888);
+         auto spill=allocate_image({128,128},QImage::Format_RGBA8888);
+         if(pixel_storage_usage().mapped!=before.mapped+65536)throw EditError("scratch did not spill");
+         try{auto excess=allocate_image({128,128},QImage::Format_RGBA8888);(void)excess;}catch(const EditError&){rejected=true;}}
+        configure_pixel_storage({},2048LL<<20,32LL<<30);
+        State state;state.name="history";state.size={16,16};Layer l;l.name="probe";QImage sample(16,16,QImage::Format_RGBA8888);sample.fill(Qt::black);l.pixels=to_working(sample);state.layers={l};
+        Project project(state);project.set_history_limit(100,l.pixels.sizeInBytes());
+        for(int i=0;i<4;++i)project.edit("paint",[&](State& s){s.layers.front().pixels.fill(QColor(i,0,0));});
+        return {{"rejected",rejected},{"released",pixel_storage_usage().mapped==before.mapped},{"historyBounded",project.history_names().size()==2}};
+    }
+    if (op == "photoshop_roundtrip") {
+        const auto& state = d.window->active_canvas()->project().state();
+        const QString path = o.value("path").toString();
+        write_photoshop(state, path);
+        QStringList warnings;
+        const auto loaded = read_photoshop(path, warnings);
+        QJsonArray names;
+        for (const auto& layer : loaded.layers) names.append(layer.name);
+        return {{"names", names}, {"warnings", QJsonArray::fromStringList(warnings)},
+                {"samePixels",display_image(render(loaded)) == display_image(render(state))}};
+    }
+    if (op == "photoshop_read") {
+        QStringList warnings;
+        auto s = read_photoshop(o["path"].toString(), warnings, o["merged"].toBool());
+        auto image = display_image(render(s)).convertToFormat(QImage::Format_RGBA8888);
+        if (o.contains("output")) image.save(o["output"].toString());
+        return {{"layers",int(s.layers.size())},{"warnings",QJsonArray::fromStringList(warnings)},
+                {"width",s.size.width()},{"height",s.size.height()}};
+    }
+    if (op == "action_recording_state") {
+        return {{"steps",d.window->active_canvas()->property("recordedSteps").toJsonArray()},
+                {"summary",d.window->property("batchSummary").toString()}};
+    }
+    if (op == "comfy_probe") {
+        auto* c=d.window->active_canvas();
+        if(o.contains("coverage"))c->edit("test selection",[&](State& s){
+            s.selection=QImage(s.size,QImage::Format_Grayscale8);s.selection.fill(o["coverage"].toInt());
+        });
+        QJsonArray inputs;QJsonObject record;
+        if(!c->project().state().layers.empty()) {
+            const auto& l=c->project().state().layers.back();
+            for(auto it=l.generation_inputs.begin();it!=l.generation_inputs.end();++it)inputs.append(it.key());
+            record=l.source_metadata;
+        }
+        QString status;
+        if(auto* label=d.window->findChild<QLabel*>("comfyStatus"))status=label->text();
+        return {{"inputs",inputs},{"record",record},{"status",status}};
+    }
+    if (op == "photoshop_group_probe") {
+        State s; s.name="group";s.size={32,24};
+        Layer bottom;bottom.name="bottom";
+        QImage pixels(s.size,QImage::Format_RGBA8888);pixels.fill(Qt::red);
+        bottom.pixels=to_working(pixels);
+        Layer child=bottom;child.id=QUuid::createUuid();child.name="child";
+        pixels.fill(Qt::blue);child.pixels=to_working(pixels);
+        child.mask=QImage(s.size,QImage::Format_Grayscale8);child.mask.fill(100);
+        Layer group;group.name="group";group.kind=LayerKind::group;group.isolated=true;
+        group.children={child};group.opacity=.8f;s.layers={bottom,group};
+        write_photoshop(s,o["path"].toString());QStringList warnings;
+        auto back=read_photoshop(o["path"].toString(),warnings);
+        bool structure=back.layers.size()==2 && back.layers.back().kind==LayerKind::group &&
+            back.layers.back().children.size()==1 &&
+            back.layers.back().children.front().mask.pixelColor(0,0).red()==100;
+        auto a=display_image(render(s)),b=display_image(render(back));
+        auto ca=a.pixelColor(0,0),cb=b.pixelColor(0,0);
+        return {{"structure",structure},{"pixelError",std::max({abs(ca.red()-cb.red()),abs(ca.green()-cb.green()),abs(ca.blue()-cb.blue())})}};
+    }
+    if (op == "document_pipeline_probe") {
+        const QDir folder(o.value("directory").toString());
+        QImage image(64, 48, QImage::Format_RGBA8888);
+        image.setColorSpace(QColorSpace::SRgb);
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                image.setPixelColor(x, y, QColor(x * 4, y * 5, 80, 64 + x * 3));
+        State state;
+        state.size = image.size();
+        state.name = "pipeline";
+        Layer layer;
+        layer.name = "source";
+        layer.pixels = to_working(image);
+        state.layers = {layer};
+        const auto reference = render(state);
+        QJsonObject result;
+        const auto white = working_to_lab({1, 1, 1}), back = lab_to_working(white);
+        result["whiteLab"] = QJsonArray{white[0], white[1], white[2]};
+        result["whiteBack"] = QJsonArray{back[0], back[1], back[2]};
+        QJsonArray channels;
+        for (int mode : {0, 1, 2}) {
+            auto copy = state;
+            set_document_color(copy, {mode, 16, QColorSpace::SRgb});
+            const auto output = render(copy);
+            const auto names = document_channel_names(copy);
+            for (int i = 0; i < names.size(); ++i) {
+                const auto mask = document_channel(output, copy, i);
+                apply_document_channel(copy.layers[0], copy, i, mask);
+            }
+            channels.append(names.size());
+            save_project({copy, 1}, folder.filePath(QString("color-%1.huelith").arg(mode)));
+            if (render(load_project(folder.filePath(QString("color-%1.huelith").arg(mode)))) !=
+                render(copy))
+                throw EditError("Color roundtrip mismatch");
+        }
+        if (o.contains("cmykProfile")) {
+            QFile icc(o.value("cmykProfile").toString());
+            if (!icc.open(QIODevice::ReadOnly))
+                throw EditError(icc.errorString());
+            auto cmyk = state;
+            set_document_color(cmyk, {3, 8, QColorSpace::fromIccProfile(icc.readAll())});
+            for (int component = 0; component < 4; ++component) {
+                auto mask = document_channel(render(cmyk), cmyk, component);
+                apply_document_channel(cmyk.layers[0], cmyk, component, mask);
+            }
+            save_project({cmyk, 1}, folder.filePath("cmyk.huelith"));
+            result["cmykRoundtrip"] =
+                render(load_project(folder.filePath("cmyk.huelith"))) == render(cmyk);
+            ExportOptions options;
+            options.format = "tif";
+            options.bits = 8;
+            options.alpha = false;
+            options.space = document_color(cmyk).profile;
+            const auto separated = prepare_export_image(render(cmyk), options, 300);
+            std::atomic_bool cancelled = false;
+            write_tiff(separated, folder.filePath("cmyk.tif"), 8, cancelled, 300);
+            const auto restored = read_tiff(folder.filePath("cmyk.tif"));
+            result["cmykTiff"] = restored == to_working(separated);
+        }
+        result["channelCounts"] = channels;
+        auto assigned = state;
+        set_document_color(assigned, {0, 32, QColorSpace::AdobeRgb}, true);
+        auto converted = state;
+        set_document_color(converted, {0, 32, QColorSpace::AdobeRgb}, false);
+        result["assignChanges"] = render(assigned) != reference;
+        result["convertPreserves"] = render(converted) == reference;
+        auto board = state;
+        create_artboard(board, "board", QRect(0, 0, 64, 48), {layer.id});
+        board.slices.push_back({QUuid::createUuid(), "left", QRect(0, 0, 32, 48)});
+        const auto boards = export_regions({board, 1}, 2), slices = export_regions({board, 1}, 3);
+        result["boardMatches"] = render(boards[0].state) == reference;
+        result["sliceWidth"] = slices[0].state.size.width();
+        resize_document(board, {128, 96}, 150);
+        result["resizeSlice"] = board.slices[0].bounds.width();
+        save_project({board, 2}, folder.filePath("layout.huelith"));
+        const auto loaded = load_project(folder.filePath("layout.huelith"));
+        result["layoutRoundtrip"] = render(loaded) == render(board) && loaded.layers[0].artboard &&
+                                    loaded.slices.size() == 1;
+        auto spot = state;
+        QImage mask(state.size, QImage::Format_Grayscale8);
+        mask.fill(128);
+        spot.saved_selections["ink"] = mask;
+        spot.metadata["spotChannels"] =
+            QJsonObject{{"ink", QJsonObject{{"color", "#ff0000"}, {"solidity", .5}}}};
+        result["spotChanges"] = render(spot) != reference;
+        result["spotPreview"] = !render(preview_state(spot, 32)).isNull();
+        const auto pdf = folder.filePath("pages.pdf");
+        {
+            QPdfWriter writer(pdf);
+            writer.setResolution(72);
+            QPainter painter(&writer);
+            painter.fillRect(0, 0, 400, 400, Qt::red);
+            writer.newPage();
+            painter.fillRect(0, 0, 400, 400, Qt::blue);
+        }
+        const auto pages = std::async(std::launch::async, [pdf] {
+                               return import_pdf_pages(pdf, {}, 1, 2, 72);
+                           }).get();
+        result["pdfCount"] = pages.count;
+        result["pdfDistinct"] = pages.images.size() == 2 && pages.images[0] != pages.images[1];
+        const CredentialSettings credentials{o.value("c2pa").toString(), {}, {}};
+        if (!credentials.tool.isEmpty()) {
+            const auto unsigned_file = folder.filePath("unsigned.png");
+            image.save(unsigned_file);
+            result["unsignedPresent"] = inspect_credentials(unsigned_file, credentials).present;
+            const auto signed_file = o.value("signedSample").toString();
+            if (!signed_file.isEmpty()) {
+                const auto report = inspect_credentials(signed_file, credentials);
+                result["signedValid"] = report.valid;
+                result["signedPresent"] = report.present;
+            }
+        }
+        return result;
+    }
     if (op == "effect_probe") {
         QImage input(2, 1, QImage::Format_RGBA32FPx4_Premultiplied);
         input.setColorSpace(working_space());
@@ -724,6 +964,10 @@ QJsonObject run(const QJsonObject& o) {
             effect.name = json.value("name").toString("effect");
             effect.enabled = json.value("enabled").toBool(true);
             effect.amount = json.value("amount").toDouble(1);
+            effect.filter = json.value("filter").toInt();
+            effect.filter_radius = json.value("filterRadius").toDouble(5);
+            effect.filter_angle = json.value("filterAngle").toDouble();
+            effect.blend = static_cast<Blend>(json.value("blend").toInt());
             effect.tone = tone_from_json(json.value("tone").toObject());
             if (json.contains("lut"))
                 effect.lut = parse_cube(json.value("lut").toString());
@@ -1621,12 +1865,52 @@ QJsonObject run(const QJsonObject& o) {
                                o.value("settings").toString());
             huelith::desktop::configure_interface_scale();
             d.application = std::make_unique<QApplication>(d.argc, d.argv);
+            if (o.contains("language") || o.value("loadLanguage").toBool()) {
+                if (o.contains("language"))
+                    QSettings().setValue("interface/language", o.value("language").toString());
+                huelith::desktop::install_interface_language();
+            }
+            if (QGuiApplication::platformName() == "offscreen") {
+                QFontDatabase::addApplicationFont("C:/Windows/Fonts/msyh.ttc");
+                QFontDatabase::addApplicationFont("C:/Windows/Fonts/arial.ttf");
+            }
             if (!o.value("settings").toString().isEmpty())
                 QSettings().setValue("storage/recoveryDirectory",
                                      o.value("settings").toString() + "/recovery");
             huelith::desktop::apply_dark_theme();
         }
         return {{"ok", true}, {"protocol", 2}};
+    }
+    if (op == "language_probe") {
+        bool found = false;
+        bool accepted = false;
+        if (o.contains("choose")) {
+            QTimer timer;
+            timer.setInterval(20);
+            QObject::connect(&timer, &QTimer::timeout, [&] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if (!dialog) return;
+                if (auto* choice = dialog->findChild<QComboBox*>("interfaceLanguagePreference")) {
+                    found = true;
+                    choice->setCurrentIndex(o.value("choose").toInt());
+                    if (o.contains("capture")) dialog->grab().save(o.value("capture").toString());
+                }
+                timer.stop();
+                if (o.value("accept").toBool()) dialog->accept();
+                else dialog->reject();
+            });
+            timer.start();
+            accepted = huelith::desktop::show_canvas_preferences(d.window.get(), 7);
+        }
+        QJsonArray menus;
+        if (d.window) for (auto* action : d.window->findChild<QMenuBar*>()->actions()) menus.append(action->text());
+        QJsonArray labels;
+        for (int panel = 0; panel < 15; ++panel)
+            for (const auto& parameter : huelith::editing::portrait_parameters(panel)) labels.append(parameter.label);
+        return {{"found", found}, {"accepted", accepted}, {"menus", menus}, {"labels", labels},
+                {"language", huelith::desktop::interface_language()},
+                {"file", QObject::tr("首选项")},
+                {"errorText", QString::fromUtf8(EditError(QStringLiteral("图层不存在")).what())}};
     }
     if (op == "create") {
         State state;
@@ -1699,12 +1983,39 @@ QJsonObject run(const QJsonObject& o) {
         return {{"ok", true}};
     }
     if (op == "window_control") {
+        if (o.contains("answer") || o.contains("dialog") || o.contains("path"))
+            QTimer::singleShot(0, [o] {
+                if (auto* file = qobject_cast<QFileDialog*>(QApplication::activeModalWidget()); file && o.contains("path")) {
+                    file->selectFile(o["path"].toString());static_cast<QDialog*>(file)->accept();
+                } else if (auto* input = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                    input->setTextValue(o.value("answer").toString());
+                    input->accept();
+                } else if (auto* dialog =
+                               qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                    const auto values = o.value("dialog").toObject();
+                    for (auto it = values.begin(); it != values.end(); ++it)
+                        if (auto* combo = dialog->findChild<QComboBox*>(it.key()))
+                            combo->setCurrentIndex(it.value().toInt());
+                    if (auto* buttons = dialog->findChild<QDialogButtonBox*>())
+                        buttons->button(QDialogButtonBox::Ok)->click();
+                }
+            });
+
         auto* widget = d.window->findChild<QWidget*>(o.value("name").toString());
         if (!widget)
             throw EditError("control missing");
         if (auto* box = qobject_cast<QCheckBox*>(widget))
             box->setChecked(o.value("value").toBool());
-        else if (auto* button = qobject_cast<QToolButton*>(widget))
+        else if (auto* line = qobject_cast<QLineEdit*>(widget))
+            line->setText(o.value("value").toString());
+        else if (auto* slider = qobject_cast<QSlider*>(widget)) {
+            slider->setValue(o.value("value").toInt());
+            if (o.value("drag").toBool()) {
+                slider->sliderMoved(slider->value());
+                slider->sliderReleased();
+            }
+        }
+        else if (auto* button = qobject_cast<QAbstractButton*>(widget))
             button->click();
         else if (auto* combo = qobject_cast<QComboBox*>(widget))
             combo->setCurrentIndex(o.value("value").toInt());
@@ -1712,6 +2023,7 @@ QJsonObject run(const QJsonObject& o) {
             spin->setValue(o.value("value").toDouble());
             QMetaObject::invokeMethod(spin, "editingFinished");
         } else if (auto* list = qobject_cast<QListWidget*>(widget)) {
+            list->setCurrentRow(o.value("value").toInt());
             auto* item = list->item(o.value("value").toInt());
             if (!item)
                 throw EditError("list item missing");
@@ -1972,6 +2284,113 @@ QJsonObject run(const QJsonObject& o) {
         return {{"count", d.window->document_count()},
                 {"layers", int(d.window->active_canvas()->project().state().layers.size())}};
     }
+    if (op == "ps_new_document") {
+        huelith::desktop::NewDocumentDialog dialog;
+        for (const auto& value : o.value("steps").toArray()) {
+            const auto step = value.toObject();
+            const auto name = step.value("name").toString();
+            if (auto* box = dialog.findChild<QComboBox*>(name))
+                box->setCurrentIndex(step.value("value").toInt());
+            else if (auto* spin = dialog.findChild<QDoubleSpinBox*>(name)) {
+                if (step.contains("text")) {
+                    spin->findChild<QLineEdit*>()->setText(step.value("text").toString());
+                    if (step.value("interpret").toBool(true))
+                        spin->interpretText();
+                } else
+                    spin->setValue(step.value("value").toDouble());
+            } else if (auto* button = dialog.findChild<QAbstractButton*>(name)) {
+                if (step.contains("answer"))
+                    QTimer::singleShot(0, [step] {
+                        if (auto* input =
+                                qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                            input->setTextValue(step["answer"].toString());
+                            input->accept();
+                        }
+                    });
+                button->click();
+            } else if (auto* list = dialog.findChild<QListWidget*>(name)) {
+                list->setCurrentRow(step.value("value").toInt());
+                QMetaObject::invokeMethod(list, "itemClicked", Qt::DirectConnection,
+                                          Q_ARG(QListWidgetItem*, list->currentItem()));
+            }
+        }
+        if (o.contains("capture")) {
+            dialog.show();
+            QApplication::processEvents();
+            dialog.grab().save(o.value("capture").toString());
+        }
+        const auto spec = dialog.specification();
+        if (o.value("accept").toBool()) {
+            dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            if (dialog.result() == QDialog::Accepted && !d.window->create_document(spec))
+                throw EditError("new document creation failed");
+        }
+        return {{"width", spec.width},
+                {"height", spec.height},
+                {"ppi", spec.resolution_ppi},
+                {"background", int(spec.background)},
+                {"valid",
+                 !huelith::validate(spec) &&
+                     dialog.findChild<QDoubleSpinBox*>("documentWidth")->hasAcceptableInput() &&
+                     dialog.findChild<QDoubleSpinBox*>("documentHeight")->hasAcceptableInput()},
+                {"accepted", dialog.result() == QDialog::Accepted},
+                {"savedPresets", QSettings().value("newDocument/saved").toList().size()},
+                {"recent", QSettings().value("newDocument/recent").toList().size()}};
+    }
+    if (op == "workspace_layout") {
+        QWidget* window = nullptr;
+        for (auto* candidate : QApplication::topLevelWidgets())
+            if (candidate->objectName() == o["name"].toString())
+                window = candidate;
+        if (!window)
+            throw EditError("workspace missing");
+        if (o.contains("width"))
+            window->resize(o["width"].toInt(), o["height"].toInt());
+        QApplication::processEvents();
+        auto* splitter = window->findChild<QSplitter*>();
+        if (splitter && o.contains("inspector")) {
+            const int size = o["inspector"].toInt();
+            splitter->setSizes({splitter->width() - size - splitter->handleWidth(), size});
+            QMetaObject::invokeMethod(splitter, "splitterMoved", Qt::DirectConnection,
+                                      Q_ARG(int, splitter->sizes()[0]), Q_ARG(int, 1));
+        }
+        if (o.contains("toggle"))
+            window->findChild<QToolButton*>("workspacePanelToggle")->click();
+        QApplication::processEvents();
+        if (o.contains("capture"))
+            window->grab().save(o["capture"].toString());
+        QJsonArray sizes;
+        if (splitter)
+            for (int size : splitter->sizes())
+                sizes.append(size);
+        return {{"width", window->width()},
+                {"height", window->height()},
+                {"sizes", sizes},
+                {"savedWidth", QSettings().value(o["key"].toString()).toInt()}};
+    }
+    if (op == "ps_state") {
+        if (o.contains("width"))
+            d.window->resize(o.value("width").toInt(), o.value("height").toInt());
+        QApplication::processEvents();
+        if (o.contains("capture"))
+            d.window->grab().save(o.value("capture").toString());
+        QJsonArray visible;
+        auto* tree = d.window->findChild<QTreeWidget*>("layerTree");
+        for (QTreeWidgetItemIterator it(tree); *it; ++it)
+            if (!(*it)->isHidden())
+                visible.append((*it)->text(0));
+        auto* c = d.window->active_canvas();
+        return {
+            {"metadata", c ? c->project().state().metadata : QJsonObject{}},
+            {"alpha", c ? QJsonArray::fromStringList(c->project().state().saved_selections.keys())
+                        : QJsonArray{}},
+            {"visibleLayers", visible},
+            {"width", d.window->width()},
+            {"height", d.window->height()},
+            {"canvasWidth", c ? c->width() : 0},
+            {"theme", huelith::desktop::read_canvas_preferences().interface_theme},
+            {"columns", QSettings().value("workspace/toolColumns").toInt()}};
+    }
     if (op == "window_new") {
         huelith::CanvasSpec spec;
         spec.width = o.value("width").toInt(400);
@@ -2191,6 +2610,20 @@ QJsonObject run(const QJsonObject& o) {
                         !modal->property("semanticReady").toBool() &&
                         !modal->property("semanticError").toBool())
                         return;
+                    if(settings.contains("batchDataset") && *phase>0){
+                        if(auto* progress=qobject_cast<QProgressDialog*>(modal)){
+                            if(settings.value("batchCancel").toBool()) {
+                                if(auto* button=progress->findChild<QPushButton*>())button->click();
+                            }
+                            return;
+                        }
+                        if(auto* file=qobject_cast<QFileDialog*>(modal)){
+                            if(file->fileMode()==QFileDialog::Directory)file->setDirectory(settings.value("batchOutput").toString());
+                            else file->selectFile(settings.value("batchDataset").toString());
+                            static_cast<QDialog*>(file)->accept();return;
+                        }
+                        if(auto* message=qobject_cast<QMessageBox*>(modal)){window->setProperty("batchSummary",message->text());message->accept();timer->stop();timer->deleteLater();return;}
+                    }
                     if (auto* file = qobject_cast<QFileDialog*>(modal)) {
                         if (settings.contains("steps"))
                             return;
@@ -2256,6 +2689,8 @@ QJsonObject run(const QJsonObject& o) {
                                 combo->setCurrentIndex(it.value().toInt());
                             else if (auto* check = modal->findChild<QCheckBox*>(it.key()))
                                 check->setChecked(it.value().toBool());
+                            else if (auto* text = modal->findChild<QPlainTextEdit*>(it.key()))
+                                text->setPlainText(it.value().toString());
                             else if (auto* line = modal->findChild<QLineEdit*>(it.key()))
                                 line->setText(it.value().toString());
                         }
@@ -2314,7 +2749,7 @@ QJsonObject run(const QJsonObject& o) {
                                 modal->accept();
                         } else
                             modal->reject();
-                        if (!settings.contains("path")) {
+                        if (!settings.contains("path") && !settings.contains("batchDataset")) {
                             timer->stop();
                             timer->deleteLater();
                         }
@@ -2432,7 +2867,8 @@ QJsonObject run(const QJsonObject& o) {
     if (op == "window_pixel") {
         const auto image = display_image(render(d.window->active_canvas()->project().state()));
         const auto pixel = image.pixelColor(o.value("x").toInt(), o.value("y").toInt());
-        return {{"alpha", pixel.alpha()}};
+        return {{"alpha", pixel.alpha()},
+                {"rgba", QJsonArray{pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()}}};
     }
     if (op == "window_draw") {
         auto* c = d.window->active_canvas();

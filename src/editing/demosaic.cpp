@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/demosaic.h"
 #include "huelith/editing/project.h"
 #include <algorithm>
@@ -9,16 +10,16 @@ void demosaic_malvar(std::span<const float> packed, const std::array<QPoint, 4>&
     if (width < 4 || height < 4 || width % 2 || height % 2 ||
         output.format() != QImage::Format_RGBA32FPx4_Premultiplied ||
         packed.size() != std::size_t(width) * height)
-        throw EditError(QStringLiteral("Bayer 插值尺寸或数据无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "Bayer 插值尺寸或数据无效"));
     std::array<int, 4> phase{-1, -1, -1, -1};
     for (int c = 0; c < 4; ++c) {
         const auto p = positions[c];
         if (p.x() < 0 || p.x() > 1 || p.y() < 0 || p.y() > 1 || phase[p.y() * 2 + p.x()] != -1)
-            throw EditError(QStringLiteral("Bayer 通道位置无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "Bayer 通道位置无效"));
         phase[p.y() * 2 + p.x()] = c;
     }
     if (positions[0].x() == positions[3].x() || positions[0].y() == positions[3].y())
-        throw EditError(QStringLiteral("Bayer 红蓝通道必须对角排列"));
+        throw EditError(QCoreApplication::translate("Huelith", "Bayer 红蓝通道必须对角排列"));
     const auto plane = std::size_t(width / 2) * (height / 2);
     const auto sample = [&](int x, int y) {
         // Whole-sample reflection retains CFA parity at all four edges.
@@ -37,7 +38,7 @@ void demosaic_malvar(std::span<const float> packed, const std::array<QPoint, 4>&
     // https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Demosaicing_ICASSP04.pdf
     for (int y = 0; y < height; ++y) {
         if (cancelled.load())
-            throw EditError(QStringLiteral("RAW 插值已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW 插值已取消"));
         auto* row = reinterpret_cast<float*>(output.scanLine(y));
         for (int x = 0; x < width; ++x) {
             const float center = sample(x, y);

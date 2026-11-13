@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 // OpenSeeFace model decoding adapted under BSD-2-Clause; see licenses/OpenSeeFace.txt.
 #include "huelith/editing/portrait.h"
 #include "huelith/editing/project.h"
@@ -23,9 +24,9 @@ namespace huelith::editing {
 namespace {
 QJsonArray rectangle(QRectF r) { return {r.x(),r.y(),r.width(),r.height()}; }
 QRectF rectangle(const QJsonArray& a) {
-    if(a.size()!=4) throw EditError(QStringLiteral("人物坐标损坏"));
+    if(a.size()!=4) throw EditError(QCoreApplication::translate("Huelith", "人物坐标损坏"));
     for(const auto& v:a) if(!v.isDouble() || !std::isfinite(v.toDouble()))
-        throw EditError(QStringLiteral("人物坐标无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "人物坐标无效"));
     return {a[0].toDouble(),a[1].toDouble(),a[2].toDouble(),a[3].toDouble()};
 }
 double iou(QRectF a,QRectF b) {
@@ -36,10 +37,10 @@ struct Model {
     Ort::Session session{nullptr};
     Model(Ort::Env& env,const QString& path,const QByteArray& hash) {
         QFile f(path);
-        if(!f.open(QIODevice::ReadOnly) || f.size()>25'000'000) throw EditError(QStringLiteral("人像模型缺失：")+path);
+        if(!f.open(QIODevice::ReadOnly) || f.size()>25'000'000) throw EditError(QCoreApplication::translate("Huelith", "人像模型缺失：")+path);
         const auto bytes=f.readAll();
         if(QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex()!=hash)
-            throw EditError(QStringLiteral("人像模型校验失败：")+path);
+            throw EditError(QCoreApplication::translate("Huelith", "人像模型校验失败：")+path);
         Ort::SessionOptions options;options.SetIntraOpNumThreads(4);
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         session=Ort::Session(env,bytes.constData(),std::size_t(bytes.size()),options);
@@ -75,7 +76,7 @@ QJsonObject semantic_portrait_masks(Model& model,const QImage& image,const Portr
     if(!person.body_ambiguous)areas.push_back(person.body.adjusted(-.015,-.015,.015,.015));
     areas.push_back(face.adjusted(-face.width()*.6,-face.height()*.8,face.width()*.6,face.height()*.6));
     for(const auto& area:areas){const auto box=QRectF(area.x()*image.width(),area.y()*image.height(),area.width()*image.width(),area.height()*image.height()).toAlignedRect().intersected(image.rect());if(box.isEmpty())continue;
-        auto output=model.run(image.copy(box),true);if(output.size()!=1 || output[0].GetTensorTypeAndShapeInfo().GetElementCount()!=256*256*6)throw EditError(QStringLiteral("皮肤范围模型接口无效"));
+        auto output=model.run(image.copy(box),true);if(output.size()!=1 || output[0].GetTensorTypeAndShapeInfo().GetElementCount()!=256*256*6)throw EditError(QCoreApplication::translate("Huelith", "皮肤范围模型接口无效"));
         const float* logits=output[0].GetTensorData<float>();QImage local_skin(256,256,QImage::Format_Grayscale8),local_hair=local_skin.copy(),local_face=local_skin.copy(),local_body=local_skin.copy();
         for(int y=0;y<256;++y)for(int x=0;x<256;++x){const auto* p=logits+(y*256+x)*6;const float maximum=*std::max_element(p,p+6);double sum=0;std::array<double,6> probability{};for(int c=0;c<6;++c){probability[c]=std::exp(p[c]-maximum);sum+=probability[c];}
             const double skin_probability=std::clamp(((probability[2]+probability[3])/sum-.35)/.5,0.,1.);
@@ -173,7 +174,7 @@ std::vector<Detection> detect(Model& model,const QImage& image) {
     for(const auto& tile:tiles) {
         auto output=model.run(image.copy(tile));
         if(output.size()!=2 || output[0].GetTensorTypeAndShapeInfo().GetElementCount()!=2*56*56)
-            throw EditError(QStringLiteral("人脸检测模型接口无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "人脸检测模型接口无效"));
         const float* p=output[0].GetTensorData<float>();const float* peak=output[1].GetTensorData<float>();
         for(int k=0;k<56*56;++k)if(p[k]>.6F && p[k]>=peak[k]) {
             const double r=p[56*56+k]*112.;
@@ -207,21 +208,21 @@ QJsonObject portrait_person_json(const PortraitPerson& p) {
 }
 PortraitPerson portrait_person_from_json(const QJsonObject& o) {
     PortraitPerson p;p.id=QUuid(o["id"].toString());
-    if(p.id.isNull())throw EditError(QStringLiteral("人物标识无效"));
+    if(p.id.isNull())throw EditError(QCoreApplication::translate("Huelith", "人物标识无效"));
     p.face=rectangle(o["face"].toArray());p.body=rectangle(o["body"].toArray());
     if(p.face.isEmpty() || !QRectF(0,0,1.001,1.001).contains(p.face) || p.body.width()<0 || p.body.height()<0)
-        throw EditError(QStringLiteral("人物范围超出图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "人物范围超出图像"));
     p.landmarks=o["landmarks"].toArray();p.confidence=o["confidence"].toDouble();p.settings=o["settings"].toObject();
-    if(p.landmarks.size()!=66 && !(p.settings["partialSkin"].toBool() && p.landmarks.isEmpty()))throw EditError(QStringLiteral("人物关键点损坏"));
+    if(p.landmarks.size()!=66 && !(p.settings["partialSkin"].toBool() && p.landmarks.isEmpty()))throw EditError(QCoreApplication::translate("Huelith", "人物关键点损坏"));
     for(const auto& value:p.landmarks) {
-        const auto a=value.toArray();if(a.size()!=3)throw EditError(QStringLiteral("人物关键点无效"));
-        for(const auto& v:a)if(!v.isDouble() || !std::isfinite(v.toDouble()))throw EditError(QStringLiteral("人物关键点无效"));
+        const auto a=value.toArray();if(a.size()!=3)throw EditError(QCoreApplication::translate("Huelith", "人物关键点无效"));
+        for(const auto& v:a)if(!v.isDouble() || !std::isfinite(v.toDouble()))throw EditError(QCoreApplication::translate("Huelith", "人物关键点无效"));
     }
     p.body_ambiguous=o["bodyAmbiguous"].toBool();p.match_ambiguous=o["matchAmbiguous"].toBool();p.unmatched=o["unmatched"].toBool();return p;
 }
 AiResult infer_portrait(const QImage& image,const QString& models,const AiProgress& progress) {
     auto rgb=image.format()==QImage::Format_RGBA32FPx4_Premultiplied?display_image(image):image;
-    if(rgb.isNull())throw EditError(QStringLiteral("没有可识别的人像照片"));
+    if(rgb.isNull())throw EditError(QCoreApplication::translate("Huelith", "没有可识别的人像照片"));
     rgb=rgb.scaled(1600,1600,Qt::KeepAspectRatio,Qt::SmoothTransformation);
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING,"HuelithPortrait");
     Model detector(env,QDir(models).filePath("mnv3_detection_opt.onnx"),"0e8e4806766d85ab067a52c7af0dcb59eb7f9dfe580b44f20a8e6ab712d89809");
@@ -277,7 +278,7 @@ AiResult infer_portrait(const QImage& image,const QString& models,const AiProgre
             .toAlignedRect().intersected(oriented.rect());
         auto output=landmark.run(oriented.copy(r));
         if(output[0].GetTensorTypeAndShapeInfo().GetElementCount()!=198*28*28)
-            throw EditError(QStringLiteral("关键点模型接口无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "关键点模型接口无效"));
         const float* p=output[0].GetTensorData<float>();PortraitPerson person;double confidence{};
         for(int i=0;i<66;++i) {
             const float* heat=p+i*784;const int k=int(std::max_element(heat,heat+784)-heat);

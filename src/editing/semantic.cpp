@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/semantic.h"
 #include "huelith/editing/ai_worker.h"
 #include "huelith/editing/project.h"
@@ -13,7 +14,7 @@ namespace huelith::editing {
 namespace {
 void check(const std::atomic_bool& cancelled) {
     if (cancelled.load())
-        throw EditError(QStringLiteral("范围识别已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "范围识别已取消"));
 }
 bool matches(int label, SemanticTarget target) {
     switch (target) {
@@ -37,21 +38,21 @@ QImage semantic_labels(const QImage& image, const QString& model,
                        const std::atomic_bool& cancelled) {
     check(cancelled);
     if (image.isNull())
-        throw EditError(QStringLiteral("没有可识别的图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "没有可识别的图像"));
     if (!is_ai_worker())
         return run_ai_job({{"operation", "semantic"}, {"model", model}, {"directml", false}},
             image.format() == QImage::Format_RGBA32FPx4_Premultiplied ? image : image.convertToFormat(QImage::Format_RGBA8888),
             &cancelled).image;
     QFile file(model);
     if (!file.open(QIODevice::ReadOnly))
-        throw EditError(QStringLiteral("内置场景模型缺失：") + model);
+        throw EditError(QCoreApplication::translate("Huelith", "内置场景模型缺失：") + model);
     if (file.size() != 24'204'118)
-        throw EditError(QStringLiteral("场景模型文件大小无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "场景模型文件大小无效"));
     const auto bytes = file.readAll();
     // Bound the packaged model contract: arbitrary graphs are not accepted here.
     const auto hash = QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
     if (hash != "367115635ad3f5ffba4cb0244e4ce93bb36bcff1ece97fca8728ffb952c32695")
-        throw EditError(QStringLiteral("场景模型校验失败，请恢复完整模型文件"));
+        throw EditError(QCoreApplication::translate("Huelith", "场景模型校验失败，请恢复完整模型文件"));
     auto rgb =
         image.format() == QImage::Format_RGBA32FPx4_Premultiplied ? display_image(image) : image;
     rgb = rgb.scaled(512, 512, Qt::KeepAspectRatio, Qt::SmoothTransformation)
@@ -76,7 +77,7 @@ QImage semantic_labels(const QImage& image, const QString& model,
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         Ort::Session session(environment, bytes.constData(), std::size_t(bytes.size()), options);
         if (session.GetInputCount() != 1 || session.GetOutputCount() != 1)
-            throw EditError(QStringLiteral("场景模型接口无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "场景模型接口无效"));
         Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
         const std::array<int64_t, 4> shape{1, 3, 512, 512};
         auto tensor = Ort::Value::CreateTensor<float>(memory, input.data(), input.size(),
@@ -99,7 +100,7 @@ QImage semantic_labels(const QImage& image, const QString& model,
         const auto info = output.front().GetTensorTypeAndShapeInfo();
         if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
             info.GetShape() != std::vector<int64_t>{1, 512, 512})
-            throw EditError(QStringLiteral("场景模型输出无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "场景模型输出无效"));
         const auto* values = output.front().GetTensorData<int64_t>();
         QImage labels(rgb.size(), QImage::Format_Grayscale8);
         for (int y = 0; y < labels.height(); ++y) {
@@ -107,20 +108,20 @@ QImage semantic_labels(const QImage& image, const QString& model,
             for (int x = 0; x < labels.width(); ++x) {
                 const auto value = values[y * 512 + x];
                 if (value < 0 || value >= 150)
-                    throw EditError(QStringLiteral("场景模型输出类别越界"));
+                    throw EditError(QCoreApplication::translate("Huelith", "场景模型输出类别越界"));
                 labels.scanLine(y)[x] = uchar(value);
             }
         }
         return labels;
     } catch (const Ort::Exception& error) {
         check(cancelled);
-        throw EditError(QStringLiteral("场景识别失败：") + QString::fromUtf8(error.what()));
+        throw EditError(QCoreApplication::translate("Huelith", "场景识别失败：") + QString::fromUtf8(error.what()));
     }
 }
 QImage semantic_mask(const QImage& labels, SemanticTarget target, QSize output_size) {
     if (labels.isNull() || labels.format() != QImage::Format_Grayscale8 || output_size.isEmpty() ||
         qint64(output_size.width()) * output_size.height() > 128'000'000)
-        throw EditError(QStringLiteral("场景蒙版尺寸无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "场景蒙版尺寸无效"));
     QImage mask(labels.size(), QImage::Format_Grayscale8);
     for (int y = 0; y < labels.height(); ++y)
         for (int x = 0; x < labels.width(); ++x)

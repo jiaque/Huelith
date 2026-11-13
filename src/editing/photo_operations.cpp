@@ -1,13 +1,45 @@
-#include "huelith/editing/image_storage.h"
+#include <QCoreApplication>
 #include "huelith/editing/photo_operations.h"
 #include "huelith/editing/healing.h"
+#include "huelith/editing/image_storage.h"
 #include <QPainter>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <opencv2/imgproc.hpp>
 
 namespace huelith::editing {
+QImage focus_range(const State& state, double threshold) {
+    if (!std::isfinite(threshold) || threshold < 1 || threshold > 100)
+        throw EditError(QCoreApplication::translate("Huelith", "清晰细节阈值超出范围"));
+    const auto composite = display_image(render(preview_state(state, 1600)));
+    const auto image = composite.convertToFormat(QImage::Format_Grayscale8);
+    cv::Mat gray(image.height(), image.width(), CV_8U, const_cast<uchar*>(image.constBits()),
+                 image.bytesPerLine()),
+        denoised, gradient, energy;
+    cv::GaussianBlur(gray, denoised, cv::Size(3, 3), .7);
+    cv::Laplacian(denoised, gradient, CV_32F, 3);
+    cv::multiply(gradient, gradient, energy);
+    cv::GaussianBlur(energy, energy, cv::Size(0, 0), 3);
+    cv::sqrt(energy, energy);
+    QImage coverage(image.size(), QImage::Format_Grayscale8);
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x) {
+            const float detail = energy.at<float>(y, x);
+            coverage.scanLine(y)[x] =
+                uchar(std::clamp((detail - threshold * .5) / (threshold * .75) * 255., 0., 255.));
+        }
+    cv::Mat mask(coverage.height(), coverage.width(), CV_8U, coverage.bits(),
+                 coverage.bytesPerLine());
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE,
+                     cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9)));
+    cv::GaussianBlur(mask, mask, cv::Size(3, 3), .7);
+    for (int y = 0; y < coverage.height(); ++y)
+        for (int x = 0; x < coverage.width(); ++x)
+            coverage.scanLine(y)[x] = uchar(coverage.constScanLine(y)[x] * qAlpha(composite.pixel(x,y)) / 255);
+    return coverage.scaled(state.size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+}
 namespace {
 using Pixel = std::array<float, 4>;
 Pixel pixel(const QImage& image, int x, int y) {
@@ -19,7 +51,7 @@ Pixel pixel(const QImage& image, int x, int y) {
 QImage blank(QSize size) {
     auto image = allocate_image(size, QImage::Format_RGBA32FPx4_Premultiplied);
     if (image.isNull())
-        throw EditError(QStringLiteral("图像内存不足"));
+        throw EditError(QCoreApplication::translate("Huelith", "图像内存不足"));
     image.fill(Qt::transparent);
     image.setColorSpace(working_space());
     return image;
@@ -27,9 +59,9 @@ QImage blank(QSize size) {
 Layer& writable(State& state, const QUuid& id) {
     auto* layer = find_layer(state.layers, id);
     if (!layer || layer_locked(state.layers, id))
-        throw EditError(QStringLiteral("请选择未锁定的像素或修复图层"));
+        throw EditError(QCoreApplication::translate("Huelith", "请选择未锁定的像素或修复图层"));
     if (layer->kind != LayerKind::pixels && layer->kind != LayerKind::repair)
-        throw EditError(QStringLiteral("此工具需要像素／修复图层；源对象请先栅格化或新建修复层"));
+        throw EditError(QCoreApplication::translate("Huelith", "此工具需要像素／修复图层；源对象请先栅格化或新建修复层"));
     if (layer->pixels.isNull())
         layer->pixels = blank(state.size);
     if(!layer->pixels.isDetached() && layer->pixels.sizeInBytes()>=mapped_image_threshold)
@@ -95,9 +127,9 @@ bool restrict_to_target(std::vector<Layer>& layers, const QUuid& id, SampleLayer
 
 QImage sample_layers(const State& state, const QUuid& target, SampleLayers scope) {
     if (scope < SampleLayers::current || scope > SampleLayers::visible)
-        throw EditError(QStringLiteral("取样范围无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "取样范围无效"));
     if (!find_layer(state.layers, target))
-        throw EditError(QStringLiteral("取样图层不存在"));
+        throw EditError(QCoreApplication::translate("Huelith", "取样图层不存在"));
     auto sampled = state;
     if (scope != SampleLayers::visible)
         restrict_to_target(sampled.layers, target, scope);
@@ -106,7 +138,7 @@ QImage sample_layers(const State& state, const QUuid& target, SampleLayers scope
 
 QImage color_range(const QImage& image, QPoint seed, int tolerance, bool contiguous) {
     if (!image.rect().contains(seed) || tolerance < 0 || tolerance > 255)
-        throw EditError(QStringLiteral("颜色取样点或容差无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "颜色取样点或容差无效"));
     const auto display = display_image(image);
     const auto reference = display.pixelColor(seed);
     QImage eligible(image.size(), QImage::Format_Grayscale8);
@@ -142,7 +174,7 @@ QImage color_range(const QImage& image, QPoint seed, int tolerance, bool contigu
 void fill_color(State& state, const QUuid& id, QPoint seed, QColor color, int tolerance,
                 bool contiguous, bool all_layers, double opacity) {
     if (!color.isValid() || !std::isfinite(opacity) || opacity < 0 || opacity > 1)
-        throw EditError(QStringLiteral("填充颜色或透明度无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "填充颜色或透明度无效"));
     const auto sampled =
         sample_layers(state, id, all_layers ? SampleLayers::visible : SampleLayers::current);
     const auto range = color_range(sampled, seed, tolerance, contiguous);
@@ -190,7 +222,7 @@ void retouch(State& state, const QUuid& id, const QImage& coverage, const Retouc
         !std::isfinite(options.source_scale_y) || options.source_scale_y < .01 || options.source_scale_y > 100 ||
         !std::isfinite(options.source_rotation) || std::abs(options.source_rotation) > 180 ||
         !std::isfinite(options.source_anchor.x()) || !std::isfinite(options.source_anchor.y()))
-        throw EditError(QStringLiteral("修饰笔画参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "修饰笔画参数无效"));
     int left=coverage.width(),top=coverage.height(),right=-1,bottom=-1;
     for(int y=0;y<coverage.height();++y) {
         const auto* row=coverage.constScanLine(y);
@@ -202,7 +234,7 @@ void retouch(State& state, const QUuid& id, const QImage& coverage, const Retouc
     const QRect affected(QPoint(left,top),QPoint(right,bottom));
     const QImage source = sampled_source ? *sampled_source : sample_layers(state, id, options.sample);
     if(source.size()!=state.size || source.format()!=QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("取样图像与文档不匹配"));
+        throw EditError(QCoreApplication::translate("Huelith", "取样图像与文档不匹配"));
     const auto operation = options.operation;
     QImage healing;
     auto offset = options.source_offset;
@@ -363,7 +395,7 @@ void paint_replacement(State& state, const QUuid& id, const QImage& replacement,
 
 void crop_canvas(State& state, const QRect& bounds, double angle, bool delete_pixels) {
     if (bounds.isEmpty() || qint64(bounds.width()) * bounds.height() > huelith::editing::maximum_image_pixels || !std::isfinite(angle) || std::abs(angle)>180)
-        throw EditError(QStringLiteral("裁剪尺寸无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "裁剪尺寸无效"));
     QTransform rotation;rotation.translate(state.size.width()/2.,state.size.height()/2.);rotation.rotate(angle);rotation.translate(-state.size.width()/2.,-state.size.height()/2.);
     const auto delta = rotation*QTransform::fromTranslate(-bounds.x(), -bounds.y());
     for (auto& layer : state.layers) {
@@ -430,6 +462,11 @@ void crop_canvas(State& state, const QRect& bounds, double angle, bool delete_pi
         crop_range(range);
     for (auto& path : state.paths)
         path = delta.map(path);
+    for(auto& slice:state.slices)slice.bounds=delta.mapRect(slice.bounds);
+    if(delete_pixels){
+        for(auto& slice:state.slices)slice.bounds=slice.bounds.intersected(QRect(QPoint(),bounds.size()));
+        std::erase_if(state.slices,[](const auto& slice){return slice.bounds.isEmpty();});
+    }
     for (auto& guide : state.horizontal_guides)
         guide -= bounds.y();
     for (auto& guide : state.vertical_guides)

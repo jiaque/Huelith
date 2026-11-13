@@ -4,6 +4,9 @@
 #include <QPainterPath>
 #include <QSizeF>
 #include <QString>
+#include <QBrush>
+#include <QLineF>
+#include <vector>
 class QTextDocument;
 class QPainter;
 namespace huelith::editing {
@@ -12,6 +15,10 @@ struct TextContent {
     QSizeF box{320,
                160}; // 96-dpi text layout units; layer transform maps these to document pixels.
     bool paragraph{};
+    int layout{}; // Horizontal, vertical, path.
+    bool ligatures{true};
+    QPainterPath baseline;
+    double path_start{};
 };
 struct ShapeContent {
     int kind{}; // Rectangle, ellipse, polygon, line, editable custom path.
@@ -35,6 +42,13 @@ struct Layer;
 void validate_text(const TextContent& value);
 void validate_shape(const ShapeContent& value);
 void configure_text_document(QTextDocument& document, const TextContent& value);
+struct TextGlyph {
+    QPainterPath outline;
+    QBrush color;
+    int start{}, end{};
+    QLineF before, after;
+};
+std::vector<TextGlyph> positioned_text_glyphs(QTextDocument& document, const TextContent& value);
 [[nodiscard]] QPainterPath shape_path(const ShapeContent& value);
 [[nodiscard]] QRectF design_bounds(const Layer& layer);
 void paint_design(QPainter& painter, const Layer& layer);

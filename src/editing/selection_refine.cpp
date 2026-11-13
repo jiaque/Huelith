@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/image_storage.h"
 #include "huelith/editing/selection_refine.h"
 #include "huelith/editing/project.h"
@@ -12,7 +13,7 @@ namespace {
 using Plane = std::vector<float>;
 void check(const std::atomic_bool* cancelled) {
     if (cancelled && cancelled->load())
-        throw EditError(QStringLiteral("选区细化已取消"));
+        throw EditError(QCoreApplication::translate("Huelith", "选区细化已取消"));
 }
 Plane mean(const Plane& input, int w, int h, int radius, const std::atomic_bool* cancelled) {
     if (radius == 0)
@@ -189,7 +190,7 @@ QImage refine_edges(const QImage& rgb, const QImage& original, int radius, bool 
 
 QImage selection_edge_band(const QImage& mask, int radius, const std::atomic_bool* cancelled) {
     if (mask.isNull() || mask.format() != QImage::Format_Grayscale8 || radius < 0 || radius > 500)
-        throw EditError(QStringLiteral("边缘区域参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "边缘区域参数无效"));
     const auto values = coverage(mask, mask.rect());
     const auto low = extremum(values, mask.width(), mask.height(), radius, false, cancelled);
     const auto high = extremum(values, mask.width(), mask.height(), radius, true, cancelled);
@@ -214,14 +215,14 @@ RefinedSelection refine_selection(const QImage& image, const QImage& mask,
         qint64(image.width()) * image.height() > huelith::editing::maximum_image_pixels ||
         (!refine_area.isNull() &&
          (refine_area.size() != mask.size() || refine_area.format() != QImage::Format_Grayscale8)))
-        throw EditError(QStringLiteral("选区细化的图像或蒙版无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "选区细化的图像或蒙版无效"));
     const auto in_range = [](double value, double low, double high) {
         return std::isfinite(value) && value >= low && value <= high;
     };
     if (!in_range(s.radius, 0, 250) || !in_range(s.smooth, 0, 100) ||
         !in_range(s.feather, 0, 1000) || !in_range(s.contrast, 0, 1) || !in_range(s.shift, -1, 1) ||
         !in_range(s.decontaminate, 0, 1) || !in_range(pixel_scale, .0001, 1))
-        throw EditError(QStringLiteral("选区细化参数超出范围"));
+        throw EditError(QCoreApplication::translate("Huelith", "选区细化参数超出范围"));
     auto result = mask;
     if (s.radius > 0 || !refine_area.isNull()) {
         auto rgb = image.format() == QImage::Format_RGBA32FPx4_Premultiplied ? display_image(image)

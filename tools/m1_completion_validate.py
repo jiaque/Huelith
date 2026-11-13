@@ -27,7 +27,7 @@ def main():
  def drag(x,y,ex,ey,modifiers=0):mouse('press',x=x,y=y,modifiers=modifiers);mouse('move',x=ex,y=ey,modifiers=modifiers);mouse('release',x=ex,y=ey,modifiers=modifiers)
  def layer(name):return next(x for x in probe()['layers'] if x['name']==name)
  def test(name,body):
-  if args.only and args.only not in name:return
+  if args.only and not any(part in name for part in args.only.split(",")):return
   print('RUN',name,flush=True)
   try:body();results.append(dict(name=name,passed=True))
   except Exception:results.append(dict(name=name,passed=False,error=traceback.format_exc()));print(results[-1]['error'],flush=True)
@@ -169,7 +169,7 @@ def main():
    action('设置菜单快捷键…',dialog={'accept':True,'binding':{'name':'画笔 B','key':'B'}})
   test('workspace_restore_tool_shortcut_apply_old_key_removed',preference)
   def source_edit():
-   scene([dict(name='source',kind=1,path=str(shape))]);old=state()['revision'];action('编辑嵌套合成…',answer='cancel');assert state()['revision']==old;action('编辑嵌套合成…',answer='accept');assert state()['revision']==old+1;key('Ctrl+Z');assert state()['revision']!=old+1
+   scene([dict(name='source',kind=1,path=str(shape))]);old=state()['revision'];action('编辑嵌套合成…',dialog={'accept':False});assert state()['revision']==old;action('编辑嵌套合成…',dialog={'accept':True});assert state()['revision']==old+1;key('Ctrl+Z');assert state()['revision']!=old+1
   test('source_editor_cancel_commit_single_undo',source_edit)
   def recovery():
    scene([dict(name='recovery fixture',color='white')]);saved=folder/'recovery-fixture.huelith';call('window_filename',path=str(saved));action('保存工程');deadline=time.monotonic()+8

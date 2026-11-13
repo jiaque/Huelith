@@ -1,54 +1,55 @@
 #include "portrait_dialog.h"
-#include "portrait_icons.h"
 #include "canvas_preferences.h"
-#include "portrait_controls.h"
 #include "color_band_slider.h"
-#include "raw_section_header.h"
-#include "raw_preview_view.h"
-#include "window_header.h"
-#include "portrait_liquify.h"
 #include "huelith/editing/liquify.h"
-#include "huelith/editing/project.h"
 #include "huelith/editing/portrait_effects.h"
+#include "huelith/editing/project.h"
+#include "portrait_controls.h"
+#include "portrait_icons.h"
+#include "portrait_liquify.h"
+#include "raw_preview_view.h"
+#include "raw_section_header.h"
+#include "window_header.h"
+#include "workspace_layout.h"
 #include <QBuffer>
+#include <QButtonGroup>
+#include <QCheckBox>
+#include <QColorDialog>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
-#include <QGraphicsPixmapItem>
-#include <QHBoxLayout>
-#include <QGridLayout>
-#include <QLabel>
-#include <QListWidget>
-#include <QPushButton>
-#include <QVBoxLayout>
-#include <QPainter>
-#include <QJsonDocument>
-#include <QSignalBlocker>
-#include <QSpinBox>
-#include <QComboBox>
-#include <QCheckBox>
-#include <QInputDialog>
-#include <QMouseEvent>
-#include <QWheelEvent>
-#include <QKeyEvent>
-#include <QPainterPath>
-#include <QTabWidget>
-#include <QTabBar>
-#include <QButtonGroup>
-#include <QToolButton>
-#include <QScrollArea>
-#include <QMenuBar>
-#include <QMenu>
+#include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
-#include <QShortcut>
-#include <QScrollBar>
-#include <QSlider>
-#include <QDoubleSpinBox>
-#include <QColorDialog>
-#include <QSettings>
-#include <QStyle>
+#include <QGraphicsPixmapItem>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QJsonDocument>
+#include <QKeyEvent>
+#include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QMenu>
+#include <QMenuBar>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSettings>
+#include <QShortcut>
+#include <QSignalBlocker>
+#include <QSlider>
+#include <QSpinBox>
+#include <QStyle>
+#include <QTabBar>
+#include <QTabWidget>
+#include <QToolButton>
+#include <QVBoxLayout>
+#include <QWheelEvent>
 
 namespace huelith::desktop {
 namespace {
@@ -119,7 +120,10 @@ PortraitDialog::PortraitDialog(QImage source,QJsonObject saved,QWidget* parent,s
     const int font_sizes[]{10,11,13,15};
     const int font_pixels=font_sizes[std::clamp(read_canvas_preferences().interface_font,0,3)];
     QFont workspace_font("Microsoft YaHei UI");workspace_font.setPixelSize(font_pixels);setFont(workspace_font);
-    setObjectName("portraitDialog");setWindowTitle(tr("Huelith · 人像精修"));resize(1600,1000);setMinimumSize(1100,720);
+    setObjectName("portraitDialog");
+    setWindowTitle(tr("Huelith · 人像精修"));
+    resize(1600, 1000);
+    setMinimumSize(800, 560);
     setWindowFlags(Qt::Window|Qt::FramelessWindowHint|Qt::WindowMinMaxButtonsHint);
     preparation_=std::async(std::launch::async,[image=source_,prepare,saved=saved_recipe_]{
         PreparedSource result;result.source=prepare?prepare(image):image;
@@ -167,10 +171,21 @@ PortraitDialog::PortraitDialog(QImage source,QJsonObject saved,QWidget* parent,s
     tasks->setStyleSheet("QListWidget{border:0;background:#252a2e;} QListWidget::item{padding:0 24px;} QListWidget::item:selected{background:#2f80ed;color:white;}");row->addWidget(tasks);
 
     scene_=new QGraphicsScene(this);pixels_=scene_->addPixmap(QPixmap::fromImage(preview_));scene_->setSceneRect(preview_.rect());
-    view_=new RawPreviewView(scene_,this);view_->setObjectName("portraitView");view_->set_tool(0);row->addWidget(view_,1);
+    view_ = new RawPreviewView(scene_, this);
+    view_->setObjectName("portraitView");
+    view_->set_tool(0);
+    auto* workspace_splitter = new QSplitter(Qt::Horizontal, this);
+    workspace_splitter->setObjectName("portraitWorkspaceSplitter");
+    workspace_splitter->addWidget(view_);
+    row->addWidget(workspace_splitter, 1);
     view_->installEventFilter(this);view_->viewport()->installEventFilter(this);view_->viewport()->setMouseTracking(true);overlay_=scene_->addPath({});overlay_->setZValue(10);overlay_->setData(0,QStringLiteral("portraitCursor"));QPen overlay_pen(QColor(66,182,255));overlay_pen.setCosmetic(true);overlay_->setPen(overlay_pen);
     detail_pixels_=scene_->addPixmap({});detail_pixels_->setZValue(1);range_pixels_=scene_->addPixmap({});range_pixels_->setZValue(5);
-    auto* inspector=new QWidget(this);inspector->setObjectName("portraitInspector");inspector->setFixedWidth(448);auto* inspector_layout=new QVBoxLayout(inspector);inspector_layout->setContentsMargins(16,8,16,8);inspector_layout->setSpacing(4);
+    auto* inspector = new QWidget(this);
+    inspector->setObjectName("portraitInspector");
+    inspector->setMinimumWidth(300);
+    auto* inspector_layout = new QVBoxLayout(inspector);
+    inspector_layout->setContentsMargins(16, 8, 16, 8);
+    inspector_layout->setSpacing(4);
     auto* heading=new QLabel(this);heading->setObjectName("portraitTaskTitle");heading->setStyleSheet("font-size:18px;font-weight:600;padding:2px 0;");inspector_layout->addWidget(heading);
     auto* tabs=new QTabBar(this);tabs->setMaximumWidth(400);tabs->setObjectName("portraitTaskTabs");tabs->setExpanding(true);inspector_layout->addWidget(tabs);
     const auto sync_task=[this,tasks,tabs,heading,task_panels,task_names,task_order](int panel){
@@ -221,7 +236,9 @@ PortraitDialog::PortraitDialog(QImage source,QJsonObject saved,QWidget* parent,s
     auto* advanced=new QWidget(inspector);auto* advanced_layout=new QVBoxLayout(advanced);advanced_layout->setContentsMargins(0,0,0,0);advanced_layout->addWidget(locate_header);advanced_layout->addWidget(locate_);advanced_layout->addLayout(strength_row);advanced->hide();
     connect(scope_header,&QToolButton::toggled,advanced,&QWidget::setVisible);inspector_layout->addWidget(advanced);
 
-    row->addWidget(inspector);layout->addLayout(row,1);
+    workspace_splitter->addWidget(inspector);
+    configure_inspector_splitter(workspace_splitter, "workspace/portrait/inspectorWidth", 400);
+    layout->addLayout(row, 1);
     connect(side_,&QComboBox::currentIndexChanged,this,[this](int value){if(selected_>=0){people_[std::size_t(selected_)].settings["side"]=value;build_parameters();refresh_ranges();}});
     linked_->setToolTip(tr("切换联动不改变已有左右值；联动调整时，两侧同名参数设为相同值，各自定位和遮挡仍独立。"));
     connect(linked_,&QCheckBox::toggled,this,[this](bool value){side_->setEnabled(!value && selected_>=0);if(selected_>=0){people_[std::size_t(selected_)].settings["linked"]=value;}});
@@ -238,7 +255,12 @@ PortraitDialog::PortraitDialog(QImage source,QJsonObject saved,QWidget* parent,s
         connect(button,&QPushButton::clicked,this,[this,i]{focus_person(i);});}
     for(bool brush:{true,false}){auto* button=new QPushButton(brush?tr("画笔 B"):tr("抓手 H"),this);button->setObjectName(brush?"portraitCanvasBrush":"portraitCanvasHand");button->setToolTip(brush?tr("B：画笔；按住空格临时拖动画布"):tr("H：抓手；按 B 返回画笔"));button->hide();bottom->addWidget(button);
         connect(button,&QPushButton::clicked,this,[this,brush]{finish_brush_gesture();if(brush){activate_panel_tool();const int resume=property("portraitResumeRange").toInt();if(resume){range_mode_=resume;view_->set_tool(-1);update_range_overlay();}const auto place=property("portraitResumePlacement").toString();if(!place.isEmpty()){placement_key_=place;view_->set_tool(-1);update_overlay();}}else{setProperty("portraitResumeRange",range_mode_);setProperty("portraitResumePlacement",placement_key_);repair_mode_=range_mode_=0;repair_selected_=-1;placement_key_.clear();setProperty("portraitMaterialSampleKey",QString{});setProperty("portraitMakeupLocate",QString{});locate_->setChecked(false);overlay_->setPath({});view_->set_tool(0);}view_->setFocus();});}
-    bottom->addStretch();accept_=new QPushButton(tr("确定"),this);accept_->setObjectName("portraitAccept");accept_->setMinimumSize(120,44);accept_->setStyleSheet("background:#2f80ed;color:white;border-radius:4px;");
+    bottom->addWidget(workspace_panel_toggle(this, {tasks, inspector}));
+    bottom->addStretch();
+    accept_ = new QPushButton(tr("确定"), this);
+    accept_->setObjectName("portraitAccept");
+    accept_->setMinimumSize(120, 44);
+    accept_->setStyleSheet("background:#2f80ed;color:white;border-radius:4px;");
     auto* cancel=new QPushButton(tr("取消"),this);cancel->setMinimumSize(120,44);bottom->addWidget(cancel);bottom->addWidget(accept_);
     auto* footer=new QHBoxLayout;status_=new QLabel(this);status_->setObjectName("portraitStatus");footer->addWidget(status_,1);
     cancel_compute_=new QPushButton(tr("取消识别"),this);cancel_compute_->setObjectName("portraitCancelCompute");footer->addWidget(cancel_compute_);auto* render_status=new QLabel(this);render_status->setObjectName("portraitRenderStatus");render_status->setFixedWidth(132);render_status->setFixedHeight(30);footer->addWidget(render_status);auto cancel_policy=cancel_compute_->sizePolicy();cancel_policy.setRetainSizeWhenHidden(true);cancel_compute_->setSizePolicy(cancel_policy);cancel_compute_->setFixedSize(32,30);status_->setMinimumWidth(0);status_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);status_->setFixedHeight(30);
@@ -544,7 +566,10 @@ void PortraitDialog::finish_brush_gesture(){
     finish_liquify();
 }
 bool PortraitDialog::event(QEvent* event){
-    if(event->type()==QEvent::Resize){if(auto* tasks=findChild<QListWidget*>("portraitTasks"))tasks->setFixedWidth(width()<1440?200:224);if(auto* inspector=findChild<QWidget*>("portraitInspector"))inspector->setFixedWidth(width()<1440?400:448);}
+    if (event->type() == QEvent::Resize) {
+        if (auto* tasks = findChild<QListWidget*>("portraitTasks"))
+            tasks->setFixedWidth(width() < 1100 ? 148 : width() < 1440 ? 180 : 224);
+    }
     if(event->type()==QEvent::WindowDeactivate){finish_brush_gesture();finish_gesture();view_->cancel_navigation();}
     return QDialog::event(event);
 }
@@ -1746,11 +1771,11 @@ void PortraitDialog::build_parameters() {
     QHash<QString,QVBoxLayout*> groups;
     for(const auto& descriptor:controls){const auto group=group_name(descriptor.key);if(groups.contains(group))continue;
         const auto id=QString::number(panel)+"_"+group;auto* section=new QWidget(parameter_host_);auto* section_layout=new QVBoxLayout(section);section_layout->setContentsMargins(0,0,0,0);section_layout->setSpacing(2);
-        auto header=raw_section_header(section,group,"portraitGroup_"+id,"portraitGroupEnabled_"+id,expanded_groups_.value(id,groups.isEmpty() || (workspace_task==3 && (panel==2 || (panel==0 && group==tr("下巴"))))));section_layout->addLayout(header.layout);
+        auto header=raw_section_header(section,tr(group.toUtf8().constData()),"portraitGroup_"+id,"portraitGroupEnabled_"+id,expanded_groups_.value(id,groups.isEmpty() || (workspace_task==3 && (panel==2 || (panel==0 && group==QStringLiteral("下巴"))))));section_layout->addLayout(header.layout);
         auto* content=new QWidget(section);auto* rows=new QVBoxLayout(content);rows->setContentsMargins(0,0,0,0);rows->setSpacing(0);content->setVisible(header.expand->isChecked());section_layout->addWidget(content);groups.insert(group,rows);parameter_layout_->addWidget(section);
         connect(header.expand,&QToolButton::toggled,this,[this,content,id,button=header.expand](bool open){expanded_groups_[id]=open;content->setVisible(open);button->setArrowType(open?Qt::DownArrow:Qt::RightArrow);});
-        if(workspace_task==3 && panel==1 && (group==tr("眼睛") || group==tr("眉毛") || group==tr("嘴唇"))){
-            const auto sideGroup=group==tr("眼睛")?QStringLiteral("eyes"):group==tr("眉毛")?QStringLiteral("brows"):QStringLiteral("mouth");
+        if(workspace_task==3 && panel==1 && (group==QStringLiteral("眼睛") || group==QStringLiteral("眉毛") || group==QStringLiteral("嘴唇"))){
+            const auto sideGroup=group==QStringLiteral("眼睛")?QStringLiteral("eyes"):group==QStringLiteral("眉毛")?QStringLiteral("brows"):QStringLiteral("mouth");
             auto* choices=new QButtonGroup(section);
             for(int side=0;side<3;++side){
                 auto* choice=new QToolButton(section);choice->setText(side==0?tr("整体"):side==1?tr("左"):tr("右"));
@@ -1768,14 +1793,14 @@ void PortraitDialog::build_parameters() {
         connect(header.enabled,&QToolButton::pressed,this,[this,keys]{group_bypass_=keys;schedule_preview();});
         connect(header.enabled,&QToolButton::released,this,[this]{group_bypass_.clear();schedule_preview();});
         auto* reset_group=new QToolButton(section);reset_group->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));reset_group->setToolTip(tr("重置本组参数，保留范围与保护"));reset_group->setObjectName("portraitGroupReset_"+id);header.layout->addWidget(reset_group);
-        if(workspace_task==3 && panel==2 && group==tr("比例")){
+        if(workspace_task==3 && panel==2 && group==QStringLiteral("比例")){
             for(int i=0;i<header.layout->count();++i)if(auto* w=header.layout->itemAt(i)->widget())w->hide();
         }
         connect(reset_group,&QToolButton::clicked,this,[this,keys]{if(selected_<0)return;auto& settings=people_[std::size_t(selected_)].settings;auto values=settings["parameters"].toObject();for(const auto& key:keys){values.remove(key);values.remove(key+".left");values.remove(key+".right");}settings["parameters"]=values;remember();build_parameters();});
     }
     for(const auto& parameter:controls){auto* widget=new QWidget(parameter_host_);auto* column=new QVBoxLayout(widget);column->setContentsMargins(0,1,0,1);column->setSpacing(0);
         auto* label=new QCheckBox(parameter.label,widget);label->setObjectName("portraitEnabled_"+parameter.key);label->setChecked(!settings["disabledParameters"].toObject()[parameter.key].toBool());label->hide();auto* title=new QLabel(parameter.label,widget);title->setObjectName("portraitLabel_"+parameter.key);title->setToolTip(tr("双击滑条恢复默认；右键可暂时停用此参数"));title->setMinimumWidth(0);title->setWordWrap(true);title->setToolTip(parameter.label+tr(" · 双击恢复默认"));title->installEventFilter(this);title->setProperty("resetParameter",parameter.key);
-        const auto update_label=[title,label,text=parameter.label](bool enabled){title->setText(text+(enabled?QString{}:QStringLiteral("（已停用）")));title->setEnabled(enabled);Q_UNUSED(label);};update_label(label->isChecked());connect(label,&QCheckBox::toggled,title,update_label);auto* row=new QHBoxLayout;row->addWidget(title);
+        const auto update_label=[title,label,text=parameter.label](bool enabled){title->setText(text+(enabled?QString{}:QObject::tr("（已停用）")));title->setEnabled(enabled);Q_UNUSED(label);};update_label(label->isChecked());connect(label,&QCheckBox::toggled,title,update_label);auto* row=new QHBoxLayout;row->addWidget(title);
         connect(label,&QCheckBox::toggled,this,[this,key=parameter.key](bool checked){if(selected_<0)return;auto& settings=people_[std::size_t(selected_)].settings;auto disabled=settings["disabledParameters"].toObject();if(checked)disabled.remove(key);else disabled[key]=true;settings["disabledParameters"]=disabled;remember();});
         auto* slider=new ColorBandSlider(-1,0,widget);slider->setFixedHeight(24);slider->set_colors(QColor("#69727c"),QColor("#69727c"));slider->setRange(int(parameter.minimum),int(parameter.maximum));slider->setObjectName("portraitSlider_"+parameter.key);slider->setAccessibleName(parameter.label);bind_slider(slider);auto* spin=new QDoubleSpinBox(widget);spin->setKeyboardTracking(false);spin->setDecimals(0);spin->setRange(parameter.minimum,parameter.maximum);spin->setFixedSize(72,26);spin->setButtonSymbols(QAbstractSpinBox::NoButtons);spin->setObjectName("portraitParam_"+parameter.key);spin->setAccessibleName(parameter.label);
         if(parameter.key=="face.width" || parameter.key=="face.cheek" || parameter.key=="face.jaw" || parameter.key=="face.chin"){

@@ -21,6 +21,7 @@ struct RetouchOptions {
 };
 [[nodiscard]] QPointF clone_sample_position(const RetouchOptions& options, QPointF point);
 [[nodiscard]] QImage sample_layers(const State& state, const QUuid& target, SampleLayers scope);
+[[nodiscard]] QImage focus_range(const State& state, double threshold);
 [[nodiscard]] QImage color_range(const QImage& image, QPoint seed, int tolerance, bool contiguous);
 void fill_color(State& state, const QUuid& target, QPoint seed, QColor color, int tolerance,
                 bool contiguous, bool all_layers, double opacity = 1);

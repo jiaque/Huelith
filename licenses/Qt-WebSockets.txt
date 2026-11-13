@@ -1,0 +1,4 @@
+Qt WebSockets 6.10.3
+Copyright The Qt Company Ltd. and other contributors.
+Distributed under GPL-3.0-only; full license text is provided in the application LICENSE.
+Unmodified source: https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/qtwebsockets-everywhere-src-6.10.3.zip

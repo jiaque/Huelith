@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/portrait_effects.h"
 #include "huelith/editing/project.h"
 #include <opencv2/imgproc.hpp>
@@ -198,13 +199,13 @@ QJsonObject portrait_volume_combination(const QImage& source,const QJsonObject& 
     const auto check=[&]{if(cancelled && cancelled->load())throw EditError("丰盈分析已取消");};
     const auto put=[&](QString key,int value){parameters[key]=value;disabled.remove(key);disabled.remove(key.section('.',0,1));};
     check();const auto forehead=portrait_forehead_volume(source,candidate);settings["foreheadVolume"]=forehead;
-    put("face.foreheadFill",forehead.isEmpty()?0:40);(forehead.isEmpty()?skipped:applied).append(QStringLiteral("额头"));
+    put("face.foreheadFill",forehead.isEmpty()?0:40);(forehead.isEmpty()?skipped:applied).append(QCoreApplication::translate("Huelith", "额头"));
     struct Part{const char* cache;const char* key;const char* label;QJsonObject (*analyze)(const QImage&,const QJsonObject&);int strength;};
     bool cheeks[2]{};
     for(const auto& part:std::array<Part,4>{{{"tearVolume","face.tearFill","泪沟",portrait_tear_volume,45},{"malarVolume","face.malarTone","苹果肌",portrait_malar_volume,35},{"cheekVolume","face.cheekTone","面颊",portrait_cheek_volume,35},{"perioralVolume","face.perioralTone","口周",portrait_perioral_volume,25}}}){
         check();const auto analysis=part.analyze(source,candidate);settings[part.cache]=analysis;
         for(int side=0;side<2;++side){const QString suffix=side==0?".left":".right";const bool valid=analysis["valid"+suffix].toBool();put(QString(part.key)+suffix,valid?part.strength:0);
-            (valid?applied:skipped).append(QString::fromUtf8(part.label)+(side==0?QStringLiteral("·人物左侧"):QStringLiteral("·人物右侧")));
+            (valid?applied:skipped).append(QString::fromUtf8(part.label)+(side==0?QCoreApplication::translate("Huelith", "·人物左侧"):QCoreApplication::translate("Huelith", "·人物右侧")));
             if(QString(part.key)=="face.malarTone")put("face.malarShape"+suffix,valid?20:0);
             if(QString(part.key)=="face.cheekTone")cheeks[side]=valid;
         }
@@ -228,20 +229,20 @@ QJsonObject portrait_lift_combination(const QImage& source,const QJsonObject& pe
     const auto check=[&]{if(cancelled && cancelled->load())throw EditError("提拉分析已取消");};
     const auto put=[&](const QString& key,int amount,bool valid,const QString& label){parameters[key]=valid?amount:0;disabled.remove(key);disabled.remove(key.section('.',0,1));(valid?applied:skipped).append(label);};
     const auto lm=person["landmarks"].toArray();const auto reliable=[&](int index){if(index>=lm.size())return false;const auto p=lm[index].toArray();return p.size()>=2 && (p.size()<3 || p[2].toDouble()>=.3);};
-    check();put("face.foreheadLift",25,portrait_forehead_lift_available(candidate,source.size()),QStringLiteral("额头"));
+    check();put("face.foreheadLift",25,portrait_forehead_lift_available(candidate,source.size()),QCoreApplication::translate("Huelith", "额头"));
     check();settings["orbitalVolume"]=portrait_orbital_volume(source,candidate);
     check();settings["perioralVolume"]=portrait_perioral_volume(source,candidate);
     for(int side=0;side<2;++side){
-        check();const QString suffix=side==0?".left":".right",label=side==0?QStringLiteral("·人物左侧"):QStringLiteral("·人物右侧");
+        check();const QString suffix=side==0?".left":".right",label=side==0?QCoreApplication::translate("Huelith", "·人物左侧"):QCoreApplication::translate("Huelith", "·人物右侧");
         bool contour=lm.size()>=66;for(int j=0;j<=8;++j)contour=contour && reliable(side==0?16-j:j);
         bool middle=true;for(int i:side==0?std::array<int,4>{46,35,13,62}:std::array<int,4>{41,31,3,58})middle=middle && reliable(i);
         const bool outer=portrait_orbital_lift_available(candidate,source.size(),side),oral=portrait_perioral_lift_available(candidate,source.size(),side);
-        put("face.contourLift"+suffix,30,contour && (outer || oral),QStringLiteral("轮廓")+label);
-        put("face.midfaceLift"+suffix,30,middle && (outer || oral),QStringLiteral("面中")+label);
-        put("face.orbitalLift"+suffix,25,outer,QStringLiteral("眼周形态")+label);
-        put("face.perioralLift"+suffix,25,oral,QStringLiteral("口周形态")+label);
-        put("face.orbitalTone"+suffix,20,settings["orbitalVolume"].toObject()["valid"+suffix].toBool(),QStringLiteral("眼周明暗")+label);
-        put("face.perioralTone"+suffix,20,settings["perioralVolume"].toObject()["valid"+suffix].toBool(),QStringLiteral("口周明暗")+label);
+        put("face.contourLift"+suffix,30,contour && (outer || oral),QCoreApplication::translate("Huelith", "轮廓")+label);
+        put("face.midfaceLift"+suffix,30,middle && (outer || oral),QCoreApplication::translate("Huelith", "面中")+label);
+        put("face.orbitalLift"+suffix,25,outer,QCoreApplication::translate("Huelith", "眼周形态")+label);
+        put("face.perioralLift"+suffix,25,oral,QCoreApplication::translate("Huelith", "口周形态")+label);
+        put("face.orbitalTone"+suffix,20,settings["orbitalVolume"].toObject()["valid"+suffix].toBool(),QCoreApplication::translate("Huelith", "眼周明暗")+label);
+        put("face.perioralTone"+suffix,20,settings["perioralVolume"].toObject()["valid"+suffix].toBool(),QCoreApplication::translate("Huelith", "口周明暗")+label);
     }
     if(applied.isEmpty())return {};
     settings["parameters"]=parameters;settings["disabledParameters"]=disabled;auto enabled=settings["enabled"].toObject();enabled["face"]=true;settings["enabled"]=enabled;

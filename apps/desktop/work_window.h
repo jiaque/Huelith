@@ -1,6 +1,7 @@
 #pragma once
-#include <QDialog>
 #include "application_icon.h"
+#include "workspace_layout.h"
+#include <QDialog>
 #include <QEventLoop>
 #include <QPointer>
 #include <QTimer>
@@ -23,8 +24,13 @@ inline int run_work_window(QDialog& dialog, QWidget* owner) {
         if(!lifetime || !lifetime->isVisible()) dialog.reject();
     });
     watch.start(100);
+    const QString layoutKey = "workspace/windows/" +
+                              QString::fromLatin1(dialog.metaObject()->className()) + "/" +
+                              dialog.objectName();
+    restore_workspace_window(&dialog, layoutKey, owner);
     dialog.show();
     loop.exec();
+    QSettings().setValue(layoutKey + "/geometry", dialog.saveGeometry());
     dialog.hide();
     return dialog.result();
 }

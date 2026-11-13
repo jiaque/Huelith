@@ -88,18 +88,18 @@ QJsonObject transfer_raw_settings(const QJsonObject& source, QJsonObject target_
 RawGroups raw_preset_groups(const QJsonObject& preset) {
     const auto array = preset.value("groups").toArray();
     if (array.size() != 14)
-        throw EditError(QStringLiteral("RAW 预设分组无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 预设分组无效"));
     RawGroups result{};
     for (int i = 0; i < 14; ++i) {
         if (!array[i].isBool())
-            throw EditError(QStringLiteral("RAW 预设分组无效"));
+            throw EditError(QCoreApplication::translate("Huelith", "RAW 预设分组无效"));
         result[i] = array[i].toBool();
     }
     return result;
 }
 QJsonObject raw_preset(const QString& name, const QJsonObject& recipe, const RawGroups& groups) {
     if (name.trimmed().isEmpty() || name.size() > 120)
-        throw EditError(QStringLiteral("请输入不超过120字的预设名称"));
+        throw EditError(QCoreApplication::translate("Huelith", "请输入不超过120字的预设名称"));
     QJsonArray selection;
     bool any{};
     for (bool group : groups) {
@@ -107,7 +107,7 @@ QJsonObject raw_preset(const QString& name, const QJsonObject& recipe, const Raw
         any |= group;
     }
     if (!any)
-        throw EditError(QStringLiteral("请至少选择一组设置"));
+        throw EditError(QCoreApplication::translate("Huelith", "请至少选择一组设置"));
     return {{"type", "huelith.raw-preset"},
             {"version", 1},
             {"name", name.trimmed()},
@@ -116,13 +116,13 @@ QJsonObject raw_preset(const QString& name, const QJsonObject& recipe, const Raw
 }
 QJsonObject read_raw_preset(const QByteArray& data) {
     if (data.size() > 16 * 1024 * 1024)
-        throw EditError(QStringLiteral("RAW 预设文件过大"));
+        throw EditError(QCoreApplication::translate("Huelith", "RAW 预设文件过大"));
     QJsonParseError error;
     const auto document = QJsonDocument::fromJson(data, &error);
     const auto object = document.object();
     if (error.error != QJsonParseError::NoError || object.value("type") != "huelith.raw-preset" ||
         object.value("version").toInt() != 1 || !object.value("recipe").isObject())
-        throw EditError(QStringLiteral("不是有效的 Huelith RAW 预设"));
+        throw EditError(QCoreApplication::translate("Huelith", "不是有效的 Huelith RAW 预设"));
     auto result = raw_preset(object.value("name").toString(), object.value("recipe").toObject(),
                              raw_preset_groups(object));
     QImage fixture(8, 8, QImage::Format_RGBA32FPx4_Premultiplied);

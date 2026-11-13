@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "portrait_contour.h"
 #include "huelith/editing/project.h"
 #include "huelith/editing/portrait_landmarks.h"
@@ -359,7 +360,7 @@ PortraitContour::PortraitContour(QSize size,const QJsonArray& points,
         const bool scalpActive=headTarget.forehead!=0 || headTarget.crown!=0 || headTarget.hairline!=0 || headTarget.hairVolume!=0;
         std::vector<QPointF> hairline;double baseline=0,top=0;
         if(scalpActive){
-            if(!headTarget.scalp["valid"].toBool())throw EditError(headTarget.scalp["reason"].toString(QStringLiteral("发际线定位不足，请重新识别")));
+            if(!headTarget.scalp["valid"].toBool())throw EditError(headTarget.scalp["reason"].toString(QCoreApplication::translate("Huelith", "发际线定位不足，请重新识别")));
             if(headTarget.scalp["cropped"].toBool())throw EditError("头部外沿被裁切，不能可靠自动调整额头或颅顶");
             const auto read=[&](const QJsonValue& v){const auto a=v.toArray();return local(QPointF(a[0].toDouble(),a[1].toDouble()));};
             for(const auto& v:headTarget.scalp["hairline"].toArray())hairline.push_back(read(v));
@@ -596,7 +597,7 @@ PortraitContour::PortraitContour(QSize size,const QJsonArray& points,
         for(int j=0;j<count;++j)matrix.at<double>(i,j)=basis(length(centers_[i]-centers_[j]),support_)+(i==j?1e-9:0);
     }
     if(!cv::solve(matrix,rhs,coefficients_,cv::DECOMP_CHOLESKY) || !cv::checkRange(coefficients_))
-        throw EditError(QStringLiteral("面部轮廓约束求解失败，请修正人物定位"));
+        throw EditError(QCoreApplication::translate("Huelith", "面部轮廓约束求解失败，请修正人物定位"));
     for(auto center:centers_){
         const auto centerPixel=origin_+(axis_*center.x()+vertical_*center.y())*scale_;
         const double radius=support_*scale_;

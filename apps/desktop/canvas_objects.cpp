@@ -96,7 +96,7 @@ void CanvasView::object_poll() {
         auto image = editing::sample_layers(
             state, id, all ? editing::SampleLayers::visible : editing::SampleLayers::current);
         if (cancelled->load())
-            throw editing::EditError(QStringLiteral("对象识别已取消"));
+            throw editing::EditError(QObject::tr("对象识别已取消"));
         image = image.scaled(1280, 1280, Qt::KeepAspectRatio, Qt::SmoothTransformation);
         return editing::semantic_instances(image, model, *cancelled);
     });

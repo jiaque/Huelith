@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/liquify.h"
 #include "huelith/editing/project.h"
 #include "huelith/editing/image_storage.h"
@@ -26,7 +27,7 @@ std::array<float, 4> sample(const QImage& image, double x, double y) {
 } // namespace
 QImage create_liquify_mesh(QSize size) {
     if (size.width() < 1 || size.height() < 1)
-        throw EditError(QStringLiteral("液化需要有效图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "液化需要有效图像"));
     const double scale = std::min(1., 512. / std::max(size.width(), size.height()));
     QImage mesh(std::max(2, int(std::ceil(size.width() * scale)) + 1),
                 std::max(2, int(std::ceil(size.height() * scale)) + 1),
@@ -59,13 +60,13 @@ void validate_liquify_mesh(const QImage& mesh) {
         return;
     if (mesh.format() != QImage::Format_RGBA32FPx4_Premultiplied || mesh.width() < 2 ||
         mesh.height() < 2 || mesh.width() > 513 || mesh.height() > 513)
-        throw EditError(QStringLiteral("液化网格格式或尺寸无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "液化网格格式或尺寸无效"));
     for (int y = 0; y < mesh.height(); ++y) {
         const auto* p = reinterpret_cast<const float*>(mesh.constScanLine(y));
         for (int x = 0; x < mesh.width(); ++x, p += 4)
             if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || std::abs(p[0]) > 4 ||
                 std::abs(p[1]) > 4 || !std::isfinite(p[2]) || p[2] < 0 || p[2] > 1 || p[3] != 1)
-                throw EditError(QStringLiteral("液化网格含无效数值"));
+                throw EditError(QCoreApplication::translate("Huelith", "液化网格含无效数值"));
     }
 }
 void liquify_dab(QImage& mesh, QSize size, QPointF from, QPointF to, const LiquifyBrush& brush,
@@ -78,7 +79,7 @@ void liquify_dab(QImage& mesh, QSize size, QPointF from, QPointF to, const Liqui
         amount > 10 || !std::isfinite(from.x()) || !std::isfinite(from.y()) ||
         !std::isfinite(to.x()) || !std::isfinite(to.y()) || int(brush.tool) < 0 ||
         int(brush.tool) > 8)
-        throw EditError(QStringLiteral("液化画笔参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "液化画笔参数无效"));
     const QImage old = mesh;
     const double w = std::max(1, size.width() - 1), h = std::max(1, size.height() - 1),
                  radius = brush.diameter * .5;
@@ -191,7 +192,7 @@ void liquify_dab(QImage& mesh, QSize size, QPointF from, QPointF to, const Liqui
 void reconstruct_liquify(QImage& mesh, double amount) {
     validate_liquify_mesh(mesh);
     if (!std::isfinite(amount) || amount < 0 || amount > 1)
-        throw EditError(QStringLiteral("重建强度无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "重建强度无效"));
     for (int y = 0; y < mesh.height(); ++y) {
         auto* p = reinterpret_cast<float*>(mesh.scanLine(y));
         for (int x = 0; x < mesh.width(); ++x, p += 4) {
@@ -203,7 +204,7 @@ void reconstruct_liquify(QImage& mesh, double amount) {
 void freeze_liquify(QImage& mesh, int operation) {
     validate_liquify_mesh(mesh);
     if (operation < 0 || operation > 2)
-        throw EditError(QStringLiteral("冻结操作无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "冻结操作无效"));
     for (int y = 0; y < mesh.height(); ++y) {
         auto* p = reinterpret_cast<float*>(mesh.scanLine(y));
         for (int x = 0; x < mesh.width(); ++x, p += 4)
@@ -232,11 +233,11 @@ QImage liquify_from_json(const QJsonObject& json) {
     const int w = json.value("width").toInt(), h = json.value("height").toInt();
     if (json.value("version").toInt() != 1 || w < 2 || h < 2 || w > 513 || h > 513 ||
         json.value("data").toString().size() > 6 * 1024 * 1024)
-        throw EditError(QStringLiteral("液化预设无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "液化预设无效"));
     const auto bytes = QByteArray::fromBase64(json.value("data").toString().toLatin1(),
                                               QByteArray::AbortOnBase64DecodingErrors);
     if (bytes.size() != w * h * 16)
-        throw EditError(QStringLiteral("液化预设数据长度无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "液化预设数据长度无效"));
     QImage mesh(w, h, QImage::Format_RGBA32FPx4_Premultiplied);
     for (int y = 0; y < h; ++y) {
         auto* row = reinterpret_cast<float*>(mesh.scanLine(y));
@@ -252,13 +253,13 @@ QImage apply_liquify(const QImage& source, const QImage& mesh, const std::atomic
     if (mesh.isNull())
         return source;
     if (source.isNull() || source.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("液化需要FP32图像"));
+        throw EditError(QCoreApplication::translate("Huelith", "液化需要FP32图像"));
     auto output=allocate_image(source.size(), source.format());
     output.setColorSpace(source.colorSpace());
     const double w = std::max(1, source.width() - 1), h = std::max(1, source.height() - 1);
     for (int y = 0; y < source.height(); ++y) {
         if (cancelled && cancelled->load())
-            throw EditError(QStringLiteral("液化已取消"));
+            throw EditError(QCoreApplication::translate("Huelith", "液化已取消"));
         auto* row = reinterpret_cast<float*>(output.scanLine(y));
         for (int x = 0; x < source.width(); ++x) {
             const auto d = sample(mesh, x / w * (mesh.width() - 1), y / h * (mesh.height() - 1));

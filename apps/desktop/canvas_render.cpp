@@ -1,4 +1,5 @@
 #include "canvas_view.h"
+#include "huelith/editing/document_color.h"
 #include <QCursor>
 #include <QTimer>
 #include <QToolTip>
@@ -22,6 +23,9 @@ struct CanvasView::RenderWork {
     std::shared_ptr<std::atomic_bool> cancelled;
     std::optional<editing::State> pending;
     QColorSpace color_space;
+    QColorSpace proof_space;
+    bool gamut_warning{};
+    QColor gamut_color;
     quint64 generation{};
     quint64 completed{};
     quint64 first_generation{};
@@ -59,7 +63,7 @@ void CanvasView::reset_preview(const QImage& linear) {
         work.first_generation = work.generation;
     }
     linear_preview_ = linear;
-    preview_ = editing::display_image(linear, monitor_space_);
+    preview_ = editing::proof_image(linear, proof_space, monitor_space_, gamut_warning, gamut_color);
     setProperty("previewPending", false);
     setProperty("previewError", QString{});
 }
@@ -77,6 +81,9 @@ void CanvasView::request_preview(const editing::State& state) {
     ++work.generation;
     work.pending = state;
     work.color_space = monitor_space_;
+    work.proof_space = proof_space;
+    work.gamut_warning = gamut_warning;
+    work.gamut_color = gamut_color;
     if (work.cancelled)
         work.cancelled->store(true, std::memory_order_relaxed);
     setProperty("previewError", QString{});
@@ -124,6 +131,7 @@ void CanvasView::poll_preview() {
     work.cancelled = std::make_shared<std::atomic_bool>(false);
     const auto render = [state = std::move(state), cancelled = work.cancelled,
                          color_space = work.color_space, generation = work.generation,
+                         proof = work.proof_space, gamut = work.gamut_warning, warning = work.gamut_color,
                          progress = work.progress] {
         RenderWork::Result result;
         result.generation = generation;
@@ -137,7 +145,7 @@ void CanvasView::poll_preview() {
                 RenderWork::Result frame;
                 frame.generation = generation;
                 frame.display =
-                    editing::display_image(editing::render(proxy, proxy_options), color_space);
+                    editing::proof_image(editing::render(proxy, proxy_options), proof, color_space, gamut, warning);
                 {
                     const std::lock_guard lock(progress->mutex);
                     progress->image = std::move(frame);
@@ -149,7 +157,7 @@ void CanvasView::poll_preview() {
             options.cancelled = cancelled.get();
             result.linear = editing::render(state, options);
             if (!cancelled->load(std::memory_order_relaxed))
-                result.display = editing::display_image(result.linear, color_space);
+                result.display = editing::proof_image(result.linear, proof, color_space, gamut, warning);
         } catch (const std::exception& error) {
             result.error = QString::fromUtf8(error.what());
         }

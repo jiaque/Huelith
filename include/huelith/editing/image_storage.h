@@ -6,6 +6,9 @@ namespace huelith::editing {
 // A format/coordinate guard, independent of the resident-memory working set.
 inline constexpr qint64 maximum_image_pixels = 512'000'000;
 inline constexpr qint64 mapped_image_threshold = 64LL * 1024 * 1024;
+struct PixelStorageUsage {qint64 resident{}, mapped{};};
+void configure_pixel_storage(QString directory, qint64 residentLimit, qint64 diskLimit);
+PixelStorageUsage pixel_storage_usage();
 QImage allocate_image(QSize size, QImage::Format format);
 inline QImage allocate_image(int w, int h, QImage::Format f) { return allocate_image(QSize(w,h),f); }
 QImage copy_image(const QImage& source);

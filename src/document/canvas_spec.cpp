@@ -14,8 +14,12 @@ std::optional<CanvasSpecError> validate(const CanvasSpec& spec) noexcept {
         return CanvasSpecError::invalid_resolution;
     }
     if ((spec.background != CanvasBackground::transparent &&
-         spec.background != CanvasBackground::white) ||
-        spec.working_space != WorkingSpace::linear_rec2020) {
+         spec.background != CanvasBackground::white &&
+         spec.background != CanvasBackground::custom) ||
+        spec.working_space != WorkingSpace::linear_rec2020 || spec.color_mode < 0 || spec.color_mode > 3 ||
+        (spec.color_bits != 8 && spec.color_bits != 16 && spec.color_bits != 32) ||
+        spec.color_profile < 0 || spec.color_profile > 3 || spec.icc_profile.size() > 4*1024*1024 ||
+        (spec.color_mode == 3 && (spec.icc_profile.empty() || spec.color_bits != 8))) {
         return CanvasSpecError::invalid_enum;
     }
     return std::nullopt;

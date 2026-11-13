@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/image_storage.h"
 #include "huelith/editing/layout_template.h"
 #include <QFontDatabase>
@@ -16,7 +17,7 @@ State create_layout_template(const LayoutTemplate& layout) {
         layout.gap < 0 || !std::isfinite(layout.caption) || layout.caption < 0 ||
         !std::isfinite(layout.ppi) || layout.ppi <= 0 || layout.ppi > 9600 ||
         !layout.background.isValid() || layout.title.size() > 4096)
-        throw EditError(QStringLiteral("布局参数无效"));
+        throw EditError(QCoreApplication::translate("Huelith", "布局参数无效"));
     const double width =
         (layout.size.width() - 2 * layout.margin - (layout.columns - 1) * layout.gap) /
         layout.columns;
@@ -24,14 +25,14 @@ State create_layout_template(const LayoutTemplate& layout) {
                            (layout.rows - 1) * layout.gap) /
                           layout.rows;
     if (width < 8 || height < 8)
-        throw EditError(QStringLiteral("边距、间距或标题区域过大，相框没有足够空间"));
+        throw EditError(QCoreApplication::translate("Huelith", "边距、间距或标题区域过大，相框没有足够空间"));
     State state;
-    state.name = layout.title.isEmpty() ? QStringLiteral("布局模板") : layout.title;
+    state.name = layout.title.isEmpty() ? QCoreApplication::translate("Huelith", "布局模板") : layout.title;
     state.size = layout.size;
     state.ppi = layout.ppi;
     Layer background;
     background.kind = LayerKind::fill;
-    background.name = QStringLiteral("背景颜色");
+    background.name = QCoreApplication::translate("Huelith", "背景颜色");
     background.fill = layout.background;
     state.layers.push_back(background);
     for (int row = 0; row < layout.rows; ++row)
@@ -40,13 +41,13 @@ State create_layout_template(const LayoutTemplate& layout) {
                                 layout.margin + row * (height + layout.gap), width, height);
             Layer frame;
             frame.kind = LayerKind::group;
-            frame.name = QStringLiteral("相框 %1").arg(row * layout.columns + column + 1);
+            frame.name = QCoreApplication::translate("Huelith", "相框 %1").arg(row * layout.columns + column + 1);
             frame.frame = bounds;
             frame.vector_enabled = true;
             frame.vector_mask.addRect(bounds);
             Layer placeholder;
             placeholder.kind = LayerKind::shape;
-            placeholder.name = QStringLiteral("相框底色");
+            placeholder.name = QCoreApplication::translate("Huelith", "相框底色");
             placeholder.shape.size = bounds.size();
             placeholder.shape.fill = QColor("#d2d5d9");
             placeholder.transform.translate(bounds.x(), bounds.y());
@@ -56,7 +57,7 @@ State create_layout_template(const LayoutTemplate& layout) {
     if (!layout.title.isEmpty() && layout.caption > 0) {
         Layer title;
         title.kind = LayerKind::text;
-        title.name = QStringLiteral("标题");
+        title.name = QCoreApplication::translate("Huelith", "标题");
         title.text.paragraph = true;
         const double scale = layout.ppi / 96.;
         title.text.box = QSizeF(layout.size.width() - 2 * layout.margin, layout.caption) / scale;
@@ -84,7 +85,7 @@ void place_in_frame(State& state, const QUuid& target, QImage pixels, const QStr
     visit(state.layers, nullptr);
     if (!frame || layer_locked(state.layers, target) || pixels.isNull() ||
         pixels.format() != QImage::Format_RGBA32FPx4_Premultiplied)
-        throw EditError(QStringLiteral("请选择未锁定相框或相框内的图层"));
+        throw EditError(QCoreApplication::translate("Huelith", "请选择未锁定相框或相框内的图层"));
     auto found = std::find_if(frame->children.begin(), frame->children.end(),
                               [](const Layer& layer) { return layer.kind == LayerKind::source; });
     Layer image;
@@ -93,7 +94,7 @@ void place_in_frame(State& state, const QUuid& target, QImage pixels, const QStr
     const auto box = *frame->frame;
     const double scale = std::max(box.width() / pixels.width(), box.height() / pixels.height());
     image.kind = LayerKind::source;
-    image.name = QStringLiteral("相框照片");
+    image.name = QCoreApplication::translate("Huelith", "相框照片");
     image.pixels = std::move(pixels);
     image.linked_path = source;
     image.linked_hash.clear();

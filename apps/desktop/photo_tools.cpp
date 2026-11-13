@@ -1,4 +1,3 @@
-#include <QPointer>
 #include "canvas_view.h"
 #include "editor_controller.h"
 #include "main_window.h"
@@ -16,15 +15,18 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QPainter>
+#include <QPointer>
+#include <QPushButton>
 #include <QRadioButton>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QStatusBar>
 #include <QSvgRenderer>
+#include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
-#include <QTimer>
-#include <QPushButton>
+#include <QWidgetAction>
 #include <tuple>
 
 namespace huelith::desktop {
@@ -78,14 +80,15 @@ void EditorController::configure_photo_tools() {
         renderer.render(&painter);
         painter.end();
         pixmap.setDevicePixelRatio(2);
-        auto* action = new QAction(QIcon(pixmap), QString::fromUtf8(tool.label), toolbar);
+        auto* action = new QAction(QIcon(pixmap), QObject::tr(tool.label), toolbar);
         action->setCheckable(true);
         action->setData(int(tool.tool));
         action->setProperty("canvasTool", int(tool.tool));
         action->setShortcutContext(Qt::WidgetShortcut);
         action->setProperty("defaultShortcut", tool.shortcut);
+        action->setProperty("shortcutKey", QString::fromUtf8(tool.label));
         action->setShortcut(QKeySequence(
-            QSettings().value("shortcuts/" + action->text(), tool.shortcut).toString()));
+            QSettings().value("shortcuts/" + QString::fromUtf8(tool.label), tool.shortcut).toString()));
         group->addAction(action);
         auto* button = new QToolButton(panel);
         button->setObjectName(QString("toolButton_%1").arg(int(tool.tool)));
@@ -156,6 +159,70 @@ void EditorController::configure_photo_tools() {
     screen_button->setText("▱");
     screen_button->setFixedSize(29, 29);
     layout->addWidget(screen_button, row + 1, 1);
+    auto* columns = new QToolButton(panel);
+    columns->setObjectName("toolColumnToggle");
+    columns->setText("⇔");
+    columns->setToolTip(tr("切换单列 / 双列工具栏"));
+    columns->setFixedSize(29, 24);
+    layout->addWidget(columns, row + 2, 0);
+    // Long-press or the arrow exposes related tools without changing their shortcuts.
+    for (const auto& category : categories) {
+        if (category.size() < 2)
+            continue;
+        for (int index : category) {
+            auto* button = panel->findChild<QToolButton*>(QString("toolButton_%1").arg(index));
+            auto* menu = new QMenu(button);
+            for (int related : category) {
+                auto* other = panel->findChild<QToolButton*>(QString("toolButton_%1").arg(related));
+                menu->addAction(other->defaultAction());
+            }
+            button->setMenu(menu);
+            button->setPopupMode(QToolButton::DelayedPopup);
+        }
+    }
+    const auto arrange = [=](int count) {
+        while (auto* item = layout->takeAt(0)) {
+            if (auto* widget = item->widget(); widget && widget->objectName().isEmpty())
+                widget->deleteLater();
+            delete item;
+        }
+        int position = 0;
+        layout->addWidget(columns, position++, 0, 1, count);
+        for (const auto& category : categories) {
+            int column = 0;
+            for (int index : category) {
+                auto* button = panel->findChild<QToolButton*>(QString("toolButton_%1").arg(index));
+                layout->addWidget(button, position, column);
+                if (++column == count) {
+                    column = 0;
+                    ++position;
+                }
+            }
+            if (column)
+                ++position;
+        }
+        auto* colors = panel->findChild<QWidget*>("toolColors");
+        layout->addWidget(colors, position++, 0, 1, count);
+        layout->addWidget(quick_button, position++, 0);
+        layout->addWidget(screen_button, position, 0);
+        toolbar->setFixedWidth(count == 1 ? 58 : 78);
+        QSettings().setValue("workspace/toolColumns", count);
+    };
+    connect(columns, &QToolButton::clicked, this, [arrange] {
+        arrange(QSettings().value("workspace/toolColumns", 2).toInt() == 2 ? 1 : 2);
+    });
+    // The toolbar remains usable when a single-column palette is taller than the screen.
+    auto* tool_content = new QWidget;
+    tool_content->setLayout(layout);
+    auto* tool_scroll = new QScrollArea(panel);
+    tool_scroll->setWidgetResizable(true);
+    tool_scroll->setFrameShape(QFrame::NoFrame);
+    tool_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    tool_scroll->setWidget(tool_content);
+    auto* scroll_layout = new QVBoxLayout(panel);
+    scroll_layout->setContentsMargins(0, 0, 0, 0);
+    scroll_layout->addWidget(tool_scroll);
+    arrange(QSettings().value("workspace/toolColumns", 2).toInt() == 1 ? 1 : 2);
     struct ScreenState {
         int mode{};
         QByteArray layout;
@@ -357,6 +424,7 @@ void EditorController::configure_photo_tools() {
     portrait->setObjectName("portraitAction");
     connect(portrait, &QAction::triggered, this, [this] { guarded([&] { show_portrait(); }); });
     auto* liquify = filters->addAction(tr("液化…"));
+    filters->addAction(tr("消失点 · 透视贴图…"),this,[this]{guarded([&]{show_perspective();});});
     auto* blur_menu=filters->addMenu(tr("模糊"));
     auto* gaussian=blur_menu->addAction(tr("高斯模糊…"));
     connect(gaussian,&QAction::triggered,this,[this]{guarded([&]{show_effects(true);});});
@@ -406,6 +474,7 @@ void EditorController::configure_photo_tools() {
                     auto* target=editing::find_layer(state.layers,id);
                     if(!target) throw editing::EditError(tr("RAW 原图层已删除"));
                     *target=dialog.results().front();
+                    editing::synchronize_source(state,*target);
                 });
             }
         });

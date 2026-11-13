@@ -95,6 +95,8 @@ void CanvasView::begin_text(QRectF box, bool paragraph, bool existing) {
         const double scale = project_->state().ppi / 96.;
         layer.transform = QTransform(scale, 0, 0, scale, box.x(), box.y());
         layer.text.paragraph = paragraph;
+        layer.text.layout=text_layout; layer.text.ligatures=text_ligatures;
+        if(text_layout==2) layer.text.baseline=layer.transform.inverted().map(path);
         if (paragraph)
             layer.text.box = box.size() / scale;
         QTextDocument document;

@@ -1,6 +1,6 @@
-#include "huelith/editing/image_storage.h"
 #include "canvas_view.h"
 #include "editor_controller.h"
+#include "huelith/editing/image_storage.h"
 #include "huelith/editing/layout_template.h"
 #include "main_window.h"
 #include <QAction>
@@ -15,6 +15,7 @@
 #include <QMenuBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QTextCharFormat>
 #include <QToolBar>
@@ -24,6 +25,53 @@ namespace huelith::desktop {
 using namespace editing;
 void EditorController::configure_design_tools() {
     auto* options = window_->findChild<QToolBar*>("viewToolbar");
+    auto* orientation = new QComboBox(options);
+    orientation->setObjectName("textOrientation");
+    orientation->addItems({tr("横排"), tr("竖排"), tr("沿当前路径")});
+    options->addWidget(orientation)->setObjectName("text_orientation");
+    connect(orientation, &QComboBox::activated, this, [this](int mode) {
+        guarded([&] {
+            auto* c = canvas();
+            if (!c)
+                return;
+            c->finish_text(true);
+            if (mode == 2 && c->path.isEmpty())
+                throw EditError(tr("请先用钢笔绘制路径或载入工作路径"));
+            c->text_layout = mode;
+            const auto* layer = find_layer(c->project().state().layers, c->active_layer);
+            if (layer && layer->kind == LayerKind::text)
+                c->edit(tr("文字排列"), [&](State& s) {
+                    auto* target = find_layer(s.layers, c->active_layer);
+                    if (layer_locked(s.layers, target->id))
+                        throw EditError(tr("文字图层已锁定"));
+                    target->text.layout = mode;
+                    if (mode == 2)
+                        target->text.baseline = (target->transform * parent_matrix(s, target->id))
+                                                    .inverted()
+                                                    .map(c->path);
+                });
+        });
+    });
+    auto* ligatures = new QCheckBox(tr("连字"), options);
+    ligatures->setChecked(true);
+    ligatures->setObjectName("textLigatures");
+    options->addWidget(ligatures)->setObjectName("text_ligatures");
+    connect(ligatures, &QCheckBox::toggled, this, [this](bool enabled) {
+        guarded([&] {
+            auto* c = canvas();
+            if (!c)
+                return;
+            c->finish_text(true);
+            c->text_ligatures = enabled;
+            const auto* layer = find_layer(c->project().state().layers, c->active_layer);
+            if (layer && layer->kind == LayerKind::text)
+                c->edit(tr("OpenType 连字"), [&](State& s) {
+                    if (layer_locked(s.layers, c->active_layer))
+                        throw EditError(tr("文字图层已锁定"));
+                    find_layer(s.layers, c->active_layer)->text.ligatures = enabled;
+                });
+        });
+    });
     auto* family = new QFontComboBox(options);
     family->setObjectName("textFamily");
     family->setMaximumWidth(190);
@@ -45,7 +93,8 @@ void EditorController::configure_design_tools() {
     connect(size, &QDoubleSpinBox::editingFinished, this, [this, size] {
         if (auto* c = canvas()) {
             QTextCharFormat f;
-            f.setFontPointSize(size->value());
+            f.setFontPointSize(size->value() *
+                               (QSettings().value("text/pixelUnits", false).toBool() ? .75 : 1.));
             c->format_text(f);
         }
     });
@@ -394,13 +443,27 @@ void EditorController::configure_design_tools() {
 void EditorController::refresh_design_tools() {
     auto* c = canvas();
     if (c && c->tool() == CanvasTool::text) {
+        const auto* current = find_layer(c->project().state().layers, c->active_layer);
+        const bool text = current && current->kind == LayerKind::text;
+        if (auto* orientation = window_->findChild<QComboBox*>("textOrientation")) {
+            const QSignalBlocker block(orientation);
+            orientation->setCurrentIndex(text ? current->text.layout : c->text_layout);
+        }
+        if (auto* ligatures = window_->findChild<QCheckBox*>("textLigatures")) {
+            const QSignalBlocker block(ligatures);
+            ligatures->setChecked(text ? current->text.ligatures : c->text_ligatures);
+        }
         const auto format = c->current_text_format();
         if (auto* family = window_->findChild<QFontComboBox*>("textFamily")) {
             const QSignalBlocker block(family);
             if (!format.fontFamilies().toStringList().isEmpty()) family->setCurrentFont(format.font());
         }
         if (auto* size = window_->findChild<QDoubleSpinBox*>("textSize")) {
-            const QSignalBlocker block(size); size->setValue(format.fontPointSize() > 0 ? format.fontPointSize() : 24);
+            const QSignalBlocker block(size);
+            const bool pixels = QSettings().value("text/pixelUnits", false).toBool();
+            size->setSuffix(pixels ? " px" : " pt");
+            size->setValue((format.fontPointSize() > 0 ? format.fontPointSize() : 24) *
+                           (pixels ? 4. / 3 : 1.));
         }
         for (int i = 0; i < 3; ++i)
             if (auto* action = window_->findChild<QAction*>(QString("text_style%1").arg(i))) {

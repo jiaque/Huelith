@@ -1,3 +1,4 @@
+#include <QCoreApplication>
 #include "huelith/editing/portrait_effects.h"
 #include "huelith/editing/healing.h"
 #include "huelith/editing/project.h"
@@ -230,7 +231,7 @@ QJsonObject portrait_repair_analysis(const QImage& source,const QJsonObject& per
     cv::Mat rgb(image.height(),image.width(),CV_8UC3,const_cast<uchar*>(image.constBits()),image.bytesPerLine()),lab;cv::cvtColor(rgb,lab,cv::COLOR_RGB2Lab);
     std::vector<cv::Vec3f> samples;std::vector<QPoint> positions;
     for(int y=0;y<size.height();++y)for(int x=0;x<size.width();++x)if(mouth.constScanLine(y)[x]>220){const auto p=lab.at<cv::Vec3b>(y,x);samples.emplace_back(float(p[0]),float(p[1]),float(p[2]));positions.emplace_back(x,y);}
-    QString reason=QStringLiteral("未可靠识别露出的牙齿；可在范围页手工补选");
+    QString reason=QCoreApplication::translate("Huelith", "未可靠识别露出的牙齿；可在范围页手工补选");
     if(samples.size()>=24){
         // Deterministic local Lab clustering. Relative mouth color, not a fixed HSV white threshold.
         auto sorted=samples;std::sort(sorted.begin(),sorted.end(),[](auto a,auto b){return a[0]<b[0];});
@@ -245,7 +246,7 @@ QJsonObject portrait_repair_analysis(const QImage& source,const QJsonObject& per
             cv::Mat components,stats,centroids;const int n=cv::connectedComponentsWithStats(binary,components,stats,centroids);int retained{};
             for(int k=1;k<n;++k){const int area=stats.at<int>(k,cv::CC_STAT_AREA);if(area<std::max(3,int(samples.size()/150)) || area>int(samples.size()*.9))continue;
                 for(int y=stats.at<int>(k,cv::CC_STAT_TOP);y<stats.at<int>(k,cv::CC_STAT_TOP)+stats.at<int>(k,cv::CC_STAT_HEIGHT);++y)for(int x=stats.at<int>(k,cv::CC_STAT_LEFT);x<stats.at<int>(k,cv::CC_STAT_LEFT)+stats.at<int>(k,cv::CC_STAT_WIDTH);++x)if(components.at<int>(y,x)==k){teeth.scanLine(y)[x]=255;++retained;}}
-            if(retained>5)reason=QStringLiteral("已生成牙齿建议范围；请检查牙龈、舌头和唇缘后调整");
+            if(retained>5)reason=QCoreApplication::translate("Huelith", "已生成牙齿建议范围；请检查牙龈、舌头和唇缘后调整");
         }
     }
     // Suggestions are visual outliers, never diagnoses or automatic removals.
@@ -435,7 +436,7 @@ QJsonObject portrait_repair_analysis(const QImage& source,const QJsonObject& per
             if(red_eye.constScanLine(y)[x]>80)++redPixels;
         }
     }
-    return {{"hairLighting",hair_lighting_analysis(source,person)},{"cheekLighting",cheek_lighting_analysis(source,person)},{"lipLighting",lip_lighting_analysis(source,person)},{"browMaterials",brow_material_analysis(image,person)},{"irisMaterials",iris_material_analysis(display_image(source.scaled(source.size().scaled(2048,2048,Qt::KeepAspectRatio),Qt::IgnoreAspectRatio,Qt::SmoothTransformation)).convertToFormat(QImage::Format_RGB888),person)},{"teeth",portrait_mask_png(teeth)},{"teethStatus",reason},{"redEyeStatus",redPixels>0?QStringLiteral("已发现闪光红眼候选"):QStringLiteral("未发现可靠的闪光红眼候选")},{"eyeStatus",whitePixels>5?QStringLiteral("已生成眼白建议范围，已排除估计的虹膜与瞳孔；请检查遮挡和反光"):QStringLiteral("眼白范围不够可靠，未自动提亮；可手动补选眼白")},{"blemishes",suggestions},{"eye.scleraSupport",portrait_mask_png(scleraSupport)},{"eye.deRed",portrait_mask_png(scleraRed)},{"eye.white",portrait_mask_png(whites)},{"eye.red",portrait_mask_png(red_eye)},{"eye.circles",portrait_mask_png(under)},{"eye.bags",portrait_mask_png(bags)},{"eyeglassFrame",partial?QString{}:portrait_mask_png(portrait_frame_protection(source,person))}};
+    return {{"hairLighting",hair_lighting_analysis(source,person)},{"cheekLighting",cheek_lighting_analysis(source,person)},{"lipLighting",lip_lighting_analysis(source,person)},{"browMaterials",brow_material_analysis(image,person)},{"irisMaterials",iris_material_analysis(display_image(source.scaled(source.size().scaled(2048,2048,Qt::KeepAspectRatio),Qt::IgnoreAspectRatio,Qt::SmoothTransformation)).convertToFormat(QImage::Format_RGB888),person)},{"teeth",portrait_mask_png(teeth)},{"teethStatus",reason},{"redEyeStatus",redPixels>0?QCoreApplication::translate("Huelith", "已发现闪光红眼候选"):QCoreApplication::translate("Huelith", "未发现可靠的闪光红眼候选")},{"eyeStatus",whitePixels>5?QCoreApplication::translate("Huelith", "已生成眼白建议范围，已排除估计的虹膜与瞳孔；请检查遮挡和反光"):QCoreApplication::translate("Huelith", "眼白范围不够可靠，未自动提亮；可手动补选眼白")},{"blemishes",suggestions},{"eye.scleraSupport",portrait_mask_png(scleraSupport)},{"eye.deRed",portrait_mask_png(scleraRed)},{"eye.white",portrait_mask_png(whites)},{"eye.red",portrait_mask_png(red_eye)},{"eye.circles",portrait_mask_png(under)},{"eye.bags",portrait_mask_png(bags)},{"eyeglassFrame",partial?QString{}:portrait_mask_png(portrait_frame_protection(source,person))}};
 }
 QImage portrait_repair_region(const QImage& source,const QJsonObject& recipe,QRect region,double amount,const std::atomic_bool* cancelled,const QImage& effect_mask) {
     const auto people=recipe["people"].toArray();bool active=false;for(const auto& entry:people){const auto s=entry.toObject()["settings"].toObject();active|=!s["repairs"].toArray().isEmpty();const auto p=s["parameters"].toObject();for(auto i=p.begin();i!=p.end();++i)if((i.key().startsWith("eye.") || i.key().startsWith("teeth.") || i.key()=="repair.conceal") && i.value().toDouble()!=0)active=true;}

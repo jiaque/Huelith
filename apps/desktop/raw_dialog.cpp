@@ -1,24 +1,24 @@
-#include "work_window.h"
 #include "raw_dialog.h"
-#include "huelith/editing/embedded_preview.h"
-#include <QMessageBox>
-#include "export_dialog.h"
-#include "huelith/editing/raw_sidecar.h"
-#include "huelith/editing/dng.h"
 #include "canvas_preferences.h"
+#include "export_dialog.h"
+#include "huelith/editing/dng.h"
+#include "huelith/editing/embedded_preview.h"
 #include "huelith/editing/raw_adjustments.h"
 #include "huelith/editing/raw_recipe.h"
+#include "huelith/editing/raw_sidecar.h"
 #include "raw_geometry_panel.h"
 #include "raw_optics_panel.h"
 #include "raw_preview_view.h"
 #include "raw_white_balance_panel.h"
 #include "tone_panel.h"
 #include "window_header.h"
+#include "work_window.h"
+#include "workspace_layout.h"
+#include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
-#include <QApplication>
 #include <QCryptographicHash>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -38,6 +38,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenuBar>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QProgressBar>
@@ -94,7 +95,7 @@ QString bundled_model() {
 RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     : QDialog(parent), sources_(std::move(sources)), cache_keys_(sources_.size()) {
     if (sources_.empty())
-        throw editing::EditError(QStringLiteral("RAW 会话没有源文件"));
+        throw editing::EditError(QObject::tr("RAW 会话没有源文件"));
     for(auto& source:sources_)
         if(source.raw_recipe.isEmpty() && source.pixels.isNull())
             source.raw_recipe=editing::load_raw_sidecar(source);
@@ -143,7 +144,7 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     commit_timer_ = new QTimer(this);
     commit_timer_->setInterval(30);
     connect(commit_timer_, &QTimer::timeout, this, &RawDialog::finish_commit);
-    setMinimumSize(1040, 680);
+    setMinimumSize(800, 560);
     resize(1440, 900);
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(1, 1, 1, 1);
@@ -276,7 +277,12 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     comparison_views_->addWidget(view_, 1);
     image_column->addLayout(comparison_views_, 1);
     image_column->addWidget(setup_filmstrip(this));
-    body->addLayout(image_column, 1);
+    auto* image_host = new QWidget(this);
+    image_host->setLayout(image_column);
+    auto* workspace_splitter = new QSplitter(Qt::Horizontal, this);
+    workspace_splitter->setObjectName("rawWorkspaceSplitter");
+    workspace_splitter->addWidget(image_host);
+    body->addWidget(workspace_splitter, 1);
     auto* panel = new QWidget(this);
     panel->setObjectName("rawParamPanel");
     panel->setMinimumWidth(320);
@@ -693,10 +699,14 @@ RawDialog::RawDialog(std::vector<editing::Layer> sources, QWidget* parent)
     auto* scroll = new QScrollArea(this);
     scroll->setObjectName("rawEditingScroll");
     scroll->setWidgetResizable(true);
-    scroll->setFixedWidth(360);
+    scroll->setMinimumWidth(280);
     scroll->setWidget(panel);
     sidebar->addWidget(scroll, 1);
-    body->addLayout(sidebar);
+    auto* sidebar_host = new QWidget(this);
+    sidebar_host->setLayout(sidebar);
+    workspace_splitter->addWidget(sidebar_host);
+    configure_inspector_splitter(workspace_splitter, "workspace/raw/inspectorWidth", 360);
+    toolbar->addWidget(workspace_panel_toggle(this, {sidebar_host}));
     auto* rail = new QVBoxLayout;
     rail->setContentsMargins(3, 6, 3, 6);
     auto* group = new QButtonGroup(this);
@@ -1532,7 +1542,7 @@ void RawDialog::start() {
     job_->result = std::async(std::launch::async, [job, bytes, options] {
         QTemporaryFile source;
         if (!source.open() || source.write(bytes) != bytes.size() || !source.flush())
-            throw editing::EditError(QStringLiteral("无法创建 RAW 会话缓存"));
+            throw editing::EditError(QObject::tr("无法创建 RAW 会话缓存"));
         return editing::develop_raw(
             source.fileName(), options, job->cancelled,
             [job](int done, int total) { job->percentage.store(done * 100 / std::max(total, 1)); });
@@ -2285,7 +2295,7 @@ void RawDialog::begin_output(int mode) {
                 break;
             auto& layer=input.layer;
             if(editing::raw_cache_key(layer.raw_source,input.options)!=input.key)
-                throw editing::EditError(QStringLiteral("RAW模型或输入已更改，请更新预览"));
+                throw editing::EditError(QObject::tr("RAW模型或输入已更改，请更新预览"));
             const auto source=input.read();
             layer.pixels = editing::apply_raw_adjustments(
                 editing::blend_raw_denoise(source.image, source.reference,

@@ -14,6 +14,7 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
+#include <QFileDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QKeyEvent>
@@ -25,14 +26,83 @@
 #include <QRadioButton>
 #include <QSettings>
 #include <QSpinBox>
-#include <QTimer>
-#include <QFileDialog>
 #include <QTabletEvent>
+#include <QTimer>
+#include <QToolButton>
 #include <cstring>
 
 using namespace huelith::editing;
 QJsonObject composite_command(const QJsonObject& request);
 QJsonObject brush_command(huelith::desktop::MainWindow* window, const QJsonObject& request) {
+    if (request.value("filterSuite").toBool()) {
+        QImage rgba(64, 48, QImage::Format_RGBA8888);
+        for (int y = 0; y < rgba.height(); ++y)
+            for (int x = 0; x < rgba.width(); ++x)
+                rgba.setPixelColor(x, y,
+                                   QColor((x * 37 + y * 11) % 256, (x * 7 + y * 43) % 256,
+                                          (x * 29 + y * 3) % 256, x < 4 ? 0 : 255));
+        State state;
+        state.size = rgba.size();
+        state.name = "filter regression";
+        Layer source;
+        source.name = "shared source";
+        source.kind = LayerKind::source;
+        source.source_id = QUuid::createUuid();
+        source.pixels = to_working(rgba);
+        state.layers = {source};
+        QJsonArray changed;
+        for (int kind = 1; kind <= 16; ++kind) {
+            Effect effect;
+            effect.filter = kind;
+            effect.filter_radius = 5;
+            effect.filter_angle = 90;
+            state.layers[0].effects = {effect};
+            const auto first = render(state);
+            if (first != render(state))
+                throw EditError("filter replay differs");
+            if (qAlpha(display_image(first).pixel(0, 20)) != 0)
+                throw EditError("filter changed transparent border alpha");
+            if (request.contains("file")) {
+                save_project({state, 1}, request.value("file").toString());
+                if (render(load_project(request.value("file").toString())) != first)
+                    throw EditError("filter project round trip differs");
+            }
+            changed.append(first != source.pixels);
+        }
+        state.layers[0].effects.clear();
+        auto shared = duplicate_layer(state.layers[0]);
+        shared.transform.translate(10, 0);
+        auto independent = duplicate_layer(state.layers[0]);
+        independent.source_id = QUuid::createUuid();
+        state.layers.push_back(shared);
+        state.layers.push_back(independent);
+        Project project(state);
+        project.edit("replace shared source", [&](State& draft) {
+            QImage replacement(rgba.size(), QImage::Format_RGBA8888);
+            replacement.fill(Qt::red);
+            draft.layers[0].pixels = to_working(replacement);
+            synchronize_source(draft, draft.layers[0]);
+        });
+        const auto& edited = project.state();
+        if (edited.layers[0].pixels != edited.layers[1].pixels ||
+            edited.layers[2].pixels != source.pixels ||
+            edited.layers[1].transform != shared.transform)
+            throw EditError("source sharing or instance independence failed");
+        project.undo();
+        if (project.state().layers[1].pixels != source.pixels)
+            throw EditError("source undo failed");
+        project.redo();
+        if (project.state().layers[0].pixels != project.state().layers[1].pixels)
+            throw EditError("source redo failed");
+        return {{"changed", changed}, {"sharedSource", true}};
+    }
+    if (request.contains("abr")) {
+        QJsonArray presets;
+        for (const auto& [name, settings] :
+             import_abr(QByteArray::fromBase64(request.value("abr").toString().toLatin1())))
+            presets.append(QJsonObject{{"name", name}, {"settings", brush_json(settings)}});
+        return {{"presets", presets}};
+    }
     if (request.value("composite").toBool() || request.contains("blendTerms"))
         return composite_command(request);
     if (request.value("retouch").toBool() || request.value("gaussian").toBool()) {
@@ -275,12 +345,19 @@ QJsonObject brush_command(huelith::desktop::MainWindow* window, const QJsonObjec
         BrushStroke stroke;
         stroke.reset(settings, std::uint32_t(request.value("seed").toInt(1)),
                      request.value("zoom").toDouble(1));
+        if (settings.mixer_enabled) {
+            QImage source(image.size(), QImage::Format_ARGB32_Premultiplied);
+            source.fill(QColor(request.value("mixerSource").toString("#0000ff")));
+            stroke.set_mixer_source(source, QColor(request.value("pigment").toString("#ff0000")));
+        }
         QElapsedTimer timer;
         timer.start();
         for (const auto& item : request.value("points").toArray()) {
             const auto point = item.toArray();
             stroke.add(image, {point[0].toDouble(), point[1].toDouble()},
-                       point.size() > 2 ? point[2].toDouble() : 1);
+                       point.size() > 2 ? point[2].toDouble() : 1,
+                       point.size() > 4 ? QPointF(point[3].toDouble(), point[4].toDouble())
+                                        : QPointF());
         }
         for (const auto value : request.value("idle").toArray())
             stroke.idle(image, value.toDouble());
@@ -485,6 +562,10 @@ QJsonObject brush_command(huelith::desktop::MainWindow* window, const QJsonObjec
                 if (action.contains("key")) {
                     const int k = action.value("key").toInt();
                     const auto mods = Qt::KeyboardModifiers(action.value("modifiers").toInt());
+                    // The offscreen platform does not reactivate the owner after a file dialog.
+                    dialog->activateWindow();
+                    view->setFocus();
+                    QApplication::processEvents();
                     QKeyEvent press(QEvent::KeyPress, k, mods),
                         release(QEvent::KeyRelease, k, mods);
                     QApplication::sendEvent(view, &press);
@@ -508,8 +589,9 @@ QJsonObject brush_command(huelith::desktop::MainWindow* window, const QJsonObjec
                     QMouseEvent press(QEvent::MouseButtonPress, a, view->mapToGlobal(a),
                                       Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
                     if(tablet)send_tablet(QEvent::TabletPress,a);else QApplication::sendEvent(view, &press);
-                    for (int i = 1; i <= 12; ++i) {
-                        const auto p = a + (b - a) * (i / 12.);
+                    const int steps = std::clamp(action.value("steps").toInt(12), 1, 128);
+                    for (int i = 1; i <= steps; ++i) {
+                        const auto p = a + (b - a) * (double(i) / steps);
                         QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p), Qt::NoButton,
                                          Qt::LeftButton, Qt::NoModifier);
                         if(tablet)send_tablet(QEvent::TabletMove,p);else QApplication::sendEvent(view, &move);
@@ -521,6 +603,17 @@ QJsonObject brush_command(huelith::desktop::MainWindow* window, const QJsonObjec
                 return;
             }
             ready = true;
+            auto* size_control = dialog->findChild<QDoubleSpinBox*>("liquifySize");
+            content_status.insert("brushSize", size_control->value());
+            content_status.insert("brushSizeMaximum", size_control->maximum());
+            QJsonArray tools;
+            for (int i = 0; i < 11; ++i) {
+                auto* button = dialog->findChild<QToolButton*>(QString("liquifyTool%1").arg(i));
+                tools.append(QJsonObject{{"label", button->text()},
+                                         {"icon", !button->icon().isNull()},
+                                         {"checked", button->isChecked()}});
+            }
+            content_status.insert("tools", tools);
             if (request.contains("capture"))
                 dialog->grab().save(request.value("capture").toString());
             poll.stop();
@@ -540,7 +633,8 @@ QJsonObject brush_command(huelith::desktop::MainWindow* window, const QJsonObjec
         poll.stop();
         if (!found)
             throw EditError("liquify action missing");
-        content_status = {{"ready", ready}, {"ticks", ticks}};
+        content_status.insert("ready", ready);
+        content_status.insert("ticks", ticks);
     }
     if (request.contains("patchDestination"))
         window->findChild<QRadioButton*>("patchDestination")
