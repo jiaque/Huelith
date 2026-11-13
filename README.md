@@ -1,83 +1,112 @@
 # Huelith
 
-Huelith 是一款面向 Windows 的桌面照片编辑器，提供 RAW 显影、图层合成、AI 图像增强和人像精修，可用于摄影后期、人像修饰、产品图片处理与创意合成。
+**English** | [简体中文](README.zh-CN.md)
 
-支持简体中文和英文。安装时选择语言，也可在「首选项 → 界面与工作区 → 界面语言」中更改，重启后生效。
+Huelith is a desktop photo editor for Windows with photo editing tools, layer compositing, RAW development, AI image enhancement, and portrait retouching. Use it for photography post-production, portraits, product images, and creative compositions.
 
-项目原创代码采用 [GNU GPL v3.0（GPL-3.0-only）](LICENSE)。分发基于这些代码的修改版或衍生软件时，须按 GPL-3.0 提供对应源码。第三方代码、模型和素材沿用各自许可。
+The interface supports Simplified Chinese and English. Choose a language during installation, or change it in Preferences under Interface and Workspace. Restart the app to apply the change.
 
-## 功能
+Original project code is licensed under [GNU GPL v3.0 (GPL-3.0-only)](LICENSE). Distributing modified or derivative software based on this code requires providing the corresponding source code under GPL-3.0. Third-party code, models, and assets retain their own licenses.
 
-### RAW 显影
+## Features
 
-- 光线、白平衡、曲线、色彩混合器、校正、光学、细节与局部蒙版调整。
-- 支持 Sony ARW / SR2 / SRF、Canon CRW / CR2 / CR3、Nikon NEF / NRW、Fujifilm RAF（含 X-Trans）、Panasonic RW2、DNG，以及内置 LibRaw 支持的其他格式。
-- 普通调整自动预览，AI RAW 降噪单独执行；降噪支持范围取决于传感器排列与模型。
-- 导出图片，或转存保留受支持 RAW 数据及显影设置的 DNG 副本，保留原片。
+### Photo editing and layers
 
-![RAW 显影：细节调整与降噪](assets/screenshots/raw-develop.png)
+- **Everyday editing:** document size and resolution presets, cropping, rotation, scaling, free transform, perspective adjustments, and mesh warping.
+- **Painting and repair:** brushes, erasers, fills, gradients, clone stamp, healing brush, spot healing, patching, dodge and burn, and a dedicated Liquify window.
+- **Selections and masks:** rectangular and elliptical selections, lasso, magic wand, object selection, selection refinement, layer masks, and clipping masks.
+- **Compositing:** layer groups, blend modes, opacity, layer styles, adjustments, filters, text, shapes, and paths.
+- **Layout and workspace:** artboards, slices, frames, layout templates, rulers, guides, grids, and snapping; document tabs, floating windows, resizable sidebars, and saved workspace layouts.
+- **Color and output previews:** RGB, grayscale, Lab, and CMYK document settings; ICC profile assignment and conversion, soft proofing, gamut warnings, and printing.
+- **Editing preferences:** undo and history, configurable keyboard shortcuts, tool presets, and preferences for cursors, canvas display, units, and caching.
 
-### 图层编辑与图像增强
+![Main window: toolbar, photo canvas, exposure adjustment, layers, and masks](assets/screenshots/main-window.png)
 
-- 图层、蒙版、混合模式、选区、变换、裁剪、绘画和修复。
-- 文字、形状、图层样式、调色与滤镜。
-- 整图或单个图层的 2× / 4× 超分、RGB AI 降噪和深度选区。
-- HDR 合并、全景拼接与景深合成。
-- 超过 6400 万像素的大图分块处理、编辑和保存。
-- `.huelith` 可编辑工程，PNG / JPEG / TIFF 输出、批量导出、EXIF 边框及元数据导出。
+*The main-window screenshot uses a NASA STS-47 onboard crew photo to show photo editing and layer operations in the actual app.*
 
-### 人像精修
+### RAW development
 
-- **面部与身材**：丰盈提拉、面部重塑、身材塑性、瘦脸瘦身、小头和液化。
-- **皮肤修复**：磨皮、祛斑祛痘、祛皱、去油光和局部消除。
-- **美妆与造型**：唇妆、眉妆、眼妆、腮红、修容、染发、发饰、面饰、纹身与美甲。
-- **牙齿与眼部**：牙齿去黄和提亮、眼周修复、眼白去红、闪光红眼修正、美瞳与眼神光。
-- 选人编辑、左右独立调整、手动画笔、范围修正、前后对比与撤销。
+- Adjust lighting, white balance, curves, the color mixer, calibration, optics, detail, and local masks.
+- Open Sony ARW / SR2 / SRF, Canon CRW / CR2 / CR3, Nikon NEF / NRW, Fujifilm RAF (including X-Trans), Panasonic RW2, DNG, and other formats supported by the bundled LibRaw library.
+- Standard adjustments preview automatically. AI RAW denoising runs separately; support depends on the sensor pattern and model.
+- Export an image or save a DNG copy that retains supported RAW data and development settings, keeping the original file intact.
 
-![美妆：按部位折叠设置，选择颜色并调整程度](assets/screenshots/portrait-makeup.png)
+![RAW development: detail adjustments and denoising](assets/screenshots/raw-develop.png)
 
-![眼部精修：美瞳材质、左右独立调整与范围修正](assets/screenshots/portrait-eyes.png)
+### AI enhancement and photo merging
 
-## 源码编译
+- Apply 2× / 4× super-resolution, RGB AI denoising, and depth-based selections to an entire image or a single layer.
+- Merge HDR images, stitch panoramas, and stack focus.
+- Process, edit, and save images larger than 64 megapixels using tiles.
 
-### 环境
+### Portrait retouching
 
-| 依赖 | 要求 |
+- **Face and body:** volume and lifting adjustments, face reshaping, body shaping, face and body slimming, head size adjustments, and liquify tools.
+- **Skin repair:** smoothing, blemish removal, wrinkle reduction, shine reduction, and local object removal.
+- **Makeup and styling:** lips, brows, eyes, blush, contouring, hair color, hair accessories, face decorations, tattoos, and nail art.
+- **Teeth and eyes:** teeth whitening and brightening, eye-area repair, eye-white redness reduction, flash red-eye correction, colored contacts, and catchlights.
+- Select a person to edit, adjust each side independently, paint manually, refine affected areas, compare before and after, and undo changes.
+
+![Makeup: collapsible sections, color selection, and intensity adjustment](assets/screenshots/portrait-makeup.png)
+
+![Eye retouching: contact lens styles, independent side adjustments, and area refinement](assets/screenshots/portrait-eyes.png)
+
+### Generative workflows with ComfyUI
+
+- Connect to a local or remote ComfyUI service that you manage. ComfyUI is not bundled with Huelith.
+- Import workflow JSON and a descriptor file, then configure parameters inside the app for workflows such as inpainting, generative fill, and outpainting.
+- Use the current layer, selected layers, or all layers as input, together with selections and masks from the editor.
+- View progress, cancel tasks, and retrieve final image candidates. Results are added as new layers, with input layers retained for recovery.
+- Check node and model dependencies. Install missing dependencies on the connected ComfyUI service.
+
+### File compatibility and batch processing
+
+- **Projects and images:** editable `.huelith` projects and PNG / JPEG / TIFF export. Batch export supports sizing, naming rules, and presets, with separate export options for layers, artboards, and slices.
+- **PSD / PSB:** import and export supported pixel layers, groups, and masks. Some native properties are imported as rasterized appearances; import and export messages describe compatibility limits.
+- **PDF:** choose pages and resolution, then import rasterized pages for editing.
+- **Automation:** edit and run JSON actions for resizing, exposure, opacity, renaming, conditions, and variables, including batch photo processing.
+- **Metadata and credentials:** EXIF borders, metadata export, and C2PA content credential inspection. Signing requires a configured external signing tool.
+
+## Building from source
+
+### Requirements
+
+| Dependency | Requirement |
 | --- | --- |
-| 系统 | Windows x64 |
-| 编译器 | Visual Studio 2022 C++ 工具链，支持 C++20 |
-| 构建工具 | CMake 3.25+、Ninja |
-| Qt | 6.10.3，MSVC x64，包含 Widgets、Svg、PrintSupport、Network、Concurrent、WebSockets |
-| vcpkg | 依赖及固定基线见 `vcpkg.json` |
-| Python | Python 3，用于准备原生推理 SDK |
-| 推理运行时 | ONNX Runtime DirectML 1.24.4、DirectML 1.15.4 |
+| Operating system | Windows x64 |
+| Compiler | Visual Studio 2022 C++ toolchain with C++20 support |
+| Build tools | CMake 3.25+ and Ninja |
+| Qt | 6.10.3, MSVC x64, including Widgets, Svg, PrintSupport, Network, Concurrent, and WebSockets |
+| vcpkg | See `vcpkg.json` for dependencies and the pinned baseline |
+| Python | Python 3, used to prepare native inference SDKs |
+| Inference runtime | ONNX Runtime DirectML 1.24.4 and DirectML 1.15.4 |
 
-### 准备资源
+### Prepare resources
 
-当前构建还需要仓库外的模型和运行文件。请按 `CMakeLists.txt` 指定的路径准备：
+The current build also requires model and runtime files that are not included in the repository. Place them at the paths specified in `CMakeLists.txt`:
 
-- `research/m3/openseeface/`：`lm_model3_opt.onnx`、`mnv3_detection_opt.onnx`。
-- `research/m3/mediapipe-pose/`：`pose_estimation_mediapipe_2023mar.onnx`。
-- `research/m3/mediapipe-person/`：`person_detection_mediapipe_2023mar.onnx`。
-- `research/m3/selfie-multiclass/`：`selfie_multiclass.onnx`。
-- `research/m2/metadata/runtime/exiftool-13.59_64/`：`exiftool(-k).exe` 和 `exiftool_files/`。
+- `research/m3/openseeface/`: `lm_model3_opt.onnx` and `mnv3_detection_opt.onnx`.
+- `research/m3/mediapipe-pose/`: `pose_estimation_mediapipe_2023mar.onnx`.
+- `research/m3/mediapipe-person/`: `person_detection_mediapipe_2023mar.onnx`.
+- `research/m3/selfie-multiclass/`: `selfie_multiclass.onnx`.
+- `research/m2/metadata/runtime/exiftool-13.59_64/`: `exiftool(-k).exe` and `exiftool_files/`.
 
-这些文件尚未随源码发布，缺少时 CMake 配置会失败。RAW 降噪、超分、RGB 降噪、美甲等功能还需相应模型。完整模型下载与资源准备脚本待补充。
+These files are not yet distributed with the source code. CMake configuration fails if they are missing. RAW denoising, super-resolution, RGB denoising, nail art, and some other features require additional models. A complete model download and resource preparation script is still pending.
 
-### 构建命令
+### Build commands
 
-在 Visual Studio Developer PowerShell 中进入源码根目录，将以下环境变量改为实际安装路径：
+Open the source directory in a Visual Studio Developer PowerShell session and set the following environment variables to your installation paths:
 
 ```powershell
 $env:VCPKG_ROOT = "C:/dev/vcpkg"
 $env:QT_ROOT = "C:/Qt/6.10.3/msvc2022_64"
 
-# 下载并校验 ONNX Runtime / DirectML 原生 SDK
+# Download and verify the native ONNX Runtime / DirectML SDKs
 python tools/setup_raw_sdk.py
 
-# 配置并编译 Release
+# Configure and build Release
 cmake --preset windows-release
 cmake --build --preset windows-release --target Huelith
 ```
 
-程序输出到 `build/windows-release/Huelith.exe`。运行时保留同目录的 DLL、Qt 插件、模型和工具目录。
+The executable is written to `build/windows-release/Huelith.exe`. Keep the accompanying DLLs, Qt plugins, models, and tool directories alongside it when running the app.
